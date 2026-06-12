@@ -26,7 +26,7 @@
 #include "display_producer.h"
 
 #define DEFAULT_SOCKET_PATH "/tmp/display_daemon.sock"
-#define DEFAULT_REFRESH 60000
+#define DEFAULT_REFRESH 120000
 
 static const uint32_t vdrm_formats[] = {
 	DRM_FORMAT_XRGB8888,
@@ -260,6 +260,18 @@ vdrm_fallback_cb(void *data)
 	struct vdrm_backend *b = data;
 
 	weston_log("virtual-drm: consumer disconnected, entering fallback\n");
+
+	if (b->touch_device && b->seat.touch_state &&
+	    b->seat.touch_state->num_tp > 0) {
+		notify_touch_cancel(b->touch_device);
+		weston_touch_set_focus(b->seat.touch_state, NULL);
+		b->seat.touch_state->num_tp = 0;
+	}
+
+	if (b->seat.pointer_state)
+		clear_pointer_focus(&b->seat);
+
+	notify_keyboard_focus_out(&b->seat);
 
 	if (b->buf_ready_source) {
 		wl_event_source_remove(b->buf_ready_source);
