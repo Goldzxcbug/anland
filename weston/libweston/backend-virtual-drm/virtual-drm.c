@@ -271,8 +271,6 @@ vdrm_fallback_cb(void *data)
 	if (b->seat.pointer_state)
 		clear_pointer_focus(&b->seat);
 
-	notify_keyboard_focus_out(&b->seat);
-
 	if (b->buf_ready_source) {
 		wl_event_source_remove(b->buf_ready_source);
 		b->buf_ready_source = NULL;
