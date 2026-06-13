@@ -113,8 +113,14 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
 
     @Override
     public boolean onTouchEvent(MotionEvent event) {
-        if (isMouseEvent(event))
+        if (isMouseEvent(event)) {
+            int cls = event.getClassification();
+            if (cls == CLASSIFICATION_TWO_FINGER_SWIPE)
+                return handleTouchpadScroll(event);
+            if (cls == CLASSIFICATION_MULTI_FINGER_SWIPE || cls == CLASSIFICATION_PINCH)
+                return handleTouchEvent(event);
             return handleMouseEvent(event);
+        }
         return handleTouchEvent(event);
     }
 
@@ -161,6 +167,10 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         return true;
     }
 
+    private static final int CLASSIFICATION_TWO_FINGER_SWIPE = 3;
+    private static final int CLASSIFICATION_MULTI_FINGER_SWIPE = 4;
+    private static final int CLASSIFICATION_PINCH = 5;
+
     private int savedBS = 0;
 
     private static final int[][] BUTTON_MAP = {
@@ -172,10 +182,14 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     };
 
     private boolean isMouseEvent(MotionEvent event) {
-        if ((event.getSource() & InputDevice.SOURCE_MOUSE) == 0)
+        int source = event.getSource();
+        if ((source & InputDevice.SOURCE_TOUCHSCREEN) == InputDevice.SOURCE_TOUCHSCREEN)
+            return false;
+        if ((source & InputDevice.SOURCE_MOUSE) != InputDevice.SOURCE_MOUSE)
             return false;
         int toolType = event.getToolType(event.getActionIndex());
-        return toolType == MotionEvent.TOOL_TYPE_MOUSE;
+        return toolType == MotionEvent.TOOL_TYPE_MOUSE
+            || toolType == MotionEvent.TOOL_TYPE_FINGER;
     }
 
     private boolean handleMouseEvent(MotionEvent event) {
@@ -189,6 +203,18 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                 nativeSendMouseButton(btn[1], isDown);
         }
         savedBS = currentBS;
+        return true;
+    }
+
+    private boolean handleTouchpadScroll(MotionEvent event) {
+        if (event.getActionMasked() == MotionEvent.ACTION_MOVE) {
+            float scrollX = event.getAxisValue(MotionEvent.AXIS_GESTURE_SCROLL_X_DISTANCE);
+            float scrollY = event.getAxisValue(MotionEvent.AXIS_GESTURE_SCROLL_Y_DISTANCE);
+            if (scrollY != 0)
+                nativeSendMouseScroll(0, scrollY);
+            if (scrollX != 0)
+                nativeSendMouseScroll(1, -scrollX);
+        }
         return true;
     }
 
