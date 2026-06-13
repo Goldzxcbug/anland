@@ -142,7 +142,7 @@ dbus-run-session bash -c '
     /usr/lib/aarch64-linux-gnu/libexec/kactivitymanagerd &
     kded5 &
     sleep 2
-    kwin_wayland --no-lockscreen --xwayland plasmashell
+    kwin_wayland --no-lockscreen plasmashell
 ' &
 KDE_PID=\$!
 
