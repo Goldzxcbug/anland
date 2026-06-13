@@ -169,16 +169,16 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private boolean handleMouseEvent(MotionEvent event) {
         int action = event.getActionMasked();
         switch (action) {
-            case MotionEvent.ACTION_DOWN:
             case MotionEvent.ACTION_BUTTON_PRESS:
                 nativeSendMouseMotion(event.getX(), event.getY());
                 nativeSendMouseButton(linuxButton(event.getActionButton()), true);
                 return true;
-            case MotionEvent.ACTION_UP:
             case MotionEvent.ACTION_BUTTON_RELEASE:
                 nativeSendMouseMotion(event.getX(), event.getY());
                 nativeSendMouseButton(linuxButton(event.getActionButton()), false);
                 return true;
+            case MotionEvent.ACTION_DOWN:
+            case MotionEvent.ACTION_UP:
             case MotionEvent.ACTION_MOVE:
                 nativeSendMouseMotion(event.getX(), event.getY());
                 return true;
