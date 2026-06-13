@@ -17,5 +17,5 @@ tar czf "$OUT" \
 echo "Source package: $OUT ($(du -h "$OUT" | cut -f1))"
 echo ""
 echo "Deploy to container:"
-echo "  adb push $OUT /tmp/"
-echo "  adb shell droidspaces -n <name> run bash -c 'cd /tmp && tar xzf weston-vdrm-src.tar.gz && bash build_and_install.sh'"
+echo "  adb push $OUT /path/to/rootfs"
+echo "  adb shell droidspaces -n <name> run bash -c 'cd / && tar xzf weston-vdrm-src.tar.gz && bash build_and_install.sh'"
