@@ -45,7 +45,7 @@ MESON_OPTS=(
     -Dimage-jpeg=true
     -Dimage-webp=true
     -Dshell-desktop=true
-    -Dshell-kiosk=false
+    -Dshell-kiosk=true
     -Dshell-ivi=false
     -Dshell-lua=false
     -Ddemo-clients=false
@@ -87,8 +87,72 @@ exec $PREFIX/bin/weston -Bvirtual-drm-backend.so --disp-sock="\$SOCK" --xwayland
 EOF
 chmod +x "$PREFIX/start.sh"
 
+cat > "$PREFIX/start_kde.sh" << EOF
+#!/bin/bash
+SOCK="\${1:-/run/display.sock}"
+
+export LD_LIBRARY_PATH="$LIBDIR:$LIBDIR/libweston-16:$LIBDIR/weston:\$LD_LIBRARY_PATH"
+export XDG_RUNTIME_DIR="\${XDG_RUNTIME_DIR:-/run/user/\$(id -u)}"
+mkdir -p "\$XDG_RUNTIME_DIR"
+chmod 0700 "\$XDG_RUNTIME_DIR"
+export WESTON_MODULE_MAP="virtual-drm-backend.so=$LIBDIR/libweston-16/virtual-drm-backend.so;gl-renderer.so=$LIBDIR/libweston-16/gl-renderer.so;vulkan-renderer.so=$LIBDIR/libweston-16/vulkan-renderer.so;kiosk-shell.so=$LIBDIR/weston/kiosk-shell.so"
+unset DISPLAY
+unset MESA_LOADER_DRIVER_OVERRIDE
+
+WESTON_PID=
+KDE_PID=
+
+cleanup() {
+    [ -n "\$KDE_PID" ]    && kill "\$KDE_PID"    2>/dev/null
+    [ -n "\$WESTON_PID" ] && kill "\$WESTON_PID" 2>/dev/null
+    sleep 0.3
+    [ -n "\$KDE_PID" ]    && kill -9 "\$KDE_PID"    2>/dev/null
+    [ -n "\$WESTON_PID" ] && kill -9 "\$WESTON_PID" 2>/dev/null
+    wait 2>/dev/null
+}
+trap cleanup EXIT
+
+rm -f "\${XDG_RUNTIME_DIR}"/wayland-* 2>/dev/null
+
+$PREFIX/bin/weston -Bvirtual-drm-backend.so --disp-sock="\$SOCK" --shell=kiosk-shell.so --no-config &
+WESTON_PID=\$!
+
+WESTON_SOCKET=""
+for i in \$(seq 1 10); do
+    sleep 1
+    for wl in "\${XDG_RUNTIME_DIR}"/wayland-*; do
+        [ -S "\$wl" ] || continue
+        WESTON_SOCKET="\$(basename "\$wl")"
+        break 2
+    done
+done
+
+if [ -z "\$WESTON_SOCKET" ]; then
+    echo "ERROR: weston wayland socket not found"
+    wait "\$WESTON_PID"
+    exit 1
+fi
+echo "weston socket: \$WESTON_SOCKET"
+
+export WAYLAND_DISPLAY="\$WESTON_SOCKET"
+export MESA_LOADER_DRIVER_OVERRIDE=zink
+export GALLIUM_DRIVER=zink
+export QT_QPA_PLATFORM=wayland
+dbus-run-session bash -c '
+    /usr/lib/aarch64-linux-gnu/libexec/kactivitymanagerd &
+    kded5 &
+    sleep 2
+    kwin_wayland --no-lockscreen plasmashell
+' &
+KDE_PID=\$!
+
+wait "\$WESTON_PID"
+EOF
+chmod +x "$PREFIX/start_kde.sh"
+
 echo ""
 echo "=== Done ==="
 echo "  Installed to: $PREFIX"
 echo "  Start:        $PREFIX/start.sh [socket-path]"
+echo "  Start KDE:    $PREFIX/start_kde.sh [socket-path]"
 echo "  Default sock: /run/display.sock"
