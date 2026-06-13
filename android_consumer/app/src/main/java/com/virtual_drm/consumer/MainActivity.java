@@ -161,29 +161,32 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         return true;
     }
 
+    private int savedBS = 0;
+
+    private static final int[][] BUTTON_MAP = {
+        {MotionEvent.BUTTON_PRIMARY,   0x110}, // BTN_LEFT
+        {MotionEvent.BUTTON_SECONDARY, 0x111}, // BTN_RIGHT
+        {MotionEvent.BUTTON_TERTIARY,  0x112}, // BTN_MIDDLE
+        {MotionEvent.BUTTON_BACK,      0x113}, // BTN_SIDE
+        {MotionEvent.BUTTON_FORWARD,   0x114}, // BTN_EXTRA
+    };
+
     private boolean isMouseEvent(MotionEvent event) {
-        return event.getSource() == InputDevice.SOURCE_MOUSE ||
-               (event.getSource() & InputDevice.SOURCE_MOUSE) != 0;
+        return (event.getSource() & InputDevice.SOURCE_MOUSE) != 0;
     }
 
     private boolean handleMouseEvent(MotionEvent event) {
-        int action = event.getActionMasked();
-        switch (action) {
-            case MotionEvent.ACTION_BUTTON_PRESS:
-                nativeSendMouseMotion(event.getX(), event.getY());
-                nativeSendMouseButton(linuxButton(event.getActionButton()), true);
-                return true;
-            case MotionEvent.ACTION_BUTTON_RELEASE:
-                nativeSendMouseMotion(event.getX(), event.getY());
-                nativeSendMouseButton(linuxButton(event.getActionButton()), false);
-                return true;
-            case MotionEvent.ACTION_DOWN:
-            case MotionEvent.ACTION_UP:
-            case MotionEvent.ACTION_MOVE:
-                nativeSendMouseMotion(event.getX(), event.getY());
-                return true;
+        nativeSendMouseMotion(event.getX(), event.getY());
+
+        int currentBS = event.getButtonState();
+        for (int[] btn : BUTTON_MAP) {
+            boolean wasDown = (savedBS & btn[0]) != 0;
+            boolean isDown  = (currentBS & btn[0]) != 0;
+            if (wasDown != isDown)
+                nativeSendMouseButton(btn[1], isDown);
         }
-        return false;
+        savedBS = currentBS;
+        return true;
     }
 
     private boolean handleTouchEvent(MotionEvent event) {
@@ -218,14 +221,4 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         return false;
     }
 
-    private int linuxButton(int androidButton) {
-        switch (androidButton) {
-            case MotionEvent.BUTTON_PRIMARY:   return 0x110; // BTN_LEFT
-            case MotionEvent.BUTTON_SECONDARY: return 0x111; // BTN_RIGHT
-            case MotionEvent.BUTTON_TERTIARY:  return 0x112; // BTN_MIDDLE
-            case MotionEvent.BUTTON_BACK:      return 0x113; // BTN_SIDE
-            case MotionEvent.BUTTON_FORWARD:   return 0x114; // BTN_EXTRA
-            default:                           return 0x110;
-        }
-    }
 }
