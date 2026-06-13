@@ -25,6 +25,9 @@ echo "=== Patching wayland-protocols ==="
 cp -v "$SCRIPT_DIR/wayland-protocols-override/staging/color-representation/color-representation-v1.xml" \
     /usr/share/wayland-protocols/staging/color-representation/color-representation-v1.xml
 
+echo "=== Fixing subproject wraps ==="
+rm -f "$SCRIPT_DIR/weston/subprojects/edid-decode.wrap"
+
 echo "=== Configuring weston ==="
 MESON_OPTS=(
     --prefix="$PREFIX"
