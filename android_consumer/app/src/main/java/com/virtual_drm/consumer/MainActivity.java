@@ -172,7 +172,10 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     };
 
     private boolean isMouseEvent(MotionEvent event) {
-        return (event.getSource() & InputDevice.SOURCE_MOUSE) != 0;
+        if ((event.getSource() & InputDevice.SOURCE_MOUSE) == 0)
+            return false;
+        int toolType = event.getToolType(event.getActionIndex());
+        return toolType == MotionEvent.TOOL_TYPE_MOUSE;
     }
 
     private boolean handleMouseEvent(MotionEvent event) {
