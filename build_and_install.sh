@@ -151,7 +151,12 @@ echo "weston socket: \$WESTON_SOCKET"
 export WAYLAND_DISPLAY="\$WESTON_SOCKET"
 export MESA_LOADER_DRIVER_OVERRIDE=zink
 export GALLIUM_DRIVER=zink
+# Force the default Vulkan device so zink picks turnip instead of falling back
+# to llvmpipe. The plain var covers the surfaceless path; the _DRI3 variant
+# (added to this patched mesa) covers Xwayland's GBM/DRI3 glamor path, whose
+# render-node DRM major/minor never matches turnip on the kgsl backend.
 export MESA_VK_DEVICE_SELECT_FORCE_DEFAULT_DEVICE=1
+export MESA_VK_DEVICE_SELECT_FORCE_DEFAULT_DEVICE_DRI3=1
 export QT_QPA_PLATFORM=wayland
 dbus-run-session bash -c '
     /usr/lib/aarch64-linux-gnu/libexec/kactivitymanagerd &
