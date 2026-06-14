@@ -1,0 +1,120 @@
+diff --git a/src/backends/wayland/wayland_backend.cpp b/src/backends/wayland/wayland_backend.cpp
+index 831cde5..1e1805d 100644
+--- a/src/backends/wayland/wayland_backend.cpp
++++ b/src/backends/wayland/wayland_backend.cpp
+@@ -94,7 +94,8 @@ WaylandInputDevice::WaylandInputDevice(KWayland::Client::Pointer *pointer, Wayla
+     connect(pointer, &Pointer::motion, this, [this](const QPointF &relativeToSurface, quint32 time) {
+         WaylandOutput *output = m_seat->backend()->findOutput(m_pointer->enteredSurface());
+         Q_ASSERT(output);
+-        const QPointF absolutePos = output->geometry().topLeft() + relativeToSurface;
++        // surface-local coords are in buffer pixel space; geometry is pixelSize/scale
++        const QPointF absolutePos = output->geometry().topLeft() + relativeToSurface / output->scale();
+         Q_EMIT pointerMotionAbsolute(absolutePos, std::chrono::milliseconds(time), this);
+     });
+     connect(pointer, &Pointer::buttonStateChanged, this, [this](quint32 serial, quint32 time, quint32 button, Pointer::ButtonState nativeState) {
+@@ -172,23 +173,29 @@ WaylandInputDevice::WaylandInputDevice(KWayland::Client::Touch *touch, WaylandSe
+     : m_seat(seat)
+     , m_touch(touch)
+ {
++    // surface-local touch coords are in buffer pixel space; geometry is pixelSize/scale
++    const auto scalePos = [this](const QPointF &pos) -> QPointF {
++        const auto outputs = m_seat->backend()->outputs();
++        if (outputs.isEmpty()) return pos;
++        return pos / static_cast<WaylandOutput*>(outputs.first())->scale();
++    };
+     connect(touch, &Touch::sequenceCanceled, this, [this]() {
+         Q_EMIT touchCanceled(this);
+     });
+     connect(touch, &Touch::frameEnded, this, [this]() {
+         Q_EMIT touchFrame(this);
+     });
+-    connect(touch, &Touch::sequenceStarted, this, [this](TouchPoint *tp) {
+-        Q_EMIT touchDown(tp->id(), tp->position(), std::chrono::milliseconds(tp->time()), this);
++    connect(touch, &Touch::sequenceStarted, this, [this, scalePos](TouchPoint *tp) {
++        Q_EMIT touchDown(tp->id(), scalePos(tp->position()), std::chrono::milliseconds(tp->time()), this);
+     });
+-    connect(touch, &Touch::pointAdded, this, [this](TouchPoint *tp) {
+-        Q_EMIT touchDown(tp->id(), tp->position(), std::chrono::milliseconds(tp->time()), this);
++    connect(touch, &Touch::pointAdded, this, [this, scalePos](TouchPoint *tp) {
++        Q_EMIT touchDown(tp->id(), scalePos(tp->position()), std::chrono::milliseconds(tp->time()), this);
+     });
+     connect(touch, &Touch::pointRemoved, this, [this](TouchPoint *tp) {
+         Q_EMIT touchUp(tp->id(), std::chrono::milliseconds(tp->time()), this);
+     });
+-    connect(touch, &Touch::pointMoved, this, [this](TouchPoint *tp) {
+-        Q_EMIT touchMotion(tp->id(), tp->position(), std::chrono::milliseconds(tp->time()), this);
++    connect(touch, &Touch::pointMoved, this, [this, scalePos](TouchPoint *tp) {
++        Q_EMIT touchMotion(tp->id(), scalePos(tp->position()), std::chrono::milliseconds(tp->time()), this);
+     });
+ }
+
+diff --git a/src/backends/wayland/wayland_egl_backend.cpp b/src/backends/wayland/wayland_egl_backend.cpp
+index c5a715e..1cc612d 100644
+--- a/src/backends/wayland/wayland_egl_backend.cpp
++++ b/src/backends/wayland/wayland_egl_backend.cpp
+@@ -244,8 +244,13 @@ void WaylandEglPrimaryLayer::present()
+ {
+     KWayland::Client::Surface *surface = m_waylandOutput->surface();
+     surface->attachBuffer(m_buffer->buffer());
+-    surface->damage(m_damageJournal.lastDamage());
+-    surface->setScale(std::ceil(m_waylandOutput->scale()));
++    // Damage is tracked in geometry space; scale to buffer pixel space
++    const qreal s = m_waylandOutput->scale();
++    QRegion scaledDamage;
++    for (const QRect &r : m_damageJournal.lastDamage()) {
++        scaledDamage += QRect(r.x() * s, r.y() * s, r.width() * s, r.height() * s);
++    }
++    surface->damage(scaledDamage);
+     surface->commit();
+     Q_EMIT m_waylandOutput->outputChange(m_damageJournal.lastDamage());
+
+diff --git a/src/backends/wayland/wayland_output.cpp b/src/backends/wayland/wayland_output.cpp
+index 9c2c7e6..49ed72f 100644
+--- a/src/backends/wayland/wayland_output.cpp
++++ b/src/backends/wayland/wayland_output.cpp
+@@ -41,7 +41,7 @@ namespace Wayland
+ {
+
+ using namespace KWayland::Client;
+-static const int s_refreshRate = 60000; // TODO: can we get refresh rate data from Wayland host?
++static const int s_refreshRate = 144000; // TODO: can we get refresh rate data from Wayland host?
+
+ WaylandCursor::WaylandCursor(WaylandBackend *backend)
+     : m_backend(backend)
+@@ -101,7 +101,6 @@ void WaylandCursor::sync()
+         m_surface->commit(KWayland::Client::Surface::CommitFlag::None);
+     } else {
+         m_surface->attachBuffer(m_buffer);
+-        m_surface->setScale(std::ceil(m_scale));
+         m_surface->damageBuffer(QRect(0, 0, INT32_MAX, INT32_MAX));
+         m_surface->commit(KWayland::Client::Surface::CommitFlag::None);
+     }
+@@ -326,7 +325,7 @@ void WaylandOutput::handleConfigure(const QSize &size, XdgShellSurface::States s
+ {
+     m_xdgShellSurface->ackConfigure(serial);
+     if (size.width() > 0 && size.height() > 0) {
+-        resize(size * scale());
++        resize(size);
+     }
+
+     m_ready = true;
+diff --git a/src/backends/wayland/wayland_qpainter_backend.cpp b/src/backends/wayland/wayland_qpainter_backend.cpp
+index 2555665..75801f8 100644
+--- a/src/backends/wayland/wayland_qpainter_backend.cpp
++++ b/src/backends/wayland/wayland_qpainter_backend.cpp
+@@ -70,8 +70,13 @@ void WaylandQPainterPrimaryLayer::present()
+
+     auto s = m_waylandOutput->surface();
+     s->attachBuffer(m_back->buffer);
+-    s->damage(m_damageJournal.lastDamage());
+-    s->setScale(std::ceil(m_waylandOutput->scale()));
++    // Damage is tracked in geometry space; scale to buffer pixel space
++    const qreal scale = m_waylandOutput->scale();
++    QRegion scaledDamage;
++    for (const QRect &r : m_damageJournal.lastDamage()) {
++        scaledDamage += QRect(r.x() * scale, r.y() * scale, r.width() * scale, r.height() * scale);
++    }
++    s->damage(scaledDamage);
+     s->commit();
+ }
+

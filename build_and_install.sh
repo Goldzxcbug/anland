@@ -126,13 +126,20 @@ cleanup() {
 }
 trap cleanup EXIT
 
+if ! command -v startplasma-wayland >/dev/null 2>&1; then
+    echo "ERROR: startplasma-wayland not found."
+    echo "Install the standard Plasma Wayland session launcher:"
+    echo "  sudo apt-get install -y plasma-workspace-wayland"
+    exit 1
+fi
+
 rm -f "\${XDG_RUNTIME_DIR}"/wayland-* 2>/dev/null
 
 $PREFIX/bin/weston -Banland-backend.so --disp-sock="\$SOCK" --shell=kiosk-shell.so --no-config &
 WESTON_PID=\$!
 
 WESTON_SOCKET=""
-for i in \$(seq 1 10); do
+for i in \$(seq 1 300); do
     sleep 1
     for wl in "\${XDG_RUNTIME_DIR}"/wayland-*; do
         [ -S "\$wl" ] || continue
@@ -158,12 +165,12 @@ export GALLIUM_DRIVER=zink
 export MESA_VK_DEVICE_SELECT_FORCE_DEFAULT_DEVICE=1
 export MESA_VK_DEVICE_SELECT_FORCE_DEFAULT_DEVICE_DRI3=1
 export QT_QPA_PLATFORM=wayland
-dbus-run-session bash -c '
-    /usr/lib/aarch64-linux-gnu/libexec/kactivitymanagerd &
-    kded5 &
-    sleep 2
-    kwin_wayland --xwayland --no-lockscreen plasmashell
-' &
+
+# Standard Plasma startup. With WAYLAND_DISPLAY pointing at weston,
+# startplasma-wayland brings up kwin_wayland nested in weston (--wayland-fd),
+# spawns Xwayland, plasmashell and the full set of KDE daemons itself — no
+# manual wiring of kded/kactivitymanagerd/kwin needed.
+dbus-run-session startplasma-wayland &
 KDE_PID=\$!
 
 wait "\$WESTON_PID"
