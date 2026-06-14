@@ -85,6 +85,12 @@ export LD_LIBRARY_PATH="$LIBDIR:$LIBDIR/libweston-16:$LIBDIR/weston:\$LD_LIBRARY
 export XDG_RUNTIME_DIR="\${XDG_RUNTIME_DIR:-/tmp}"
 export WESTON_MODULE_MAP="anland-backend.so=$LIBDIR/libweston-16/anland-backend.so;gl-renderer.so=$LIBDIR/libweston-16/gl-renderer.so;vulkan-renderer.so=$LIBDIR/libweston-16/vulkan-renderer.so;desktop-shell.so=$LIBDIR/weston/desktop-shell.so;xwayland.so=$LIBDIR/libweston-16/xwayland.so"
 
+# Route GL through zink-on-turnip and force the default Vulkan device so it
+# doesn't fall back to llvmpipe (software) on the kgsl backend. Needed for
+# Xwayland / X11 clients to get hardware acceleration.
+export MESA_LOADER_DRIVER_OVERRIDE=zink
+export MESA_VK_DEVICE_SELECT_FORCE_DEFAULT_DEVICE=1
+
 shift 2>/dev/null || true
 exec $PREFIX/bin/weston -Banland-backend.so --disp-sock="\$SOCK" --xwayland "\$@"
 EOF
@@ -98,9 +104,14 @@ export LD_LIBRARY_PATH="$LIBDIR:$LIBDIR/libweston-16:$LIBDIR/weston:\$LD_LIBRARY
 export XDG_RUNTIME_DIR="\${XDG_RUNTIME_DIR:-/run/user/\$(id -u)}"
 mkdir -p "\$XDG_RUNTIME_DIR"
 chmod 0700 "\$XDG_RUNTIME_DIR"
-export WESTON_MODULE_MAP="anland-backend.so=$LIBDIR/libweston-16/anland-backend.so;gl-renderer.so=$LIBDIR/libweston-16/gl-renderer.so;vulkan-renderer.so=$LIBDIR/libweston-16/vulkan-renderer.so;kiosk-shell.so=$LIBDIR/weston/kiosk-shell.so"
+export WESTON_MODULE_MAP="anland-backend.so=$LIBDIR/libweston-16/anland-backend.so;gl-renderer.so=$LIBDIR/libweston-16/gl-renderer.so;vulkan-renderer.so=$LIBDIR/libweston-16/vulkan-renderer.so;xwayland.so=$LIBDIR/libweston-16/xwayland.so;kiosk-shell.so=$LIBDIR/weston/kiosk-shell.so"
 unset DISPLAY
-unset MESA_LOADER_DRIVER_OVERRIDE
+
+# Route GL through zink-on-turnip and force the default Vulkan device so it
+# doesn't fall back to llvmpipe (software) on the kgsl backend. Needed for
+# Xwayland / X11 clients to get hardware acceleration.
+export MESA_LOADER_DRIVER_OVERRIDE=zink
+export MESA_VK_DEVICE_SELECT_FORCE_DEFAULT_DEVICE=1
 
 WESTON_PID=
 KDE_PID=
@@ -140,12 +151,13 @@ echo "weston socket: \$WESTON_SOCKET"
 export WAYLAND_DISPLAY="\$WESTON_SOCKET"
 export MESA_LOADER_DRIVER_OVERRIDE=zink
 export GALLIUM_DRIVER=zink
+export MESA_VK_DEVICE_SELECT_FORCE_DEFAULT_DEVICE=1
 export QT_QPA_PLATFORM=wayland
 dbus-run-session bash -c '
     /usr/lib/aarch64-linux-gnu/libexec/kactivitymanagerd &
     kded5 &
     sleep 2
-    kwin_wayland --no-lockscreen plasmashell
+    kwin_wayland --xwayland --no-lockscreen plasmashell
 ' &
 KDE_PID=\$!
 
