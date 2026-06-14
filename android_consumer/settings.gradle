@@ -4,5 +4,5 @@ pluginManagement {
         mavenCentral()
     }
 }
-rootProject.name = "VirtualDRMConsumer"
+rootProject.name = "AnlandConsumer"
 include ':app'

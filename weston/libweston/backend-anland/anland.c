@@ -10,7 +10,7 @@
 #include <linux/input.h>
 
 #include <libweston/libweston.h>
-#include <libweston/backend-virtual-drm.h>
+#include <libweston/backend-anland.h>
 #include "shared/helpers.h"
 #include "pixel-formats.h"
 #include "renderer-gl/gl-renderer.h"
@@ -28,14 +28,14 @@
 #define DEFAULT_SOCKET_PATH "/tmp/display_daemon.sock"
 #define DEFAULT_REFRESH 120000
 
-static const uint32_t vdrm_formats[] = {
+static const uint32_t anland_formats[] = {
 	DRM_FORMAT_XRGB8888,
 	DRM_FORMAT_ARGB8888,
 	DRM_FORMAT_ABGR8888,
 	DRM_FORMAT_XBGR8888,
 };
 
-struct vdrm_backend {
+struct anland_backend {
 	struct weston_backend base;
 	struct weston_compositor *compositor;
 
@@ -59,13 +59,13 @@ struct vdrm_backend {
 	unsigned int formats_count;
 };
 
-struct vdrm_head {
+struct anland_head {
 	struct weston_head base;
 };
 
-struct vdrm_output {
+struct anland_output {
 	struct weston_output base;
-	struct vdrm_backend *backend;
+	struct anland_backend *backend;
 
 	struct weston_mode mode;
 	struct wl_event_source *finish_frame_timer;
@@ -77,35 +77,35 @@ struct vdrm_output {
 };
 
 static void
-vdrm_destroy(struct weston_backend *backend);
+anland_destroy(struct weston_backend *backend);
 
-static inline struct vdrm_head *
-to_vdrm_head(struct weston_head *base)
+static inline struct anland_head *
+to_anland_head(struct weston_head *base)
 {
-	if (base->backend->destroy != vdrm_destroy)
+	if (base->backend->destroy != anland_destroy)
 		return NULL;
-	return container_of(base, struct vdrm_head, base);
+	return container_of(base, struct anland_head, base);
 }
 
 static void
-vdrm_output_destroy(struct weston_output *base);
+anland_output_destroy(struct weston_output *base);
 
-static inline struct vdrm_output *
-to_vdrm_output(struct weston_output *base)
+static inline struct anland_output *
+to_anland_output(struct weston_output *base)
 {
-	if (base->destroy != vdrm_output_destroy)
+	if (base->destroy != anland_output_destroy)
 		return NULL;
-	return container_of(base, struct vdrm_output, base);
+	return container_of(base, struct anland_output, base);
 }
 
-static inline struct vdrm_backend *
-to_vdrm_backend(struct weston_backend *base)
+static inline struct anland_backend *
+to_anland_backend(struct weston_backend *base)
 {
-	return container_of(base, struct vdrm_backend, base);
+	return container_of(base, struct anland_backend, base);
 }
 
 static void
-vdrm_handle_pointer_motion(struct vdrm_backend *b, const struct InputEvent *ev)
+anland_handle_pointer_motion(struct anland_backend *b, const struct InputEvent *ev)
 {
 	struct timespec ts;
 	struct weston_pointer_motion_event motion;
@@ -115,7 +115,7 @@ vdrm_handle_pointer_motion(struct vdrm_backend *b, const struct InputEvent *ev)
 	weston_compositor_get_time(&ts);
 
 	output = weston_compositor_find_output_by_name(b->compositor,
-						       "virtual-drm-1");
+						       "anland-1");
 	if (!output)
 		return;
 
@@ -131,7 +131,7 @@ vdrm_handle_pointer_motion(struct vdrm_backend *b, const struct InputEvent *ev)
 }
 
 static void
-vdrm_handle_pointer_button(struct vdrm_backend *b, const struct InputEvent *ev)
+anland_handle_pointer_button(struct anland_backend *b, const struct InputEvent *ev)
 {
 	struct timespec ts;
 	struct weston_pointer_button_event btn;
@@ -147,7 +147,7 @@ vdrm_handle_pointer_button(struct vdrm_backend *b, const struct InputEvent *ev)
 }
 
 static void
-vdrm_handle_pointer_axis(struct vdrm_backend *b, const struct InputEvent *ev)
+anland_handle_pointer_axis(struct anland_backend *b, const struct InputEvent *ev)
 {
 	struct timespec ts;
 	struct weston_pointer_axis_event axis;
@@ -163,7 +163,7 @@ vdrm_handle_pointer_axis(struct vdrm_backend *b, const struct InputEvent *ev)
 }
 
 static void
-vdrm_handle_key(struct vdrm_backend *b, const struct InputEvent *ev)
+anland_handle_key(struct anland_backend *b, const struct InputEvent *ev)
 {
 	struct timespec ts;
 	struct weston_key_event key;
@@ -179,7 +179,7 @@ vdrm_handle_key(struct vdrm_backend *b, const struct InputEvent *ev)
 }
 
 static void
-vdrm_handle_touch(struct vdrm_backend *b, const struct InputEvent *ev)
+anland_handle_touch(struct anland_backend *b, const struct InputEvent *ev)
 {
 	struct timespec ts;
 	struct weston_touch_event touch;
@@ -192,7 +192,7 @@ vdrm_handle_touch(struct vdrm_backend *b, const struct InputEvent *ev)
 	weston_compositor_get_time(&ts);
 
 	output = weston_compositor_find_output_by_name(b->compositor,
-						       "virtual-drm-1");
+						       "anland-1");
 	if (!output)
 		return;
 
@@ -220,46 +220,46 @@ vdrm_handle_touch(struct vdrm_backend *b, const struct InputEvent *ev)
 }
 
 static void
-vdrm_handle_touch_frame(struct vdrm_backend *b)
+anland_handle_touch_frame(struct anland_backend *b)
 {
 	if (b->touch_device)
 		notify_touch_frame(b->touch_device);
 }
 
 static void
-vdrm_process_input_event(struct vdrm_backend *b, const struct InputEvent *ev)
+anland_process_input_event(struct anland_backend *b, const struct InputEvent *ev)
 {
 	switch (ev->type) {
 	case INPUT_TYPE_POINTER_MOTION:
-		vdrm_handle_pointer_motion(b, ev);
+		anland_handle_pointer_motion(b, ev);
 		break;
 	case INPUT_TYPE_POINTER_BUTTON:
-		vdrm_handle_pointer_button(b, ev);
+		anland_handle_pointer_button(b, ev);
 		break;
 	case INPUT_TYPE_POINTER_AXIS:
-		vdrm_handle_pointer_axis(b, ev);
+		anland_handle_pointer_axis(b, ev);
 		break;
 	case INPUT_TYPE_KEY:
-		vdrm_handle_key(b, ev);
+		anland_handle_key(b, ev);
 		break;
 	case INPUT_TYPE_TOUCH:
-		vdrm_handle_touch(b, ev);
+		anland_handle_touch(b, ev);
 		break;
 	case INPUT_TYPE_TOUCH_FRAME:
-		vdrm_handle_touch_frame(b);
+		anland_handle_touch_frame(b);
 		break;
 	}
 }
 
 static int
-vdrm_buf_ready_handler(int fd, uint32_t mask, void *data);
+anland_buf_ready_handler(int fd, uint32_t mask, void *data);
 
 static void
-vdrm_fallback_cb(void *data)
+anland_fallback_cb(void *data)
 {
-	struct vdrm_backend *b = data;
+	struct anland_backend *b = data;
 
-	weston_log("virtual-drm: consumer disconnected, entering fallback\n");
+	weston_log("anland: consumer disconnected, entering fallback\n");
 
 	if (b->touch_device && b->seat.touch_state &&
 	    b->seat.touch_state->num_tp > 0) {
@@ -281,12 +281,12 @@ vdrm_fallback_cb(void *data)
 }
 
 static void
-vdrm_drop_renderbuffers(struct vdrm_backend *b)
+anland_drop_renderbuffers(struct anland_backend *b)
 {
 	struct weston_output *output;
 
 	wl_list_for_each(output, &b->compositor->output_list, link) {
-		struct vdrm_output *vout = to_vdrm_output(output);
+		struct anland_output *vout = to_anland_output(output);
 		if (vout) {
 			memset(vout->renderbuffers, 0,
 			       sizeof(vout->renderbuffers));
@@ -297,12 +297,12 @@ vdrm_drop_renderbuffers(struct vdrm_backend *b)
 }
 
 static void
-vdrm_try_reconnect(struct vdrm_backend *b)
+anland_try_reconnect(struct anland_backend *b)
 {
 	if (try_reconnect(b->display) < 0)
 		return;
 
-	weston_log("virtual-drm: consumer reconnected\n");
+	weston_log("anland: consumer reconnected\n");
 	b->in_fallback = false;
 
 	int buf_ready_fd = get_buffer_ready_fd(b->display);
@@ -311,22 +311,22 @@ vdrm_try_reconnect(struct vdrm_backend *b)
 			wl_display_get_event_loop(b->compositor->wl_display);
 		b->buf_ready_source = wl_event_loop_add_fd(loop, buf_ready_fd,
 							    WL_EVENT_READABLE,
-							    vdrm_buf_ready_handler, b);
+							    anland_buf_ready_handler, b);
 	}
 }
 
 static int
-vdrm_input_timer_handler(void *data)
+anland_input_timer_handler(void *data)
 {
-	struct vdrm_backend *b = data;
+	struct anland_backend *b = data;
 	struct InputEvent ev;
 
 	if (b->in_fallback) {
-		vdrm_drop_renderbuffers(b);
-		vdrm_try_reconnect(b);
+		anland_drop_renderbuffers(b);
+		anland_try_reconnect(b);
 	} else {
 		while (poll_input_event(b->display, &ev, 0) > 0)
-			vdrm_process_input_event(b, &ev);
+			anland_process_input_event(b, &ev);
 	}
 
 	if (b->input_source)
@@ -336,7 +336,7 @@ vdrm_input_timer_handler(void *data)
 }
 
 static int
-vdrm_output_start_repaint_loop(struct weston_output *output)
+anland_output_start_repaint_loop(struct weston_output *output)
 {
 	struct timespec ts;
 
@@ -349,7 +349,7 @@ vdrm_output_start_repaint_loop(struct weston_output *output)
 static int
 finish_frame_handler(void *data)
 {
-	struct vdrm_output *output = data;
+	struct anland_output *output = data;
 
 	weston_output_finish_frame_from_timer(&output->base);
 
@@ -371,9 +371,9 @@ protocol_format_to_drm(uint32_t fmt)
 }
 
 static int
-vdrm_output_import_dmabufs(struct vdrm_output *output)
+anland_output_import_dmabufs(struct anland_output *output)
 {
-	struct vdrm_backend *b = output->backend;
+	struct anland_backend *b = output->backend;
 	struct weston_renderer *renderer = b->compositor->renderer;
 	int count = get_buf_count(b->display);
 	const struct weston_mode *mode = output->base.current_mode;
@@ -401,7 +401,7 @@ vdrm_output_import_dmabufs(struct vdrm_output *output)
 		output->dmabuf_mem_arr[i].attributes = attrs;
 		output->dmabuf_mem_arr[i].destroy = NULL;
 
-		weston_log("virtual-drm: importing buf[%d] fd=%d %dx%d stride=%u fmt=0x%x mod=0x%lx\n",
+		weston_log("anland: importing buf[%d] fd=%d %dx%d stride=%u fmt=0x%x mod=0x%lx\n",
 			   i, fd, mode->width, mode->height,
 			   info.stride, attrs->format,
 			   (unsigned long)info.modifier);
@@ -411,7 +411,7 @@ vdrm_output_import_dmabufs(struct vdrm_output *output)
 							     &output->dmabuf_mem_arr[i],
 							     NULL, NULL);
 		if (!output->renderbuffers[i]) {
-			weston_log("virtual-drm: failed to create renderbuffer[%d]\n", i);
+			weston_log("anland: failed to create renderbuffer[%d]\n", i);
 			return -1;
 		}
 	}
@@ -420,9 +420,9 @@ vdrm_output_import_dmabufs(struct vdrm_output *output)
 }
 
 static int
-vdrm_buf_ready_handler(int fd, uint32_t mask, void *data)
+anland_buf_ready_handler(int fd, uint32_t mask, void *data)
 {
-	struct vdrm_backend *b = data;
+	struct anland_backend *b = data;
 
 	if (!b->dmabuf_received) {
 		wait_buffer_async(b->display);
@@ -433,10 +433,10 @@ vdrm_buf_ready_handler(int fd, uint32_t mask, void *data)
 
 		struct weston_output *output;
 		wl_list_for_each(output, &b->compositor->output_list, link) {
-			struct vdrm_output *vout = to_vdrm_output(output);
+			struct anland_output *vout = to_anland_output(output);
 			if (vout) {
-				if (vdrm_output_import_dmabufs(vout) < 0)
-					weston_log("virtual-drm: dmabuf import failed\n");
+				if (anland_output_import_dmabufs(vout) < 0)
+					weston_log("anland: dmabuf import failed\n");
 				break;
 			}
 		}
@@ -449,7 +449,7 @@ vdrm_buf_ready_handler(int fd, uint32_t mask, void *data)
 
 	struct weston_output *output;
 	wl_list_for_each(output, &b->compositor->output_list, link) {
-		if (to_vdrm_output(output)) {
+		if (to_anland_output(output)) {
 			weston_output_schedule_repaint(output);
 			break;
 		}
@@ -461,7 +461,7 @@ vdrm_buf_ready_handler(int fd, uint32_t mask, void *data)
 static void
 finish_frame_idle(void *data)
 {
-	struct vdrm_output *output = data;
+	struct anland_output *output = data;
 	struct timespec ts;
 
 	weston_compositor_read_presentation_clock(output->base.compositor, &ts);
@@ -469,10 +469,10 @@ finish_frame_idle(void *data)
 }
 
 static int
-vdrm_output_repaint(struct weston_output *output_base)
+anland_output_repaint(struct weston_output *output_base)
 {
-	struct vdrm_output *output = to_vdrm_output(output_base);
-	struct vdrm_backend *b = output->backend;
+	struct anland_output *output = to_anland_output(output_base);
+	struct anland_backend *b = output->backend;
 	struct weston_compositor *ec = output->base.compositor;
 	pixman_region32_t damage;
 
@@ -511,7 +511,7 @@ vdrm_output_repaint(struct weston_output *output_base)
 }
 
 static void
-vdrm_output_disable_renderer(struct vdrm_output *output)
+anland_output_disable_renderer(struct anland_output *output)
 {
 	struct weston_renderer *renderer = output->base.compositor->renderer;
 
@@ -536,9 +536,9 @@ vdrm_output_disable_renderer(struct vdrm_output *output)
 }
 
 static int
-vdrm_output_disable(struct weston_output *base)
+anland_output_disable(struct weston_output *base)
 {
-	struct vdrm_output *output = to_vdrm_output(base);
+	struct anland_output *output = to_anland_output(base);
 
 	assert(output);
 
@@ -546,27 +546,27 @@ vdrm_output_disable(struct weston_output *base)
 		return 0;
 
 	wl_event_source_remove(output->finish_frame_timer);
-	vdrm_output_disable_renderer(output);
+	anland_output_disable_renderer(output);
 
 	return 0;
 }
 
 static void
-vdrm_output_destroy(struct weston_output *base)
+anland_output_destroy(struct weston_output *base)
 {
-	struct vdrm_output *output = to_vdrm_output(base);
+	struct anland_output *output = to_anland_output(base);
 
 	assert(output);
 
-	vdrm_output_disable(&output->base);
+	anland_output_disable(&output->base);
 	weston_output_release(&output->base);
 	free(output);
 }
 
 static int
-vdrm_output_enable_renderer(struct vdrm_output *output)
+anland_output_enable_renderer(struct anland_output *output)
 {
-	struct vdrm_backend *b = output->backend;
+	struct anland_backend *b = output->backend;
 	const struct weston_renderer *renderer = b->compositor->renderer;
 	const struct weston_mode *mode = output->base.current_mode;
 
@@ -578,7 +578,7 @@ vdrm_output_enable_renderer(struct vdrm_output *output)
 				  .width = mode->width, .height = mode->height },
 		};
 		if (renderer->gl->output_fbo_create(&output->base, &gl_opts) < 0) {
-			weston_log("virtual-drm: failed to create GL FBO output\n");
+			weston_log("anland: failed to create GL FBO output\n");
 			return -1;
 		}
 		break;
@@ -590,13 +590,13 @@ vdrm_output_enable_renderer(struct vdrm_output *output)
 				  .width = mode->width, .height = mode->height },
 		};
 		if (renderer->vulkan->output_surfaceless_create(&output->base, &vk_opts) < 0) {
-			weston_log("virtual-drm: failed to create Vulkan surfaceless output\n");
+			weston_log("anland: failed to create Vulkan surfaceless output\n");
 			return -1;
 		}
 		break;
 	}
 	default:
-		weston_log("virtual-drm: unsupported renderer type %d\n", renderer->type);
+		weston_log("anland: unsupported renderer type %d\n", renderer->type);
 		return -1;
 	}
 
@@ -604,9 +604,9 @@ vdrm_output_enable_renderer(struct vdrm_output *output)
 }
 
 static int
-vdrm_output_enable(struct weston_output *base)
+anland_output_enable(struct weston_output *base)
 {
-	struct vdrm_output *output = to_vdrm_output(base);
+	struct anland_output *output = to_anland_output(base);
 	struct wl_event_loop *loop;
 
 	assert(output);
@@ -616,11 +616,11 @@ vdrm_output_enable(struct weston_output *base)
 		wl_event_loop_add_timer(loop, finish_frame_handler, output);
 
 	if (!output->finish_frame_timer) {
-		weston_log("virtual-drm: failed to add finish frame timer\n");
+		weston_log("anland: failed to add finish frame timer\n");
 		return -1;
 	}
 
-	if (vdrm_output_enable_renderer(output) < 0) {
+	if (anland_output_enable_renderer(output) < 0) {
 		wl_event_source_remove(output->finish_frame_timer);
 		return -1;
 	}
@@ -629,9 +629,9 @@ vdrm_output_enable(struct weston_output *base)
 }
 
 static int
-vdrm_output_set_size(struct weston_output *base, int width, int height)
+anland_output_set_size(struct weston_output *base, int width, int height)
 {
-	struct vdrm_output *output = to_vdrm_output(base);
+	struct anland_output *output = to_anland_output(base);
 	struct weston_head *head;
 
 	if (!output)
@@ -646,7 +646,7 @@ vdrm_output_set_size(struct weston_output *base, int width, int height)
 	assert(output->base.current_scale);
 
 	wl_list_for_each(head, &output->base.head_list, output_link) {
-		weston_head_set_monitor_strings(head, "virtual-drm", "vdrm",
+		weston_head_set_monitor_strings(head, "anland", "anland",
 						NULL);
 		weston_head_set_physical_size(head, width, height);
 	}
@@ -661,8 +661,8 @@ vdrm_output_set_size(struct weston_output *base, int width, int height)
 
 	output->base.current_mode = &output->mode;
 
-	output->base.start_repaint_loop = vdrm_output_start_repaint_loop;
-	output->base.repaint = vdrm_output_repaint;
+	output->base.start_repaint_loop = anland_output_start_repaint_loop;
+	output->base.repaint = anland_output_repaint;
 	output->base.assign_planes = NULL;
 	output->base.set_backlight = NULL;
 	output->base.set_dpms = NULL;
@@ -672,10 +672,10 @@ vdrm_output_set_size(struct weston_output *base, int width, int height)
 }
 
 static struct weston_output *
-vdrm_output_create(struct weston_backend *backend, const char *name)
+anland_output_create(struct weston_backend *backend, const char *name)
 {
-	struct vdrm_backend *b = to_vdrm_backend(backend);
-	struct vdrm_output *output;
+	struct anland_backend *b = to_anland_backend(backend);
+	struct anland_output *output;
 
 	assert(name);
 
@@ -685,9 +685,9 @@ vdrm_output_create(struct weston_backend *backend, const char *name)
 
 	weston_output_init(&output->base, b->compositor, name);
 
-	output->base.destroy = vdrm_output_destroy;
-	output->base.disable = vdrm_output_disable;
-	output->base.enable = vdrm_output_enable;
+	output->base.destroy = anland_output_destroy;
+	output->base.disable = anland_output_disable;
+	output->base.enable = anland_output_enable;
 	output->base.attach_head = NULL;
 
 	output->backend = b;
@@ -698,10 +698,10 @@ vdrm_output_create(struct weston_backend *backend, const char *name)
 }
 
 static int
-vdrm_head_create(struct weston_backend *base, const char *name)
+anland_head_create(struct weston_backend *base, const char *name)
 {
-	struct vdrm_backend *backend = to_vdrm_backend(base);
-	struct vdrm_head *head;
+	struct anland_backend *backend = to_anland_backend(base);
+	struct anland_head *head;
 
 	assert(name);
 
@@ -723,9 +723,9 @@ vdrm_head_create(struct weston_backend *base, const char *name)
 }
 
 static void
-vdrm_head_destroy(struct weston_head *base)
+anland_head_destroy(struct weston_head *base)
 {
-	struct vdrm_head *head = to_vdrm_head(base);
+	struct anland_head *head = to_anland_head(base);
 
 	assert(head);
 
@@ -734,7 +734,7 @@ vdrm_head_destroy(struct weston_head *base)
 }
 
 static bool
-vdrm_input_init(struct vdrm_backend *b)
+anland_input_init(struct anland_backend *b)
 {
 	weston_seat_init(&b->seat, b->compositor, "default");
 	weston_seat_init_pointer(&b->seat);
@@ -745,13 +745,13 @@ vdrm_input_init(struct vdrm_backend *b)
 	weston_seat_init_touch(&b->seat);
 
 	b->touch_device = weston_touch_create_touch_device(
-		b->seat.touch_state, "virtual-drm-touch", NULL, NULL, NULL);
+		b->seat.touch_state, "anland-touch", NULL, NULL, NULL);
 
 	return true;
 }
 
 static void
-vdrm_input_destroy(struct vdrm_backend *b)
+anland_input_destroy(struct anland_backend *b)
 {
 	if (b->touch_device) {
 		weston_touch_device_destroy(b->touch_device);
@@ -761,9 +761,9 @@ vdrm_input_destroy(struct vdrm_backend *b)
 }
 
 static void
-vdrm_destroy(struct weston_backend *backend)
+anland_destroy(struct weston_backend *backend)
 {
-	struct vdrm_backend *b = to_vdrm_backend(backend);
+	struct anland_backend *b = to_anland_backend(backend);
 	struct weston_compositor *ec = b->compositor;
 	struct weston_head *base, *next;
 
@@ -775,11 +775,11 @@ vdrm_destroy(struct weston_backend *backend)
 		wl_event_source_remove(b->input_source);
 
 	wl_list_for_each_safe(base, next, &ec->head_list, compositor_link) {
-		if (to_vdrm_head(base))
-			vdrm_head_destroy(base);
+		if (to_anland_head(base))
+			anland_head_destroy(base);
 	}
 
-	vdrm_input_destroy(b);
+	anland_input_destroy(b);
 
 	if (b->display)
 		disconnect(b->display);
@@ -789,19 +789,19 @@ vdrm_destroy(struct weston_backend *backend)
 	free(b);
 }
 
-#define WESTON_WINDOWED_OUTPUT_API_NAME_VIRTUAL_DRM \
-	"weston_windowed_output_api_virtual_drm_v2"
+#define WESTON_WINDOWED_OUTPUT_API_NAME_ANLAND \
+	"weston_windowed_output_api_anland_v2"
 
 static const struct weston_windowed_output_api api = {
-	vdrm_output_set_size,
-	vdrm_head_create,
+	anland_output_set_size,
+	anland_head_create,
 };
 
-static struct vdrm_backend *
-vdrm_backend_create(struct weston_compositor *compositor,
-		    struct weston_virtual_drm_backend_config *config)
+static struct anland_backend *
+anland_backend_create(struct weston_compositor *compositor,
+		    struct weston_anland_backend_config *config)
 {
-	struct vdrm_backend *b;
+	struct anland_backend *b;
 	int ret;
 
 	b = zalloc(sizeof *b);
@@ -818,22 +818,22 @@ vdrm_backend_create(struct weston_compositor *compositor,
 				config->socket_path : DEFAULT_SOCKET_PATH);
 	b->refresh = config->refresh > 0 ? config->refresh : DEFAULT_REFRESH;
 
-	b->formats_count = ARRAY_LENGTH(vdrm_formats);
-	b->formats = pixel_format_get_array(vdrm_formats, b->formats_count);
+	b->formats_count = ARRAY_LENGTH(anland_formats);
+	b->formats = pixel_format_get_array(anland_formats, b->formats_count);
 
-	if (!vdrm_input_init(b))
+	if (!anland_input_init(b))
 		goto err_free;
 
-	b->base.destroy = vdrm_destroy;
-	b->base.create_output = vdrm_output_create;
+	b->base.destroy = anland_destroy;
+	b->base.create_output = anland_output_create;
 
 	if (connect_to_deamon(&b->display, b->socket_path) < 0) {
-		weston_log("virtual-drm: failed to connect to daemon at %s\n",
+		weston_log("anland: failed to connect to daemon at %s\n",
 			   b->socket_path);
 		goto err_input;
 	}
 
-	set_fallback_callback(b->display, vdrm_fallback_cb, b);
+	set_fallback_callback(b->display, anland_fallback_cb, b);
 
 	uint32_t sw, sh, sf, sr;
 	get_screen_info(b->display, &sw, &sh, &sf, &sr);
@@ -841,7 +841,7 @@ vdrm_backend_create(struct weston_compositor *compositor,
 	b->screen_w = sw;
 	b->screen_h = sh;
 
-	weston_log("virtual-drm: connected to daemon at %s, refresh=%d mHz\n",
+	weston_log("anland: connected to daemon at %s, refresh=%d mHz\n",
 		   b->socket_path, b->refresh);
 
 	if (config->renderer != WESTON_RENDERER_GL) {
@@ -855,10 +855,10 @@ vdrm_backend_create(struct weston_compositor *compositor,
 		if (ret == 0)
 			goto renderer_ok;
 		if (config->renderer == WESTON_RENDERER_VULKAN) {
-			weston_log("virtual-drm: Vulkan renderer failed\n");
+			weston_log("anland: Vulkan renderer failed\n");
 			goto err_display;
 		}
-		weston_log("virtual-drm: Vulkan renderer failed, trying GL\n");
+		weston_log("anland: Vulkan renderer failed, trying GL\n");
 	}
 	{
 		const struct gl_renderer_display_options gl_options = {
@@ -872,14 +872,14 @@ vdrm_backend_create(struct weston_compositor *compositor,
 						      &gl_options.base);
 	}
 	if (ret < 0) {
-		weston_log("virtual-drm: GL renderer failed\n");
+		weston_log("anland: GL renderer failed\n");
 		goto err_display;
 	}
 renderer_ok:
 
 	struct wl_event_loop *loop =
 		wl_display_get_event_loop(compositor->wl_display);
-	b->input_source = wl_event_loop_add_timer(loop, vdrm_input_timer_handler, b);
+	b->input_source = wl_event_loop_add_timer(loop, anland_input_timer_handler, b);
 	if (b->input_source)
 		wl_event_source_timer_update(b->input_source, 8);
 
@@ -887,14 +887,14 @@ renderer_ok:
 	if (buf_ready_fd >= 0) {
 		b->buf_ready_source = wl_event_loop_add_fd(loop, buf_ready_fd,
 							    WL_EVENT_READABLE,
-							    vdrm_buf_ready_handler, b);
+							    anland_buf_ready_handler, b);
 	}
 
 	ret = weston_plugin_api_register(compositor,
-					 WESTON_WINDOWED_OUTPUT_API_NAME_VIRTUAL_DRM,
+					 WESTON_WINDOWED_OUTPUT_API_NAME_ANLAND,
 					 &api, sizeof(api));
 	if (ret < 0) {
-		weston_log("virtual-drm: failed to register output API\n");
+		weston_log("anland: failed to register output API\n");
 		goto err_display;
 	}
 
@@ -904,7 +904,7 @@ err_display:
 	disconnect(b->display);
 	b->display = NULL;
 err_input:
-	vdrm_input_destroy(b);
+	anland_input_destroy(b);
 err_free:
 	wl_list_remove(&b->base.link);
 	free(b->formats);
@@ -917,18 +917,18 @@ WL_EXPORT int
 weston_backend_init(struct weston_compositor *compositor,
 		    struct weston_backend_config *config_base)
 {
-	struct weston_virtual_drm_backend_config config = {{ 0, }};
+	struct weston_anland_backend_config config = {{ 0, }};
 
 	if (!config_base ||
-	    config_base->struct_version != WESTON_VIRTUAL_DRM_BACKEND_CONFIG_VERSION ||
-	    config_base->struct_size > sizeof(struct weston_virtual_drm_backend_config)) {
-		weston_log("virtual-drm backend config structure is invalid\n");
+	    config_base->struct_version != WESTON_ANLAND_BACKEND_CONFIG_VERSION ||
+	    config_base->struct_size > sizeof(struct weston_anland_backend_config)) {
+		weston_log("anland backend config structure is invalid\n");
 		return -1;
 	}
 
 	memcpy(&config, config_base, config_base->struct_size);
 
-	if (!vdrm_backend_create(compositor, &config))
+	if (!anland_backend_create(compositor, &config))
 		return -1;
 
 	return 0;

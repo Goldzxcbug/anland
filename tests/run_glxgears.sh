@@ -6,11 +6,11 @@ ROOT_DIR="${SCRIPT_DIR}/.."
 BUILD_DIR="${ROOT_DIR}/build"
 WESTON_BUILDDIR="${ROOT_DIR}/weston/builddir"
 SOCK="/tmp/display_daemon.sock"
-WESTON_SOCK="wayland-vdrm"
+WESTON_SOCK="wayland-anland"
 DURATION="${1:-15}"
 
 WESTON_BIN="${WESTON_BUILDDIR}/frontend/weston"
-WESTON_MODULE_MAP="color-lcms.so=${WESTON_BUILDDIR}/libweston/color-lcms/color-lcms.so;gl-renderer.so=${WESTON_BUILDDIR}/libweston/renderer-gl/gl-renderer.so;virtual-drm-backend.so=${WESTON_BUILDDIR}/libweston/backend-virtual-drm/virtual-drm-backend.so;xwayland.so=${WESTON_BUILDDIR}/xwayland/xwayland.so;desktop-shell.so=${WESTON_BUILDDIR}/desktop-shell/desktop-shell.so;weston-keyboard=${WESTON_BUILDDIR}/clients/weston-keyboard;weston-desktop-shell=${WESTON_BUILDDIR}/clients/weston-desktop-shell;"
+WESTON_MODULE_MAP="color-lcms.so=${WESTON_BUILDDIR}/libweston/color-lcms/color-lcms.so;gl-renderer.so=${WESTON_BUILDDIR}/libweston/renderer-gl/gl-renderer.so;anland-backend.so=${WESTON_BUILDDIR}/libweston/backend-anland/anland-backend.so;xwayland.so=${WESTON_BUILDDIR}/xwayland/xwayland.so;desktop-shell.so=${WESTON_BUILDDIR}/desktop-shell/desktop-shell.so;weston-keyboard=${WESTON_BUILDDIR}/clients/weston-keyboard;weston-desktop-shell=${WESTON_BUILDDIR}/clients/weston-desktop-shell;"
 
 cleanup() {
     echo "--- cleanup ---"
@@ -35,7 +35,7 @@ trap cleanup EXIT
 echo "=== Killing leftover processes ==="
 pkill -f "display_daemon.*${SOCK}" 2>/dev/null || true
 pkill -f "test_sdl_consumer" 2>/dev/null || true
-pkill -f "weston.*virtual-drm" 2>/dev/null || true
+pkill -f "weston.*anland" 2>/dev/null || true
 sleep 0.5
 rm -f "$SOCK"
 
@@ -66,14 +66,14 @@ echo "consumer PID=$CONSUMER_PID"
 # 3. snapshot existing X sockets before weston starts
 EXISTING_X=$(ls /tmp/.X11-unix/ 2>/dev/null || true)
 
-# start weston with virtual-drm backend + xwayland
+# start weston with anland backend + xwayland
 echo "=== Starting weston ==="
 export WESTON_MODULE_MAP
 export LD_LIBRARY_PATH="${BUILD_DIR}:${WESTON_BUILDDIR}/libweston:${LD_LIBRARY_PATH}"
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp}"
 
 "${WESTON_BIN}" \
-    --backend=virtual-drm \
+    --backend=anland \
     --socket="${WESTON_SOCK}" \
     --width=1280 --height=720 \
     --socket-path="$SOCK" \

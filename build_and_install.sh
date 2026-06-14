@@ -2,7 +2,7 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PREFIX="/opt/weston-vdrm"
+PREFIX="/opt/weston-anland"
 BUILD_DIR="$SCRIPT_DIR/weston/builddir"
 
 echo "=== Installing build dependencies ==="
@@ -38,7 +38,7 @@ MESON_OPTS=(
     -Dbackend-vnc=false
     -Dbackend-wayland=false
     -Dbackend-x11=false
-    -Dbackend-virtual-drm=true
+    -Dbackend-anland=true
     -Dbackend-default=auto
 
     -Drenderer-gl=true
@@ -83,10 +83,10 @@ SOCK="\${1:-/run/display.sock}"
 
 export LD_LIBRARY_PATH="$LIBDIR:$LIBDIR/libweston-16:$LIBDIR/weston:\$LD_LIBRARY_PATH"
 export XDG_RUNTIME_DIR="\${XDG_RUNTIME_DIR:-/tmp}"
-export WESTON_MODULE_MAP="virtual-drm-backend.so=$LIBDIR/libweston-16/virtual-drm-backend.so;gl-renderer.so=$LIBDIR/libweston-16/gl-renderer.so;vulkan-renderer.so=$LIBDIR/libweston-16/vulkan-renderer.so;desktop-shell.so=$LIBDIR/weston/desktop-shell.so;xwayland.so=$LIBDIR/libweston-16/xwayland.so"
+export WESTON_MODULE_MAP="anland-backend.so=$LIBDIR/libweston-16/anland-backend.so;gl-renderer.so=$LIBDIR/libweston-16/gl-renderer.so;vulkan-renderer.so=$LIBDIR/libweston-16/vulkan-renderer.so;desktop-shell.so=$LIBDIR/weston/desktop-shell.so;xwayland.so=$LIBDIR/libweston-16/xwayland.so"
 
 shift 2>/dev/null || true
-exec $PREFIX/bin/weston -Bvirtual-drm-backend.so --disp-sock="\$SOCK" --xwayland "\$@"
+exec $PREFIX/bin/weston -Banland-backend.so --disp-sock="\$SOCK" --xwayland "\$@"
 EOF
 chmod +x "$PREFIX/start.sh"
 
@@ -98,7 +98,7 @@ export LD_LIBRARY_PATH="$LIBDIR:$LIBDIR/libweston-16:$LIBDIR/weston:\$LD_LIBRARY
 export XDG_RUNTIME_DIR="\${XDG_RUNTIME_DIR:-/run/user/\$(id -u)}"
 mkdir -p "\$XDG_RUNTIME_DIR"
 chmod 0700 "\$XDG_RUNTIME_DIR"
-export WESTON_MODULE_MAP="virtual-drm-backend.so=$LIBDIR/libweston-16/virtual-drm-backend.so;gl-renderer.so=$LIBDIR/libweston-16/gl-renderer.so;vulkan-renderer.so=$LIBDIR/libweston-16/vulkan-renderer.so;kiosk-shell.so=$LIBDIR/weston/kiosk-shell.so"
+export WESTON_MODULE_MAP="anland-backend.so=$LIBDIR/libweston-16/anland-backend.so;gl-renderer.so=$LIBDIR/libweston-16/gl-renderer.so;vulkan-renderer.so=$LIBDIR/libweston-16/vulkan-renderer.so;kiosk-shell.so=$LIBDIR/weston/kiosk-shell.so"
 unset DISPLAY
 unset MESA_LOADER_DRIVER_OVERRIDE
 
@@ -117,7 +117,7 @@ trap cleanup EXIT
 
 rm -f "\${XDG_RUNTIME_DIR}"/wayland-* 2>/dev/null
 
-$PREFIX/bin/weston -Bvirtual-drm-backend.so --disp-sock="\$SOCK" --shell=kiosk-shell.so --no-config &
+$PREFIX/bin/weston -Banland-backend.so --disp-sock="\$SOCK" --shell=kiosk-shell.so --no-config &
 WESTON_PID=\$!
 
 WESTON_SOCKET=""

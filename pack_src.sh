@@ -2,7 +2,7 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-OUT="$SCRIPT_DIR/weston-vdrm-src.tar.gz"
+OUT="$SCRIPT_DIR/weston-anland-src.tar.gz"
 
 tar czf "$OUT" \
     --exclude='weston/builddir*' \
@@ -18,4 +18,4 @@ echo "Source package: $OUT ($(du -h "$OUT" | cut -f1))"
 echo ""
 echo "Deploy to container:"
 echo "  adb push $OUT /path/to/rootfs"
-echo "  adb shell droidspaces -n <name> run bash -c 'cd / && tar xzf weston-vdrm-src.tar.gz && bash build_and_install.sh'"
+echo "  adb shell droidspaces -n <name> run bash -c 'cd / && tar xzf weston-anland-src.tar.gz && bash build_and_install.sh'"

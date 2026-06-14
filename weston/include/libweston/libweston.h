@@ -2541,7 +2541,7 @@ enum weston_compositor_backend {
 	WESTON_BACKEND_VNC,
 	WESTON_BACKEND_WAYLAND,
 	WESTON_BACKEND_X11,
-	WESTON_BACKEND_VIRTUAL_DRM,
+	WESTON_BACKEND_ANLAND,
 };
 
 enum weston_renderer_type {

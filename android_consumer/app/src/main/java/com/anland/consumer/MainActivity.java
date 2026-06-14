@@ -1,4 +1,4 @@
-package com.virtual_drm.consumer;
+package com.anland.consumer;
 
 import android.app.Activity;
 import android.content.pm.ActivityInfo;
@@ -17,13 +17,13 @@ import android.view.WindowManager;
 
 
 public class MainActivity extends Activity implements SurfaceHolder.Callback {
-    private static final String TAG = "VirtualDRM";
+    private static final String TAG = "Anland";
 
     private SurfaceView surfaceView;
     private boolean surfaceReady = false;
 
     static {
-        System.loadLibrary("virtual_drm_consumer");
+        System.loadLibrary("anland_consumer");
     }
 
     private native void nativeStart(Surface surface);

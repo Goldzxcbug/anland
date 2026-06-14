@@ -68,7 +68,7 @@
 #include <libweston/backend-vnc.h>
 #include <libweston/backend-x11.h>
 #include <libweston/backend-wayland.h>
-#include <libweston/backend-virtual-drm.h>
+#include <libweston/backend-anland.h>
 #include <libweston/windowed-output-api.h>
 #include <libweston/weston-log.h>
 #include <libweston/remoting-plugin.h>
@@ -4923,7 +4923,7 @@ load_wayland_backend(struct weston_compositor *c,
 
 
 static int
-virtual_drm_backend_output_configure(struct weston_output *output)
+anland_backend_output_configure(struct weston_output *output)
 {
 	const struct weston_windowed_output_api *api;
 	struct weston_config *wc = wet_get_config(output->compositor);
@@ -4934,7 +4934,7 @@ virtual_drm_backend_output_configure(struct weston_output *output)
 
 	api = (const struct weston_windowed_output_api *)
 		weston_plugin_api_get(output->compositor,
-			"weston_windowed_output_api_virtual_drm_v2",
+			"weston_windowed_output_api_anland_v2",
 			sizeof(struct weston_windowed_output_api));
 	if (!api)
 		return -1;
@@ -4956,12 +4956,12 @@ virtual_drm_backend_output_configure(struct weston_output *output)
 }
 
 static int
-load_virtual_drm_backend(struct weston_compositor *c,
+load_anland_backend(struct weston_compositor *c,
 			  int *argc, char **argv, struct weston_config *wc,
 			  enum weston_renderer_type renderer)
 {
 	const struct weston_windowed_output_api *api;
-	struct weston_virtual_drm_backend_config config = {{ 0, }};
+	struct weston_anland_backend_config config = {{ 0, }};
 	struct wet_backend *wb;
 	char *socket_path = NULL;
 
@@ -4981,12 +4981,12 @@ load_virtual_drm_backend(struct weston_compositor *c,
 	config.refresh = 60000;
 	config.renderer = renderer;
 
-	config.base.struct_version = WESTON_VIRTUAL_DRM_BACKEND_CONFIG_VERSION;
-	config.base.struct_size = sizeof(struct weston_virtual_drm_backend_config);
+	config.base.struct_version = WESTON_ANLAND_BACKEND_CONFIG_VERSION;
+	config.base.struct_size = sizeof(struct weston_anland_backend_config);
 
-	wb = wet_compositor_load_backend(c, WESTON_BACKEND_VIRTUAL_DRM,
+	wb = wet_compositor_load_backend(c, WESTON_BACKEND_ANLAND,
 					 &config.base, simple_heads_changed,
-					 virtual_drm_backend_output_configure);
+					 anland_backend_output_configure);
 	free(socket_path);
 
 	if (!wb)
@@ -4994,14 +4994,14 @@ load_virtual_drm_backend(struct weston_compositor *c,
 
 	api = (const struct weston_windowed_output_api *)
 		weston_plugin_api_get(c,
-			"weston_windowed_output_api_virtual_drm_v2",
+			"weston_windowed_output_api_anland_v2",
 			sizeof(struct weston_windowed_output_api));
 	if (!api) {
-		weston_log("Cannot use virtual-drm windowed output API.\n");
+		weston_log("Cannot use anland windowed output API.\n");
 		return -1;
 	}
 
-	if (api->create_head(wb->backend, "virtual-drm-1") < 0)
+	if (api->create_head(wb->backend, "anland-1") < 0)
 		return -1;
 
 	return 0;
@@ -5047,8 +5047,8 @@ load_backend(struct weston_compositor *compositor, const char *name,
 	case WESTON_BACKEND_X11:
 		return load_x11_backend(compositor, argc, argv, config,
 					renderer);
-	case WESTON_BACKEND_VIRTUAL_DRM:
-		return load_virtual_drm_backend(compositor, argc, argv, config,
+	case WESTON_BACKEND_ANLAND:
+		return load_anland_backend(compositor, argc, argv, config,
 						renderer);
 	default:
 		unreachable("unknown backend type in load_backend()");

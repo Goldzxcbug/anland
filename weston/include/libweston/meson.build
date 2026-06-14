@@ -25,7 +25,7 @@ backend_rdp_h =      files('backend-rdp.h')
 backend_vnc_h =      files('backend-vnc.h')
 backend_wayland_h =  files('backend-wayland.h')
 backend_x11_h =      files('backend-x11.h')
-backend_virtual_drm_h = files('backend-virtual-drm.h')
+backend_anland_h = files('backend-anland.h')
 
 xwayland_api_h = files('xwayland-api.h')
 

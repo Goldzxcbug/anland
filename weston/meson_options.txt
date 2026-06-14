@@ -45,10 +45,10 @@ option(
 	description: 'Weston backend: X11 (nested)'
 )
 option(
-	'backend-virtual-drm',
+	'backend-anland',
 	type: 'boolean',
 	value: true,
-	description: 'Weston backend: virtual-drm zero-copy display'
+	description: 'Weston backend: anland zero-copy display'
 )
 option(
 	'backend-default',

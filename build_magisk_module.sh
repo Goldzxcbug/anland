@@ -3,7 +3,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MODULE_DIR="$SCRIPT_DIR/magisk_module"
-OUTPUT="$SCRIPT_DIR/virtual-drm-daemon.zip"
+OUTPUT="$SCRIPT_DIR/anland-daemon.zip"
 
 bash "$SCRIPT_DIR/build_daemon_android.sh"
 

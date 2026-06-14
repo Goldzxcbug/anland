@@ -46,7 +46,7 @@ struct {
 	{ "vnc", "vnc-backend.so", WESTON_BACKEND_VNC },
 	{ "wayland", "wayland-backend.so", WESTON_BACKEND_WAYLAND },
 	{ "x11", "x11-backend.so", WESTON_BACKEND_X11 },
-	{ "virtual-drm", "virtual-drm-backend.so", WESTON_BACKEND_VIRTUAL_DRM },
+	{ "anland", "anland-backend.so", WESTON_BACKEND_ANLAND },
 };
 
 bool

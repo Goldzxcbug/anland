@@ -3,11 +3,11 @@ plugins {
 }
 
 android {
-    namespace 'com.virtual_drm.consumer'
+    namespace 'com.anland.consumer'
     compileSdk 36
 
     defaultConfig {
-        applicationId "com.virtual_drm.consumer"
+        applicationId "com.anland.consumer"
         minSdk 30
         targetSdk 36
         versionCode 1

@@ -253,7 +253,7 @@ int main(int argc, char **argv)
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
 
-    SDL_Window *window = SDL_CreateWindow("virtual-drm consumer",
+    SDL_Window *window = SDL_CreateWindow("anland consumer",
                                           SDL_WINDOWPOS_CENTERED,
                                           SDL_WINDOWPOS_CENTERED,
                                           width, height, SDL_WINDOW_OPENGL);

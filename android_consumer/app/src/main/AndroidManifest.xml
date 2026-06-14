@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.virtual_drm.consumer">
+    package="com.anland.consumer">
 
     <application
-        android:label="VirtualDRM"
+        android:label="Anland"
         android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
         <activity
             android:name=".MainActivity"
