@@ -292,7 +292,7 @@ static void *render_thread_func(void *arg)
 /* ---------- JNI ---------- */
 
 JNIEXPORT void JNICALL
-Java_com_virtual_1drm_consumer_MainActivity_nativeStart(
+Java_com_anland_consumer_MainActivity_nativeStart(
     JNIEnv *env, jobject thiz, jobject surface)
 {
     if (!api_loaded) {
@@ -338,7 +338,7 @@ Java_com_virtual_1drm_consumer_MainActivity_nativeStart(
 }
 
 JNIEXPORT void JNICALL
-Java_com_virtual_1drm_consumer_MainActivity_nativeStop(
+Java_com_anland_consumer_MainActivity_nativeStop(
     JNIEnv *env, jobject thiz)
 {
     pthread_mutex_lock(&g_state.lock);
@@ -365,7 +365,7 @@ Java_com_virtual_1drm_consumer_MainActivity_nativeStop(
 }
 
 JNIEXPORT void JNICALL
-Java_com_virtual_1drm_consumer_MainActivity_nativeSendTouch(
+Java_com_anland_consumer_MainActivity_nativeSendTouch(
     JNIEnv *env, jobject thiz, jint action, jfloat x, jfloat y, jint pointer_id)
 {
     if (!g_state.ctx)
@@ -378,7 +378,7 @@ Java_com_virtual_1drm_consumer_MainActivity_nativeSendTouch(
 }
 
 JNIEXPORT void JNICALL
-Java_com_virtual_1drm_consumer_MainActivity_nativeSendTouchFrame(
+Java_com_anland_consumer_MainActivity_nativeSendTouchFrame(
     JNIEnv *env, jobject thiz)
 {
     if (!g_state.ctx)
@@ -390,7 +390,7 @@ Java_com_virtual_1drm_consumer_MainActivity_nativeSendTouchFrame(
 }
 
 JNIEXPORT void JNICALL
-Java_com_virtual_1drm_consumer_MainActivity_nativeSendKey(
+Java_com_anland_consumer_MainActivity_nativeSendKey(
     JNIEnv *env, jobject thiz, jint action, jint keycode)
 {
     if (!g_state.ctx)
@@ -403,7 +403,7 @@ Java_com_virtual_1drm_consumer_MainActivity_nativeSendKey(
 }
 
 JNIEXPORT void JNICALL
-Java_com_virtual_1drm_consumer_MainActivity_nativeSendMouseMotion(
+Java_com_anland_consumer_MainActivity_nativeSendMouseMotion(
     JNIEnv *env, jobject thiz, jfloat x, jfloat y)
 {
     if (!g_state.ctx)
@@ -416,7 +416,7 @@ Java_com_virtual_1drm_consumer_MainActivity_nativeSendMouseMotion(
 }
 
 JNIEXPORT void JNICALL
-Java_com_virtual_1drm_consumer_MainActivity_nativeSendMouseButton(
+Java_com_anland_consumer_MainActivity_nativeSendMouseButton(
     JNIEnv *env, jobject thiz, jint button, jboolean pressed)
 {
     if (!g_state.ctx)
@@ -429,7 +429,7 @@ Java_com_virtual_1drm_consumer_MainActivity_nativeSendMouseButton(
 }
 
 JNIEXPORT void JNICALL
-Java_com_virtual_1drm_consumer_MainActivity_nativeSendMouseScroll(
+Java_com_anland_consumer_MainActivity_nativeSendMouseScroll(
     JNIEnv *env, jobject thiz, jint axis, jfloat value)
 {
     if (!g_state.ctx)
