@@ -74,6 +74,11 @@ struct anland_output {
 	weston_renderbuffer_t renderbuffers[MAX_BUFS];
 	struct dmabuf_attributes dmabuf_attrs_arr[MAX_BUFS];
 	struct linux_dmabuf_memory dmabuf_mem_arr[MAX_BUFS];
+
+	/* Per-renderbuffer accumulated damage (buffer-age). The consumer
+	 * rotates the buffer index externally, so each buffer must remember
+	 * everything that changed since it was last rendered. */
+	pixman_region32_t accum_damage[MAX_BUFS];
 };
 
 static void
@@ -414,6 +419,13 @@ anland_output_import_dmabufs(struct anland_output *output)
 			weston_log("anland: failed to create renderbuffer[%d]\n", i);
 			return -1;
 		}
+
+		/* Freshly imported dmabuf has undefined contents: owe it a full
+		 * frame so the first paint into it is complete. */
+		pixman_region32_clear(&output->accum_damage[i]);
+		pixman_region32_union(&output->accum_damage[i],
+				      &output->accum_damage[i],
+				      &output->base.region);
 	}
 	output->buf_count = count;
 	return 0;
@@ -490,8 +502,21 @@ anland_output_repaint(struct weston_output *output_base)
 	pixman_region32_init(&damage);
 	weston_output_flush_damage_for_primary_plane(output_base, &damage);
 
-	ec->renderer->repaint_output(&output->base, &damage, rb);
+	/*
+	 * The consumer rotates the renderbuffer index externally, so this
+	 * frame's damage must be accumulated per buffer: every buffer owes
+	 * all changes since it was last rendered. Add this frame's damage to
+	 * each buffer's pending region, repaint the selected buffer with its
+	 * full accumulated debt, then clear only that buffer's debt. This is
+	 * the buffer-age equivalent that avoids redrawing the whole screen.
+	 */
+	for (int i = 0; i < output->buf_count; i++)
+		pixman_region32_union(&output->accum_damage[i],
+				      &output->accum_damage[i], &damage);
 	pixman_region32_fini(&damage);
+
+	ec->renderer->repaint_output(&output->base, &output->accum_damage[idx], rb);
+	pixman_region32_clear(&output->accum_damage[idx]);
 
 	if (b->consumer_ready) {
 		trigger_refresh(b->display);
@@ -559,6 +584,10 @@ anland_output_destroy(struct weston_output *base)
 	assert(output);
 
 	anland_output_disable(&output->base);
+
+	for (int i = 0; i < MAX_BUFS; i++)
+		pixman_region32_fini(&output->accum_damage[i]);
+
 	weston_output_release(&output->base);
 	free(output);
 }
@@ -691,6 +720,9 @@ anland_output_create(struct weston_backend *backend, const char *name)
 	output->base.attach_head = NULL;
 
 	output->backend = b;
+
+	for (int i = 0; i < MAX_BUFS; i++)
+		pixman_region32_init(&output->accum_damage[i]);
 
 	weston_compositor_add_pending_output(&output->base, b->compositor);
 
