@@ -181,9 +181,91 @@ wait "\$WESTON_PID"
 EOF
 chmod +x "$PREFIX/start_kde.sh"
 
+cat > "$PREFIX/start_kde_zink.sh" << EOF
+#!/bin/bash
+SOCK="\${1:-/run/display.sock}"
+
+export LD_LIBRARY_PATH="$LIBDIR:$LIBDIR/libweston-16:$LIBDIR/weston:\$LD_LIBRARY_PATH"
+export XDG_RUNTIME_DIR="\${XDG_RUNTIME_DIR:-/run/user/\$(id -u)}"
+mkdir -p "\$XDG_RUNTIME_DIR"
+chmod 0700 "\$XDG_RUNTIME_DIR"
+export WESTON_MODULE_MAP="anland-backend.so=$LIBDIR/libweston-16/anland-backend.so;gl-renderer.so=$LIBDIR/libweston-16/gl-renderer.so;vulkan-renderer.so=$LIBDIR/libweston-16/vulkan-renderer.so;xwayland.so=$LIBDIR/libweston-16/xwayland.so;kiosk-shell.so=$LIBDIR/weston/kiosk-shell.so"
+unset DISPLAY
+
+# Route GL through zink-on-turnip and force the default Vulkan device so it
+# doesn't fall back to llvmpipe (software) on the kgsl backend. Needed for
+# Xwayland / X11 clients to get hardware acceleration.
+export MESA_LOADER_DRIVER_OVERRIDE=zink
+export MESA_VK_DEVICE_SELECT_FORCE_DEFAULT_DEVICE=1
+
+WESTON_PID=
+KDE_PID=
+
+cleanup() {
+    [ -n "\$KDE_PID" ]    && kill "\$KDE_PID"    2>/dev/null
+    [ -n "\$WESTON_PID" ] && kill "\$WESTON_PID" 2>/dev/null
+    sleep 0.3
+    [ -n "\$KDE_PID" ]    && kill -9 "\$KDE_PID"    2>/dev/null
+    [ -n "\$WESTON_PID" ] && kill -9 "\$WESTON_PID" 2>/dev/null
+    wait 2>/dev/null
+}
+trap cleanup EXIT
+
+if ! command -v startplasma-wayland >/dev/null 2>&1; then
+    echo "ERROR: startplasma-wayland not found."
+    echo "Install the standard Plasma Wayland session launcher:"
+    echo "  sudo apt-get install -y plasma-workspace-wayland"
+    exit 1
+fi
+
+rm -f "\${XDG_RUNTIME_DIR}"/wayland-* 2>/dev/null
+
+$PREFIX/bin/weston -Banland-backend.so --disp-sock="\$SOCK" --shell=kiosk-shell.so --no-config &
+WESTON_PID=\$!
+
+WESTON_SOCKET=""
+for i in \$(seq 1 300); do
+    sleep 1
+    for wl in "\${XDG_RUNTIME_DIR}"/wayland-*; do
+        [ -S "\$wl" ] || continue
+        WESTON_SOCKET="\$(basename "\$wl")"
+        break 2
+    done
+done
+
+if [ -z "\$WESTON_SOCKET" ]; then
+    echo "ERROR: weston wayland socket not found"
+    wait "\$WESTON_PID"
+    exit 1
+fi
+echo "weston socket: \$WESTON_SOCKET"
+
+export WAYLAND_DISPLAY="\$WESTON_SOCKET"
+export MESA_LOADER_DRIVER_OVERRIDE=zink
+export GALLIUM_DRIVER=zink
+# Force the default Vulkan device so zink picks turnip instead of falling back
+# to llvmpipe. The plain var covers the surfaceless path; the _DRI3 variant
+# (added to this patched mesa) covers Xwayland's GBM/DRI3 glamor path, whose
+# render-node DRM major/minor never matches turnip on the kgsl backend.
+export MESA_VK_DEVICE_SELECT_FORCE_DEFAULT_DEVICE=1
+export MESA_VK_DEVICE_SELECT_FORCE_DEFAULT_DEVICE_DRI3=1
+export QT_QPA_PLATFORM=wayland
+
+# Standard Plasma startup. With WAYLAND_DISPLAY pointing at weston,
+# startplasma-wayland brings up kwin_wayland nested in weston (--wayland-fd),
+# spawns Xwayland, plasmashell and the full set of KDE daemons itself — no
+# manual wiring of kded/kactivitymanagerd/kwin needed.
+dbus-run-session startplasma-wayland &
+KDE_PID=\$!
+
+wait "\$WESTON_PID"
+EOF
+chmod +x "$PREFIX/start_kde_zink.sh"
+
 echo ""
 echo "=== Done ==="
 echo "  Installed to: $PREFIX"
 echo "  Start:        $PREFIX/start.sh [socket-path]"
 echo "  Start KDE:    $PREFIX/start_kde.sh [socket-path]"
+echo "  Start KDE (Zink, lower performance but better stability): $PREFIX/start_kde_zink.sh [socket-path]"
 echo "  Default sock: /run/display.sock"
