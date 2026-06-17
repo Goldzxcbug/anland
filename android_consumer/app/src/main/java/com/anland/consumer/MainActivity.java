@@ -31,7 +31,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private native void nativeSendTouch(int action, float x, float y, int pointerId);
     private native void nativeSendTouchFrame();
     private native void nativeSendKey(int action, int keycode);
-    private native void nativeSendMouseMotion(float x, float y);
+    private native void nativeSendMouseMotion(float x, float y, float dx, float dy);
     private native void nativeSendMouseButton(int button, boolean pressed);
     private native void nativeSendMouseScroll(int axis, float value);
 
@@ -129,7 +129,9 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         if (isMouseEvent(event)) {
             int action = event.getActionMasked();
             if (action == MotionEvent.ACTION_HOVER_MOVE) {
-                nativeSendMouseMotion(event.getX(), event.getY());
+                nativeSendMouseMotion(event.getX(), event.getY(),
+                                      event.getAxisValue(MotionEvent.AXIS_RELATIVE_X),
+                                      event.getAxisValue(MotionEvent.AXIS_RELATIVE_Y));
                 return true;
             }
             if (action == MotionEvent.ACTION_SCROLL) {
@@ -193,7 +195,14 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     }
 
     private boolean handleMouseEvent(MotionEvent event) {
-        nativeSendMouseMotion(event.getX(), event.getY());
+        float dx = 0f;
+        float dy = 0f;
+        if (event.getHistorySize() > 0) {
+            int last = event.getHistorySize() - 1;
+            dx = event.getX() - event.getHistoricalX(0, last);
+            dy = event.getY() - event.getHistoricalY(0, last);
+        }
+        nativeSendMouseMotion(event.getX(), event.getY(), dx, dy);
 
         int currentBS = event.getButtonState();
         for (int[] btn : BUTTON_MAP) {

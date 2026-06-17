@@ -47,6 +47,10 @@ static struct consumer_state g_state = {
     .lock = PTHREAD_MUTEX_INITIALIZER,
 };
 
+static bool motion_has_last = false;
+static float motion_last_x = 0.0f;
+static float motion_last_y = 0.0f;
+
 static int find_buf_index(struct consumer_state *s, int fd)
 {
     for (int i = 0; i < s->buf_count; i++) {
@@ -316,6 +320,8 @@ Java_com_anland_consumer_MainActivity_nativeStart(
         disconnect(g_state.ctx);
         g_state.ctx = NULL;
     }
+    motion_has_last = false;
+    motion_has_last = false;
     cleanup_dmabufs(&g_state);
 
     if (g_state.window) {
@@ -404,13 +410,23 @@ Java_com_anland_consumer_MainActivity_nativeSendKey(
 
 JNIEXPORT void JNICALL
 Java_com_anland_consumer_MainActivity_nativeSendMouseMotion(
-    JNIEnv *env, jobject thiz, jfloat x, jfloat y)
+    JNIEnv *env, jobject thiz, jfloat x, jfloat y, jfloat dx, jfloat dy)
 {
     if (!g_state.ctx)
         return;
+
+    if (dx == 0.0f && dy == 0.0f && motion_has_last) {
+        dx = x - motion_last_x;
+        dy = y - motion_last_y;
+    }
+
+    motion_last_x = x;
+    motion_last_y = y;
+    motion_has_last = true;
+
     struct InputEvent ev = {
         .type = INPUT_TYPE_POINTER_MOTION,
-        .pointer_motion = { .x = x, .y = y },
+        .pointer_motion = { .x = x, .y = y, .dx = dx, .dy = dy },
     };
     push_input_event(g_state.ctx, &ev);
 }

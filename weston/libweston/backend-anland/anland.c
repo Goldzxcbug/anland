@@ -115,7 +115,13 @@ anland_handle_pointer_motion(struct anland_backend *b, const struct InputEvent *
 	struct timespec ts;
 	struct weston_pointer_motion_event motion;
 	struct weston_coord_global abs;
+	struct weston_coord rel = {
+		.x = ev->pointer_motion.dx,
+		.y = ev->pointer_motion.dy,
+	};
+	struct weston_coord rel_unaccel = rel;
 	struct weston_output *output;
+	uint32_t mask = WESTON_POINTER_MOTION_ABS;
 
 	weston_compositor_get_time(&ts);
 
@@ -128,9 +134,14 @@ anland_handle_pointer_motion(struct anland_backend *b, const struct InputEvent *
 						    ev->pointer_motion.y,
 						    output);
 
+	if (ev->pointer_motion.dx != 0.0f || ev->pointer_motion.dy != 0.0f)
+		mask |= WESTON_POINTER_MOTION_REL | WESTON_POINTER_MOTION_REL_UNACCEL;
+
 	weston_pointer_motion_event_init(&motion, &ts, &b->seat,
-					 WESTON_POINTER_MOTION_ABS,
-					 &abs, NULL, NULL);
+					 mask,
+					 &abs,
+					 (mask & WESTON_POINTER_MOTION_REL) ? &rel : NULL,
+					 (mask & WESTON_POINTER_MOTION_REL_UNACCEL) ? &rel_unaccel : NULL);
 	notify_motion(&motion);
 	notify_pointer_frame(&b->seat);
 }

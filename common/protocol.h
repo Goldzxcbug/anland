@@ -70,6 +70,8 @@ struct InputEvent {
         struct {
             float    x;
             float    y;
+            float    dx;
+            float    dy;
         } pointer_motion;
         struct {
             uint32_t button;
