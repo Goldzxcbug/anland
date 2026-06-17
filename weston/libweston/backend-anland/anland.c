@@ -47,7 +47,8 @@ struct anland_backend {
 	int screen_w;
 	int screen_h;
 
-	struct wl_event_source *input_source;
+	struct wl_event_source *input_fd_source;
+	struct wl_event_source *reconnect_timer;
 	struct weston_touch_device *touch_device;
 
 	struct wl_event_source *buf_ready_source;
@@ -268,6 +269,9 @@ anland_process_input_event(struct anland_backend *b, const struct InputEvent *ev
 }
 
 static int
+anland_input_fd_handler(int fd, uint32_t mask, void *data);
+
+static int
 anland_buf_ready_handler(int fd, uint32_t mask, void *data);
 
 static void
@@ -291,9 +295,17 @@ anland_fallback_cb(void *data)
 		wl_event_source_remove(b->buf_ready_source);
 		b->buf_ready_source = NULL;
 	}
+	if (b->input_fd_source) {
+		wl_event_source_remove(b->input_fd_source);
+		b->input_fd_source = NULL;
+	}
 	b->consumer_ready = false;
 	b->dmabuf_received = false;
 	b->in_fallback = true;
+
+	/* Arm reconnect timer; normal input is dead until reconnect succeeds. */
+	if (b->reconnect_timer)
+		wl_event_source_timer_update(b->reconnect_timer, 200);
 }
 
 static void
@@ -321,32 +333,56 @@ anland_try_reconnect(struct anland_backend *b)
 	weston_log("anland: consumer reconnected\n");
 	b->in_fallback = false;
 
+	struct wl_event_loop *loop =
+		wl_display_get_event_loop(b->compositor->wl_display);
+
 	int buf_ready_fd = get_buffer_ready_fd(b->display);
 	if (buf_ready_fd >= 0) {
-		struct wl_event_loop *loop =
-			wl_display_get_event_loop(b->compositor->wl_display);
 		b->buf_ready_source = wl_event_loop_add_fd(loop, buf_ready_fd,
 							    WL_EVENT_READABLE,
 							    anland_buf_ready_handler, b);
 	}
+
+	int data_fd = get_data_fd(b->display);
+	if (data_fd >= 0) {
+		b->input_fd_source = wl_event_loop_add_fd(loop, data_fd,
+							   WL_EVENT_READABLE,
+							   anland_input_fd_handler, b);
+	}
+
+	/* Stop the reconnect timer — we're back in business. */
+	if (b->reconnect_timer)
+		wl_event_source_timer_update(b->reconnect_timer, 0);
 }
 
 static int
-anland_input_timer_handler(void *data)
+anland_input_fd_handler(int fd, uint32_t mask, void *data)
 {
 	struct anland_backend *b = data;
 	struct InputEvent ev;
 
-	if (b->in_fallback) {
-		anland_drop_renderbuffers(b);
-		anland_try_reconnect(b);
-	} else {
-		while (poll_input_event(b->display, &ev, 0) > 0)
-			anland_process_input_event(b, &ev);
-	}
+	if (b->in_fallback)
+		return 0;
 
-	if (b->input_source)
-		wl_event_source_timer_update(b->input_source, 8);
+	while (poll_input_event(b->display, &ev, 0) > 0)
+		anland_process_input_event(b, &ev);
+
+	return 0;
+}
+
+static int
+anland_reconnect_timer_handler(void *data)
+{
+	struct anland_backend *b = data;
+
+	if (!b->in_fallback)
+		return 0;
+
+	anland_drop_renderbuffers(b);
+	anland_try_reconnect(b);
+
+	if (b->in_fallback && b->reconnect_timer)
+		wl_event_source_timer_update(b->reconnect_timer, 200);
 
 	return 0;
 }
@@ -814,8 +850,10 @@ anland_destroy(struct weston_backend *backend)
 
 	if (b->buf_ready_source)
 		wl_event_source_remove(b->buf_ready_source);
-	if (b->input_source)
-		wl_event_source_remove(b->input_source);
+	if (b->input_fd_source)
+		wl_event_source_remove(b->input_fd_source);
+	if (b->reconnect_timer)
+		wl_event_source_remove(b->reconnect_timer);
 
 	wl_list_for_each_safe(base, next, &ec->head_list, compositor_link) {
 		if (to_anland_head(base))
@@ -922,9 +960,14 @@ renderer_ok:
 
 	struct wl_event_loop *loop =
 		wl_display_get_event_loop(compositor->wl_display);
-	b->input_source = wl_event_loop_add_timer(loop, anland_input_timer_handler, b);
-	if (b->input_source)
-		wl_event_source_timer_update(b->input_source, 8);
+	b->reconnect_timer = wl_event_loop_add_timer(loop, anland_reconnect_timer_handler, b);
+
+	int data_fd = get_data_fd(b->display);
+	if (data_fd >= 0) {
+		b->input_fd_source = wl_event_loop_add_fd(loop, data_fd,
+							   WL_EVENT_READABLE,
+							   anland_input_fd_handler, b);
+	}
 
 	int buf_ready_fd = get_buffer_ready_fd(b->display);
 	if (buf_ready_fd >= 0) {

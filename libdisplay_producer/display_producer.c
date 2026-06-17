@@ -359,6 +359,11 @@ int try_reconnect(display_ctx *ctx)
     return 0;
 }
 
+int get_data_fd(display_ctx *ctx)
+{
+    return ctx->data_fd;
+}
+
 int get_buffer_ready_fd(display_ctx *ctx)
 {
     return ctx->buf_ready_efd;

@@ -17,6 +17,7 @@ int  poll_input_event(display_ctx *ctx, struct InputEvent *event, int timeout_ms
 int  set_fallback_callback(display_ctx *ctx, void (*on_fallback)(void *), void *userdata);
 bool is_fallback(display_ctx *ctx);
 int  try_reconnect(display_ctx *ctx);
+int  get_data_fd(display_ctx *ctx);
 int  get_buffer_ready_fd(display_ctx *ctx);
 int  get_buf_count(display_ctx *ctx);
 int  get_selected_idx(display_ctx *ctx);
