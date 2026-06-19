@@ -28,10 +28,10 @@ index 0000000..04985ef
 +target_link_libraries(kwin PRIVATE Libdrm::Libdrm)
 diff --git a/src/backends/anland/anland_backend.cpp b/src/backends/anland/anland_backend.cpp
 new file mode 100644
-index 0000000..55e3dc5
+index 0000000..8858e40
 --- /dev/null
 +++ b/src/backends/anland/anland_backend.cpp
-@@ -0,0 +1,366 @@
+@@ -0,0 +1,375 @@
 +/*
 +    KWin - the KDE window manager
 +    This file is part of the KDE project.
@@ -389,12 +389,21 @@ index 0000000..55e3dc5
 +        return; // still down, keep retrying
 +    }
 +
-+    qCInfo(KWIN_ANLAND) << "consumer reconnected";
++    qCWarning(KWIN_ANLAND) << "consumer reconnected"; // pair with the fallback warning so the transition is visible at the default log level
 +    m_inFallback = false;
 +    m_dmabufReceived = false;
 +    m_consumerReady = false;
 +    setupNotifiers();
 +    m_reconnectTimer->stop();
++
++    // Resume the RenderLoop now. It was inhibited in onConsumerLost() to stop
++    // fallback spam; if we only relied on onConsumerReady() (driven by buf_ready)
++    // to lift it, the engine would stay paused — no scheduleRepaint, nothing
++    // rendered — until a buf_ready that the paused engine itself can't provoke.
++    // Resuming here kicks compositing; the first buf_ready then delivers dmabufs.
++    if (!m_outputs.isEmpty()) {
++        m_outputs[0]->resumeRendering();
++    }
 +}
 +
 +} // namespace KWin
@@ -518,10 +527,10 @@ index 0000000..ac36217
 +} // namespace KWin
 diff --git a/src/backends/anland/anland_egl_backend.cpp b/src/backends/anland/anland_egl_backend.cpp
 new file mode 100644
-index 0000000..66291a4
+index 0000000..50551a2
 --- /dev/null
 +++ b/src/backends/anland/anland_egl_backend.cpp
-@@ -0,0 +1,311 @@
+@@ -0,0 +1,310 @@
 +/*
 +    KWin - the KDE window manager
 +    This file is part of the KDE project.
@@ -691,6 +700,9 @@ index 0000000..66291a4
 +
 +bool AnlandEglLayer::doEndFrame(const Region &renderedDeviceRegion, const Region &damagedDeviceRegion, OutputFrame *frame)
 +{
++    glFlush(); // flush pending rendering commands into the dmabuf.
++    //虽然会有竞争，但是android的三重缓冲机制可以消除
++    // 使用 flush 保证流水线执行
 +    // Every buffer owes this frame's damage; the buffer we just painted is now
 +    // fully up to date, so clear its debt.
 +    for (int i = 0; i < m_bufCount; i++) {
@@ -699,10 +711,6 @@ index 0000000..66291a4
 +    if (m_currentIndex < m_bufCount) {
 +        m_accumDamage[m_currentIndex] = Region();
 +    }
-+
-+    glFlush(); // flush pending rendering commands into the dmabuf.
-+    //虽然会有竞争，但是android的三重缓冲机制可以消除
-+    // 使用 flush 保证流水线执行
 +
 +    // KWin's OutputLayer::needsRepaint() reflects only scene damage; it knows
 +    // nothing about our external buffer rotation. When the scene goes momentarily
@@ -1211,10 +1219,10 @@ index 0000000..d3928b8
 +Q_DECLARE_LOGGING_CATEGORY(KWIN_ANLAND)
 diff --git a/src/backends/anland/anland_output.cpp b/src/backends/anland/anland_output.cpp
 new file mode 100644
-index 0000000..38b7d43
+index 0000000..3a15d56
 --- /dev/null
 +++ b/src/backends/anland/anland_output.cpp
-@@ -0,0 +1,125 @@
+@@ -0,0 +1,147 @@
 +/*
 +    KWin - the KDE window manager
 +    This file is part of the KDE project.
@@ -1225,7 +1233,7 @@ index 0000000..38b7d43
 +#include "anland_backend.h"
 +
 +#include "core/renderbackend.h" // OutputFrame
-+#include "core/renderloop.h"
++#include "core/renderloop.h" 
 +
 +#include <chrono>
 +
@@ -1322,8 +1330,18 @@ index 0000000..38b7d43
 +        m_awaitingPresent = false;
 +        completeFrame();
 +    }
-+    // Render the next frame in lockstep with the consumer, exactly as the 5.27
-+    // backend did: the consumer's buffer-ready drives scheduleRepaint().
++    // The consumer is back (buffers are available again): resume compositing if
++    // it was paused during fallback, and render the next frame in lockstep with
++    // the consumer — exactly as the 5.27 backend's buffer-ready did.
++    resumeRendering();
++}
++
++void AnlandOutput::resumeRendering()
++{
++    if (m_renderingPaused) {
++        m_renderingPaused = false;
++        m_renderLoop->uninhibit();
++    }
 +    m_renderLoop->scheduleRepaint();
 +}
 +
@@ -1337,15 +1355,27 @@ index 0000000..38b7d43
 +        // (the 6.x equivalent of the 5.27 backend's notifyFrameFailed()).
 +        m_frame.reset();
 +    }
++    // Pause compositing while the consumer is gone. Otherwise every composite
++    // KWin drives (cursor, effects, our own scheduleRepaint) reaches
++    // AnlandEglLayer::doBeginFrame(), which returns nullopt (no buffers) -> the
++    // compositor logs "Failed to find a working output layer configuration!" on
++    // a loop and churns the output-layer state, which also makes reconnects
++    // flaky. inhibit() stops the RenderLoop's timer; onConsumerReady() resumes it
++    // on the first buf_ready after reconnect. (Transient, balanced inhibit — the
++    // same pattern the DRM/Wayland backends use for an unavailable output.)
++    if (!m_renderingPaused) {
++        m_renderingPaused = true;
++        m_renderLoop->inhibit();
++    }
 +}
 +
 +} // namespace KWin
 diff --git a/src/backends/anland/anland_output.h b/src/backends/anland/anland_output.h
 new file mode 100644
-index 0000000..0d03c71
+index 0000000..d25c7bd
 --- /dev/null
 +++ b/src/backends/anland/anland_output.h
-@@ -0,0 +1,65 @@
+@@ -0,0 +1,73 @@
 +/*
 +    KWin - the KDE window manager
 +    This file is part of the KDE project.
@@ -1399,6 +1429,11 @@ index 0000000..0d03c71
 +     *  arrive. */
 +    void onConsumerLost();
 +
++    /** Reconnected to the daemon: un-pause compositing (lifted from fallback)
++     *  and kick a repaint, so the engine resumes instead of staying inhibited
++     *  while it waits for a buffer-ready that the paused engine can't drive. */
++    void resumeRendering();
++
 +private:
 +    void completeFrame();
 +
@@ -1408,6 +1443,9 @@ index 0000000..0d03c71
 +    std::unique_ptr<RenderLoop> m_renderLoop;
 +    std::shared_ptr<OutputFrame> m_frame;
 +    bool m_awaitingPresent = false;
++    // True while compositing is paused because the consumer is gone (fallback).
++    // Balances the RenderLoop's inhibit counter across fallback/reconnect cycles.
++    bool m_renderingPaused = false;
 +};
 +
 +} // namespace KWin
