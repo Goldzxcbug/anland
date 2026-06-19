@@ -210,6 +210,7 @@ export MESA_VK_DEVICE_SELECT_FORCE_DEFAULT_DEVICE_DRI3=1
 rm -f "\${XDG_RUNTIME_DIR}"/wayland-* 2>/dev/null
 
 export QT_QPA_PLATFORM=wayland
+export FD_MESA_DEBUG=notile
 export ANLAND=1
 dbus-run-session startplasma-wayland &
 EOF
