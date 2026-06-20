@@ -476,3 +476,44 @@ flowchart TD
 | Consumer library 消费端库 | [libdisplay_consumer/display_consumer.c](libdisplay_consumer/display_consumer.c) |
 | Producer library 生产端库 | [libdisplay_producer/display_producer.c](libdisplay_producer/display_producer.c) |
 | Producer state machine in a real backend 真实 backend 中的状态机 | [producers/weston/weston/libweston/backend-anland/anland.c](producers/weston/weston/libweston/backend-anland/anland.c) |
+
+---
+
+## 12. License · 许可
+
+This project's own code is **MIT**‑licensed. Each non‑reference compositor backend
+carries **its own upstream license** instead.
+
+本项目自有代码采用 **MIT** 许可。每个非参考合成器后端则**附带其自身的上游许可**。
+
+### 12.1 MIT‑licensed components · MIT 许可的组成部分
+
+| Component 组成部分 | Path 路径 |
+|--------------------|-----------|
+| Android consumer Android 消费端 | [android_consumer/](android_consumer/) |
+| Shared protocol & utils 共享协议与工具 | [common/](common/) |
+| Broker daemon 中介守护进程 | [daemon/](daemon/) |
+| Reference C libraries 参考 C 库 | [libdisplay_consumer/](libdisplay_consumer/), [libdisplay_producer/](libdisplay_producer/) |
+| Reference compositor backend 参考合成器后端 (Weston anland backend) | [producers/weston/weston/libweston/backend-anland/](producers/weston/weston/libweston/backend-anland/) + the `producers/weston/` integration glue 集成胶水代码 |
+
+> A **vendored copy** of the reference C library that a port embeds in its own tree
+> (per §10.1) **follows the host compositor's license**, not MIT — e.g. a copy embedded
+> into GPL KWin is distributed under KWin's GPL terms. The MIT grant applies to the
+> canonical library in this repo ([libdisplay_producer/](libdisplay_producer/) etc.).
+> 移植按 §10.1 嵌入自身源码树的**参考 C 库拷贝**，**跟随宿主合成器的许可**，而非 MIT——
+> 例如嵌入 GPL 版 KWin 的拷贝按 KWin 的 GPL 条款分发。MIT 仅覆盖本仓库中的权威库本身
+> （[libdisplay_producer/](libdisplay_producer/) 等）。
+
+### 12.2 Components under their own license · 附带自身许可的组成部分
+
+| Component 组成部分 | License 许可 | Notes 说明 |
+|--------------------|--------------|------------|
+| Other compositor backends 其余合成器后端, e.g. [producers/kde/](producers/kde/) | upstream's own license 上游自身许可 (KWin: GPL‑2.0‑or‑later) | the patches target GPL‑licensed KWin; the derived work follows KWin's terms 补丁基于 GPL 许可的 KWin，衍生作品遵循 KWin 条款 |
+| Vendored upstream compositor trees 携带的上游合成器源码树, e.g. [producers/weston/weston/](producers/weston/weston/) | its own upstream license 上游自身许可 (Weston: MIT/Expat, see its `COPYING`) | the upstream source retains its original license; only the anland backend we add is MIT under this project 上游源码保留其原始许可，仅我们新增的 anland 后端按本项目以 MIT 授权 |
+
+> [!NOTE]
+> When porting a new backend (§10.3), the upstream compositor source you patch or vendor
+> keeps **its** license; only the integration code you author for the **reference**
+> compositor is MIT. Other backends ship under their upstream terms.
+> 移植新后端时（§10.3），你打补丁或携带的上游合成器源码保留**其**许可；只有你为**参考**
+> 合成器编写的集成代码按 MIT 授权。其余后端按其上游条款发布。
