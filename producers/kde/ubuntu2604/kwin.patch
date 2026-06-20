@@ -701,7 +701,7 @@ diff -ruN a/src/backends/anland/anland_egl_backend.cpp b/src/backends/anland/anl
 +    m_damageFlags &= ~(uint8_t)(1 << m_currentIndex);
 +    if (m_damageFlags != 0) 
 +        scheduleRepaint(nullptr);
-+
++    glFinish();
 +    return true;
 +}
 +
