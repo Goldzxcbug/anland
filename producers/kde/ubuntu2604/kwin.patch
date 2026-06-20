@@ -1,45 +1,3 @@
-From bcdef3d1c4884178ebcf6f18798c7edfad9dbf9f Mon Sep 17 00:00:00 2001
-From: Yibo Wang <2024312277@stu.hit.edu.cn>
-Date: Fri, 19 Jun 2026 18:57:33 +0800
-Subject: [PATCH] 2
-
----
- src/backends/CMakeLists.txt                |   1 +
- src/backends/anland/CMakeLists.txt         |  13 +
- src/backends/anland/anland_backend.cpp     | 375 +++++++++++++++++++
- src/backends/anland/anland_backend.h       | 112 ++++++
- src/backends/anland/anland_egl_backend.cpp | 310 ++++++++++++++++
- src/backends/anland/anland_egl_backend.h   | 102 ++++++
- src/backends/anland/anland_input.cpp       | 155 ++++++++
- src/backends/anland/anland_input.h         |  71 ++++
- src/backends/anland/anland_logging.cpp     |   8 +
- src/backends/anland/anland_logging.h       |  10 +
- src/backends/anland/anland_output.cpp      | 147 ++++++++
- src/backends/anland/anland_output.h        |  73 ++++
- src/backends/anland/display_producer.c     | 408 +++++++++++++++++++++
- src/backends/anland/display_producer.h     |  29 ++
- src/backends/anland/protocol.h             |  88 +++++
- src/backends/anland/socket_utils.c         | 121 ++++++
- src/backends/anland/socket_utils.h         |  18 +
- src/main_wayland.cpp                       |  16 +-
- 18 files changed, 2056 insertions(+), 1 deletion(-)
- create mode 100644 src/backends/anland/CMakeLists.txt
- create mode 100644 src/backends/anland/anland_backend.cpp
- create mode 100644 src/backends/anland/anland_backend.h
- create mode 100644 src/backends/anland/anland_egl_backend.cpp
- create mode 100644 src/backends/anland/anland_egl_backend.h
- create mode 100644 src/backends/anland/anland_input.cpp
- create mode 100644 src/backends/anland/anland_input.h
- create mode 100644 src/backends/anland/anland_logging.cpp
- create mode 100644 src/backends/anland/anland_logging.h
- create mode 100644 src/backends/anland/anland_output.cpp
- create mode 100644 src/backends/anland/anland_output.h
- create mode 100644 src/backends/anland/display_producer.c
- create mode 100644 src/backends/anland/display_producer.h
- create mode 100644 src/backends/anland/protocol.h
- create mode 100644 src/backends/anland/socket_utils.c
- create mode 100644 src/backends/anland/socket_utils.h
-
 diff --git a/src/backends/CMakeLists.txt b/src/backends/CMakeLists.txt
 index e94a1c6..82d377c 100644
 --- a/src/backends/CMakeLists.txt
@@ -70,10 +28,10 @@ index 0000000..04985ef
 +target_link_libraries(kwin PRIVATE Libdrm::Libdrm)
 diff --git a/src/backends/anland/anland_backend.cpp b/src/backends/anland/anland_backend.cpp
 new file mode 100644
-index 0000000..8858e40
+index 0000000..a65dbc6
 --- /dev/null
 +++ b/src/backends/anland/anland_backend.cpp
-@@ -0,0 +1,375 @@
+@@ -0,0 +1,379 @@
 +/*
 +    KWin - the KDE window manager
 +    This file is part of the KDE project.
@@ -206,7 +164,10 @@ index 0000000..8858e40
 +    m_reconnectTimer->setInterval(s_reconnectIntervalMs);
 +    connect(m_reconnectTimer, &QTimer::timeout, this, &AnlandBackend::onReconnectTimer);
 +
-+    setupNotifiers();
++    // connect_to_deamon() only fetched screen info; the context is still in
++    // fallback with no consumer fds or dmabufs. Enter fallback explicitly so the
++    // reconnect timer starts and discovers the consumer via try_exit_fallback().
++    enterFallback();
 +
 +    return true;
 +}
@@ -308,7 +269,7 @@ index 0000000..8858e40
 +
 +void AnlandBackend::processInputEvent(const InputEvent &ev)
 +{
-+    if (!m_inputDevice || m_outputs.isEmpty()) {
++    if (!m_inputDevice) {
 +        return;
 +    }
 +    const qreal scale = m_outputs[0]->scale();
@@ -361,17 +322,11 @@ index 0000000..8858e40
 +        return;
 +    }
 +
++    // The dmabuf set is already in hand (try_exit_fallback() received it when we
++    // left fallback), so buffer-ready is purely a frame-completion signal: drain
++    // the eventfd and pace the render cycle.
 +    const int fd = get_buffer_ready_fd(m_display);
-+
-+    if (!m_dmabufReceived) {
-+        // First readiness signal: receive the dmabuf set from the daemon.
-+        wait_buffer_async(m_display);
-+        void *buf = nullptr;
-+        if (wait_buffer_async_result(m_display, &buf) != 0) {
-+            return; // may have entered fallback
-+        }
-+        m_dmabufReceived = true;
-+    } else if (fd >= 0) {
++    if (fd >= 0) {
 +        eventfd_t val;
 +        eventfd_read(fd, &val);
 +    }
@@ -381,9 +336,7 @@ index 0000000..8858e40
 +    // Buffer-ready is our frame-completion signal: complete the in-flight frame
 +    // (if any) and schedule the next one, keeping the render cycle paced by the
 +    // consumer rather than a timer.
-+    if (!m_outputs.isEmpty()) {
-+        m_outputs[0]->onConsumerReady();
-+    }
++    m_outputs[0]->onConsumerReady();
 +}
 +
 +void AnlandBackend::fallbackTrampoline(void *data)
@@ -404,14 +357,17 @@ index 0000000..8858e40
 +
 +    // A frame may be in flight awaiting a buffer-ready that will never come now;
 +    // fail it so the RenderLoop's frame accounting does not stall.
-+    if (!m_outputs.isEmpty()) {
-+        m_outputs[0]->onConsumerLost();
-+    }
++    m_outputs[0]->onConsumerLost();
 +
 +    teardownNotifiers();
 +
++    // Renderer is stopped: drop the imported dmabuf set now that the producer's fds
++    // are gone. The layer is null at startup (no GL backend attached yet).
++    if (AnlandEglLayer *layer = m_outputs[0]->eglLayer()) {
++        layer->releaseBuffers();
++    }
++
 +    m_consumerReady = false;
-+    m_dmabufReceived = false;
 +    m_inFallback = true;
 +
 +    if (m_reconnectTimer) {
@@ -426,35 +382,41 @@ index 0000000..8858e40
 +        return;
 +    }
 +
-+    try_reconnect(m_display);
++    try_exit_fallback(m_display);
 +    if (is_fallback(m_display)) {
 +        return; // still down, keep retrying
 +    }
 +
-+    qCWarning(KWIN_ANLAND) << "consumer reconnected"; // pair with the fallback warning so the transition is visible at the default log level
++    qCInfo(KWIN_ANLAND) << "consumer reconnected";
 +    m_inFallback = false;
-+    m_dmabufReceived = false;
 +    m_consumerReady = false;
 +    setupNotifiers();
 +    m_reconnectTimer->stop();
 +
-+    // Resume the RenderLoop now. It was inhibited in onConsumerLost() to stop
-+    // fallback spam; if we only relied on onConsumerReady() (driven by buf_ready)
-+    // to lift it, the engine would stay paused — no scheduleRepaint, nothing
-+    // rendered — until a buf_ready that the paused engine itself can't provoke.
-+    // Resuming here kicks compositing; the first buf_ready then delivers dmabufs.
-+    if (!m_outputs.isEmpty()) {
-+        m_outputs[0]->resumeRendering();
++    // try_exit_fallback() already received a fresh dmabuf set. Import it into the
++    // layer (which arms an infinite/full-output repaint on every rotation buffer),
++    // resume the RenderLoop (uninhibit, balancing the inhibit from onConsumerLost),
++    // and mark the layer dirty. scheduleRepaint() keeps the layer's needsRepaint()
++    // true so the next composite() paints into the new dmabufs even on an idle
++    // desktop. resumeRendering() runs unconditionally to keep inhibit/uninhibit
++    // balanced regardless of whether the GL layer is attached yet.
++    AnlandEglLayer *layer = m_outputs[0]->eglLayer();
++    if (layer) {
++        layer->importBuffers(get_buf_count(m_display));
++    }
++    m_outputs[0]->resumeRendering();
++    if (layer) {
++        layer->scheduleRepaint(nullptr);
 +    }
 +}
 +
 +} // namespace KWin
 diff --git a/src/backends/anland/anland_backend.h b/src/backends/anland/anland_backend.h
 new file mode 100644
-index 0000000..ac36217
+index 0000000..eca99dc
 --- /dev/null
 +++ b/src/backends/anland/anland_backend.h
-@@ -0,0 +1,112 @@
+@@ -0,0 +1,111 @@
 +/*
 +    KWin - the KDE window manager
 +    This file is part of the KDE project.
@@ -562,17 +524,16 @@ index 0000000..ac36217
 +    QTimer *m_reconnectTimer = nullptr;
 +
 +    bool m_consumerReady = false;
-+    bool m_dmabufReceived = false;
 +    bool m_inFallback = false;
 +};
 +
 +} // namespace KWin
 diff --git a/src/backends/anland/anland_egl_backend.cpp b/src/backends/anland/anland_egl_backend.cpp
 new file mode 100644
-index 0000000..50551a2
+index 0000000..64c77cb
 --- /dev/null
 +++ b/src/backends/anland/anland_egl_backend.cpp
-@@ -0,0 +1,310 @@
+@@ -0,0 +1,309 @@
 +/*
 +    KWin - the KDE window manager
 +    This file is part of the KDE project.
@@ -622,16 +583,26 @@ index 0000000..50551a2
 +    : OutputLayer(output, OutputLayerType::Primary)
 +    , m_backend(backend)
 +    , m_output(output)
++    , m_display(backend->display())
 +{
 +}
 +
 +AnlandEglLayer::~AnlandEglLayer()
 +{
-+    dropBuffers();
++    // Avoid leaving a dangling pointer in the output when we're destroyed without a
++    // removeOutput() call (e.g. ~AnlandEglBackend clearing m_outputs).
++    if (m_output && m_output->eglLayer() == this) {
++        m_output->setEglLayer(nullptr);
++    }
++    releaseBuffers();
 +}
 +
-+void AnlandEglLayer::dropBuffers()
++void AnlandEglLayer::releaseBuffers()
 +{
++    // Destroying the GL textures/framebuffers needs the context current. Callers
++    // (backend state machine on fallback, ~AnlandEglLayer) may run outside a frame.
++    m_backend->openglContext()->makeCurrent();
++
 +    for (int i = 0; i < MAX_BUFS; i++) {
 +        m_fbos[i].reset();
 +        m_textures[i].reset();
@@ -642,18 +613,18 @@ index 0000000..50551a2
 +
 +bool AnlandEglLayer::importBuffers(int count)
 +{
-+    display_ctx *display = m_backend->display();
-+    const QSize size = m_output->modeSize();
-+    const Region full(Rect(QPoint(0, 0), size));
++    m_backend->openglContext()->makeCurrent();
 +
-+    dropBuffers();
++    const QSize size = m_output->modeSize();
++
++    releaseBuffers();
 +
 +    for (int i = 0; i < count; i++) {
-+        const int fd = get_dmabuf_fd_at(display, i);
++        const int fd = get_dmabuf_fd_at(m_display, i);
 +        buf_info info;
-+        if (fd < 0 || get_dmabuf_info_at(display, i, &info) < 0) {
++        if (fd < 0 || get_dmabuf_info_at(m_display, i, &info) < 0) {
 +            qCWarning(KWIN_ANLAND) << "failed to get dmabuf info for buffer" << i;
-+            dropBuffers();
++            releaseBuffers();
 +            return false;
 +        }
 +
@@ -675,7 +646,7 @@ index 0000000..50551a2
 +        std::shared_ptr<GLTexture> texture = m_backend->importDmaBufAsTexture(attrs);
 +        if (!texture) {
 +            qCWarning(KWIN_ANLAND) << "failed to import dmabuf" << i << "as texture";
-+            dropBuffers();
++            releaseBuffers();
 +            return false;
 +        }
 +
@@ -690,7 +661,7 @@ index 0000000..50551a2
 +        auto fbo = std::make_unique<GLFramebuffer>(texture.get());
 +        if (!fbo->valid()) {
 +            qCWarning(KWIN_ANLAND) << "framebuffer for dmabuf" << i << "is not complete";
-+            dropBuffers();
++            releaseBuffers();
 +            return false;
 +        }
 +
@@ -699,8 +670,8 @@ index 0000000..50551a2
 +
 +        m_textures[i] = std::move(texture);
 +        m_fbos[i] = std::move(fbo);
-+        // Freshly imported dmabuf has undefined contents: owe it a full frame.
-+        m_accumDamage[i] = full;
++        // Freshly imported dmabuf has undefined contents: owe it a full repaint.
++        m_accumDamage[i] = Region::infinite();
 +    }
 +
 +    m_bufCount = count;
@@ -711,25 +682,14 @@ index 0000000..50551a2
 +{
 +    m_backend->openglContext()->makeCurrent();
 +
-+    display_ctx *display = m_backend->display();
-+    const int count = get_buf_count(display);
-+
-+    // Consumer went away (fallback) -> release our stale imports.
-+    if (count == 0) {
-+        if (m_bufCount > 0) {
-+            dropBuffers();
-+        }
++    // Buffer import/release is driven by the backend state machine (importBuffers()
++    // on reconnect, releaseBuffers() on fallback), not here. With nothing imported
++    // there is no dmabuf to render into.
++    if (m_bufCount == 0) {
 +        return std::nullopt;
 +    }
 +
-+    // (Re)connected and dmabufs are available but not imported yet.
-+    if (m_bufCount == 0) {
-+        if (!importBuffers(count)) {
-+            return std::nullopt;
-+        }
-+    }
-+
-+    m_currentIndex = get_selected_idx(display);
++    m_currentIndex = get_selected_idx(m_display);
 +    if (m_currentIndex < 0 || m_currentIndex >= m_bufCount) {
 +        m_currentIndex = 0;
 +    }
@@ -744,7 +704,7 @@ index 0000000..50551a2
 +{
 +    glFlush(); // flush pending rendering commands into the dmabuf.
 +    //虽然会有竞争，但是android的三重缓冲机制可以消除
-+    // 使用 flush 保证流水线执行
++    // 使用 flush 保证流水线执
 +    // Every buffer owes this frame's damage; the buffer we just painted is now
 +    // fully up to date, so clear its debt.
 +    for (int i = 0; i < m_bufCount; i++) {
@@ -781,11 +741,6 @@ index 0000000..50551a2
 +QHash<uint32_t, QList<uint64_t>> AnlandEglLayer::supportedDrmFormats() const
 +{
 +    return {};
-+}
-+
-+void AnlandEglLayer::releaseBuffers()
-+{
-+    dropBuffers();
 +}
 +
 +AnlandEglBackend::AnlandEglBackend(AnlandBackend *b)
@@ -864,12 +819,17 @@ index 0000000..50551a2
 +void AnlandEglBackend::addOutput(BackendOutput *output)
 +{
 +    openglContext()->makeCurrent();
-+    m_outputs[output] = std::make_unique<AnlandEglLayer>(static_cast<AnlandOutput *>(output), this);
++    auto *anlandOutput = static_cast<AnlandOutput *>(output);
++    auto layer = std::make_unique<AnlandEglLayer>(anlandOutput, this);
++    // Let AnlandBackend reach this layer through its output (output->eglLayer()).
++    anlandOutput->setEglLayer(layer.get());
++    m_outputs[output] = std::move(layer);
 +}
 +
 +void AnlandEglBackend::removeOutput(BackendOutput *output)
 +{
 +    openglContext()->makeCurrent();
++    static_cast<AnlandOutput *>(output)->setEglLayer(nullptr);
 +    m_outputs.erase(output);
 +}
 +
@@ -885,10 +845,10 @@ index 0000000..50551a2
 +} // namespace KWin
 diff --git a/src/backends/anland/anland_egl_backend.h b/src/backends/anland/anland_egl_backend.h
 new file mode 100644
-index 0000000..08d97d0
+index 0000000..8c3598a
 --- /dev/null
 +++ b/src/backends/anland/anland_egl_backend.h
-@@ -0,0 +1,102 @@
+@@ -0,0 +1,109 @@
 +/*
 +    KWin - the KDE window manager
 +    This file is part of the KDE project.
@@ -942,14 +902,21 @@ index 0000000..08d97d0
 +    // never allocates or scans out through DRM itself, so these are stubs.
 +    DrmDevice *scanoutDevice() const override;
 +    QHash<uint32_t, QList<uint64_t>> supportedDrmFormats() const override;
++
++    // Buffer lifetime is driven by the backend state machine, not doBeginFrame():
++    // importBuffers() imports the daemon's dmabuf set on (re)connect and arms a
++    // full-output (infinite) repaint on every rotation buffer; releaseBuffers()
++    // drops them on fallback (and satisfies the OutputLayer interface). Both make
++    // the GL context current, so they are safe to call from outside a frame.
++    bool importBuffers(int count);
 +    void releaseBuffers() override;
 +
 +private:
-+    bool importBuffers(int count);
-+    void dropBuffers();
-+
 +    AnlandEglBackend *const m_backend;
 +    AnlandOutput *m_output;
++    // Cached producer handle (stable for the backend's lifetime); avoids the
++    // m_backend->display() forwarding chain on every doBeginFrame().
++    display_ctx *const m_display;
 +
 +    int m_bufCount = 0;
 +    int m_currentIndex = 0;
@@ -993,10 +960,10 @@ index 0000000..08d97d0
 +} // namespace KWin
 diff --git a/src/backends/anland/anland_input.cpp b/src/backends/anland/anland_input.cpp
 new file mode 100644
-index 0000000..e794610
+index 0000000..3e037be
 --- /dev/null
 +++ b/src/backends/anland/anland_input.cpp
-@@ -0,0 +1,155 @@
+@@ -0,0 +1,163 @@
 +/*
 +    KWin - the KDE window manager
 +    This file is part of the KDE project.
@@ -1086,9 +1053,15 @@ index 0000000..e794610
 +    return false;
 +}
 +
++// KWin only delivers pointer events to client apps on a wl_pointer.frame, so every
++// pointer event must be followed by a pointerFrame() (exactly as the libinput
++// backend does). Without it scroll is dropped entirely; cursor motion and focus
++// still appear to work only because PointerInputRedirection handles those
++// compositor-side, independent of client delivery.
 +void AnlandInputDevice::pointerMotionAbsolute(const QPointF &position)
 +{
 +    Q_EMIT InputDevice::pointerMotionAbsolute(position, now(), this);
++    Q_EMIT InputDevice::pointerFrame(this);
 +}
 +
 +void AnlandInputDevice::pointerButton(quint32 button, bool pressed)
@@ -1096,6 +1069,7 @@ index 0000000..e794610
 +    Q_EMIT pointerButtonChanged(button,
 +                                pressed ? PointerButtonState::Pressed : PointerButtonState::Released,
 +                                now(), this);
++    Q_EMIT InputDevice::pointerFrame(this);
 +}
 +
 +void AnlandInputDevice::pointerAxis(PointerAxis axis, qreal delta, qint32 deltaV120)
@@ -1105,6 +1079,7 @@ index 0000000..e794610
 +    // 6.x pointerAxisChanged carries an explicit "inverted" (natural scroll) flag;
 +    // the daemon already delivers deltas in KWin's direction, so it is never set.
 +    Q_EMIT pointerAxisChanged(axis, delta, deltaV120, source, false, now(), this);
++    Q_EMIT InputDevice::pointerFrame(this);
 +}
 +
 +void AnlandInputDevice::keyboardKey(quint32 keycode, bool pressed)
@@ -1261,10 +1236,10 @@ index 0000000..d3928b8
 +Q_DECLARE_LOGGING_CATEGORY(KWIN_ANLAND)
 diff --git a/src/backends/anland/anland_output.cpp b/src/backends/anland/anland_output.cpp
 new file mode 100644
-index 0000000..3a15d56
+index 0000000..c848efa
 --- /dev/null
 +++ b/src/backends/anland/anland_output.cpp
-@@ -0,0 +1,143 @@
+@@ -0,0 +1,153 @@
 +/*
 +    KWin - the KDE window manager
 +    This file is part of the KDE project.
@@ -1275,7 +1250,7 @@ index 0000000..3a15d56
 +#include "anland_backend.h"
 +
 +#include "core/renderbackend.h" // OutputFrame
-+#include "core/renderloop.h" 
++#include "core/renderloop.h"
 +
 +#include <chrono>
 +
@@ -1372,15 +1347,19 @@ index 0000000..3a15d56
 +        m_awaitingPresent = false;
 +        completeFrame();
 +    }
++    // Render the next frame in lockstep with the consumer, exactly as the 5.27
++    // backend did: the consumer's buffer-ready drives scheduleRepaint().
++    m_renderLoop->scheduleRepaint();
 +}
 +
-+void AnlandOutput::resumeRendering()
++void AnlandOutput::setEglLayer(AnlandEglLayer *layer)
 +{
-+    if (m_renderingPaused) {
-+        m_renderingPaused = false;
-+        m_renderLoop->uninhibit();
-+    }
-+    m_renderLoop->scheduleRepaint();
++    m_eglLayer = layer;
++}
++
++AnlandEglLayer *AnlandOutput::eglLayer() const
++{
++    return m_eglLayer;
 +}
 +
 +void AnlandOutput::onConsumerLost()
@@ -1393,27 +1372,33 @@ index 0000000..3a15d56
 +        // (the 6.x equivalent of the 5.27 backend's notifyFrameFailed()).
 +        m_frame.reset();
 +    }
-+    // Pause compositing while the consumer is gone. Otherwise every composite
-+    // KWin drives (cursor, effects, our own scheduleRepaint) reaches
-+    // AnlandEglLayer::doBeginFrame(), which returns nullopt (no buffers) -> the
-+    // compositor logs "Failed to find a working output layer configuration!" on
-+    // a loop and churns the output-layer state, which also makes reconnects
-+    // flaky. inhibit() stops the RenderLoop's timer; onConsumerReady() resumes it
-+    // on the first buf_ready after reconnect. (Transient, balanced inhibit — the
-+    // same pattern the DRM/Wayland backends use for an unavailable output.)
-+    if (!m_renderingPaused) {
-+        m_renderingPaused = true;
++
++    // Pause compositing while the consumer is gone: there are no dmabufs to render
++    // into. The bool keeps inhibit/uninhibit balanced (uninhibit() asserts > 0).
++    if (!m_renderingInhibited) {
 +        m_renderLoop->inhibit();
++        m_renderingInhibited = true;
++    }
++}
++
++void AnlandOutput::resumeRendering()
++{
++    // Consumer is back and dmabufs are imported: resume compositing. uninhibit()
++    // reschedules the next repaint internally; the backend then marks the layer
++    // dirty (scheduleRepaint) so the first frame actually paints.
++    if (m_renderingInhibited) {
++        m_renderLoop->uninhibit();
++        m_renderingInhibited = false;
 +    }
 +}
 +
 +} // namespace KWin
 diff --git a/src/backends/anland/anland_output.h b/src/backends/anland/anland_output.h
 new file mode 100644
-index 0000000..d25c7bd
+index 0000000..90163a9
 --- /dev/null
 +++ b/src/backends/anland/anland_output.h
-@@ -0,0 +1,73 @@
+@@ -0,0 +1,80 @@
 +/*
 +    KWin - the KDE window manager
 +    This file is part of the KDE project.
@@ -1438,6 +1423,7 @@ index 0000000..d25c7bd
 +{
 +
 +class AnlandBackend;
++class AnlandEglLayer;
 +class OutputFrame;
 +class OutputLayer;
 +class RenderLoop;
@@ -1462,15 +1448,20 @@ index 0000000..d25c7bd
 +     *  frame and schedule the next one, keeping the cycle consumer-paced. */
 +    void onConsumerReady();
 +
-+    /** Consumer went away mid-frame: complete any in-flight frame now so the
-+     *  RenderLoop does not wait forever for a buffer-ready that will never
-+     *  arrive. */
++    /** Consumer went away (fallback): fail any in-flight frame and inhibit() the
++     *  RenderLoop so the compositor stops trying to render into dmabufs that no
++     *  longer exist. */
 +    void onConsumerLost();
 +
-+    /** Reconnected to the daemon: un-pause compositing (lifted from fallback)
-+     *  and kick a repaint, so the engine resumes instead of staying inhibited
-+     *  while it waits for a buffer-ready that the paused engine can't drive. */
++    /** Consumer reconnected: uninhibit() the RenderLoop so compositing resumes. */
 +    void resumeRendering();
++
++    /** The primary render layer for this output. Owned by AnlandEglBackend and
++     *  wired up in AnlandEglBackend::addOutput(); null while no render backend is
++     *  attached. Lets AnlandBackend drive the layer through its output — e.g.
++     *  schedule a repaint when leaving fallback. */
++    void setEglLayer(AnlandEglLayer *layer);
++    AnlandEglLayer *eglLayer() const;
 +
 +private:
 +    void completeFrame();
@@ -1480,19 +1471,20 @@ index 0000000..d25c7bd
 +    AnlandBackend *m_backend;
 +    std::unique_ptr<RenderLoop> m_renderLoop;
 +    std::shared_ptr<OutputFrame> m_frame;
++    AnlandEglLayer *m_eglLayer = nullptr;
 +    bool m_awaitingPresent = false;
-+    // True while compositing is paused because the consumer is gone (fallback).
-+    // Balances the RenderLoop's inhibit counter across fallback/reconnect cycles.
-+    bool m_renderingPaused = false;
++    // Tracks our RenderLoop::inhibit() so inhibit/uninhibit stay balanced
++    // (uninhibit() asserts the count is > 0). See onConsumerLost()/resumeRendering().
++    bool m_renderingInhibited = false;
 +};
 +
 +} // namespace KWin
 diff --git a/src/backends/anland/display_producer.c b/src/backends/anland/display_producer.c
 new file mode 100644
-index 0000000..02c9616
+index 0000000..396bdf5
 --- /dev/null
 +++ b/src/backends/anland/display_producer.c
-@@ -0,0 +1,408 @@
+@@ -0,0 +1,359 @@
 +#define _GNU_SOURCE
 +#include "display_producer.h"
 +#include "socket_utils.h"
@@ -1507,6 +1499,10 @@ index 0000000..02c9616
 +#include <sys/socket.h>
 +#include <unistd.h>
 +
++/* poll() timeout (ms) for the two reconnect handshake steps. Kept short so the
++ * caller's reconnect loop stays responsive when no consumer is present yet. */
++#define HANDSHAKE_TIMEOUT_MS 100
++
 +struct display_ctx {
 +    int      ctrl_fd;
 +    int      data_fd;
@@ -1519,7 +1515,6 @@ index 0000000..02c9616
 +    uint32_t refresh;
 +    bool     fallback;
 +
-+    bool     async_pending;
 +    int      dmabuf_fds[MAX_BUFS];
 +    struct buf_info dmabuf_infos[MAX_BUFS];
 +    int      buf_count;
@@ -1528,12 +1523,13 @@ index 0000000..02c9616
 +    void  *fallback_userdata;
 +};
 +
-+static void enter_fallback(display_ctx *ctx)
++/*
++ * Release every consumer-side resource (dmabuf fds, the four picked-up fds and the
++ * shm mapping), leaving the context holding only the daemon ctrl_fd. Does NOT touch
++ * the fallback flag or fire the fallback callback — callers decide that. Idempotent.
++ */
++static void release_consumer_resources(display_ctx *ctx)
 +{
-+    if (ctx->fallback)
-+        return;
-+    ctx->fallback = true;
-+
 +    for (int i = 0; i < ctx->buf_count; i++) {
 +        if (ctx->dmabuf_fds[i] >= 0) {
 +            close(ctx->dmabuf_fds[i]);
@@ -1541,42 +1537,114 @@ index 0000000..02c9616
 +        }
 +    }
 +    ctx->buf_count = 0;
-+    if (ctx->data_fd >= 0)         { close(ctx->data_fd);         ctx->data_fd = -1; }
-+    if (ctx->buf_ready_efd >= 0)   { close(ctx->buf_ready_efd);   ctx->buf_ready_efd = -1; }
-+    if (ctx->refresh_done_efd >= 0){ close(ctx->refresh_done_efd); ctx->refresh_done_efd = -1; }
-+    if (ctx->shm_ptr) { munmap((void *)ctx->shm_ptr, sizeof(uint32_t)); ctx->shm_ptr = NULL; }
-+    if (ctx->shm_fd >= 0)         { close(ctx->shm_fd);           ctx->shm_fd = -1; }
++
++    if (ctx->data_fd >= 0)          { close(ctx->data_fd);          ctx->data_fd = -1; }
++    if (ctx->buf_ready_efd >= 0)    { close(ctx->buf_ready_efd);    ctx->buf_ready_efd = -1; }
++    if (ctx->refresh_done_efd >= 0) { close(ctx->refresh_done_efd); ctx->refresh_done_efd = -1; }
++    if (ctx->shm_ptr)               { munmap((void *)ctx->shm_ptr, sizeof(uint32_t)); ctx->shm_ptr = NULL; }
++    if (ctx->shm_fd >= 0)           { close(ctx->shm_fd);           ctx->shm_fd = -1; }
++}
++
++static void enter_fallback(display_ctx *ctx)
++{
++    if (ctx->fallback)
++        return;
++    ctx->fallback = true;
++
++    release_consumer_resources(ctx);
 +
 +    if (ctx->fallback_cb)
 +        ctx->fallback_cb(ctx->fallback_userdata);
 +}
 +
++/*
++ * Ask the daemon for the consumer-side fds and map the shm index. Polls ctrl_fd
++ * with a short timeout so it returns promptly when no consumer is up yet. On
++ * success the four fds and shm_ptr are installed on ctx; the caller releases them
++ * via release_consumer_resources() on any later failure. Returns 0 / -1.
++ */
 +static int pickup_fds(display_ctx *ctx)
 +{
 +    struct ctrl_msg hdr = { .type = CTRL_MSG_PICKUP_FDS, .size = 0 };
 +    if (send_all(ctx->ctrl_fd, &hdr, sizeof(hdr)) < 0)
 +        return -1;
 +
++    struct pollfd pfd = { .fd = ctx->ctrl_fd, .events = POLLIN };
++    if (poll(&pfd, 1, HANDSHAKE_TIMEOUT_MS) <= 0)
++        return -1;
++
 +    int fds[4];
 +    int fd_count = 0;
 +    struct ctrl_msg resp;
 +    int n = recv_fds(ctx->ctrl_fd, &resp, sizeof(resp), fds, 4, &fd_count);
-+    if (n <= 0 || resp.type != CTRL_MSG_FDS_READY || fd_count < 4)
++    if (n <= 0 || resp.type != CTRL_MSG_FDS_READY || fd_count < 4) {
++        for (int i = 0; i < fd_count; i++)
++            close(fds[i]);
 +        return -1;
++    }
 +
-+    ctx->buf_ready_efd = fds[0];
++    ctx->buf_ready_efd    = fds[0];
 +    ctx->refresh_done_efd = fds[1];
-+    ctx->data_fd = fds[2];
-+    ctx->shm_fd = fds[3];
++    ctx->data_fd          = fds[2];
++    ctx->shm_fd           = fds[3];
 +
-+    ctx->shm_ptr = mmap(NULL, sizeof(uint32_t), PROT_READ,
-+                        MAP_SHARED, ctx->shm_fd, 0);
++    ctx->shm_ptr = mmap(NULL, sizeof(uint32_t), PROT_READ, MAP_SHARED, ctx->shm_fd, 0);
 +    if (ctx->shm_ptr == MAP_FAILED) {
 +        ctx->shm_ptr = NULL;
 +        return -1;
 +    }
++    return 0;
++}
 +
-+    ctx->fallback = false;
++/*
++ * Receive the dmabuf set the consumer pushes onto the data channel right after the
++ * fd handshake. Polls data_fd with a short timeout. On failure the caller releases
++ * the partially-acquired consumer resources. Returns 0 / -1.
++ */
++static int receive_dmabufs(display_ctx *ctx)
++{
++    if (ctx->buf_count > 0)
++        return 0;
++
++    struct pollfd pfd = { .fd = ctx->data_fd, .events = POLLIN | POLLHUP | POLLERR };
++    if (poll(&pfd, 1, HANDSHAKE_TIMEOUT_MS) <= 0)
++        return -1;
++    if (pfd.revents & (POLLHUP | POLLERR))
++        return -1;
++
++    struct data_msg dhdr;
++    int fds[MAX_BUFS];
++    int fd_count = 0;
++
++    int n = recv_fds(ctx->data_fd, &dhdr, sizeof(dhdr), fds, MAX_BUFS, &fd_count);
++    if (n < (int)sizeof(struct data_msg) || fd_count < 1)
++        return -1;
++
++    if (dhdr.type != DATA_MSG_BUFS_READY) {
++        for (int i = 0; i < fd_count; i++)
++            close(fds[i]);
++        return -1;
++    }
++
++    int count = dhdr.size / sizeof(struct buf_info);
++    if (count != fd_count || count > MAX_BUFS) {
++        for (int i = 0; i < fd_count; i++)
++            close(fds[i]);
++        return -1;
++    }
++
++    struct buf_info infos[MAX_BUFS];
++    if (recv_all(ctx->data_fd, infos, dhdr.size) < 0) {
++        for (int i = 0; i < fd_count; i++)
++            close(fds[i]);
++        return -1;
++    }
++
++    for (int i = 0; i < count; i++) {
++        ctx->dmabuf_fds[i] = fds[i];
++        ctx->dmabuf_infos[i] = infos[i];
++    }
++    ctx->buf_count = count;
 +    return 0;
 +}
 +
@@ -1592,7 +1660,7 @@ index 0000000..02c9616
 +    ctx->refresh_done_efd = -1;
 +    ctx->shm_fd = -1;
 +    ctx->shm_ptr = NULL;
-+    ctx->fallback = true;
++    ctx->fallback = true; // stay in fallback until try_exit_fallback() succeeds
 +    for (int i = 0; i < MAX_BUFS; i++)
 +        ctx->dmabuf_fds[i] = -1;
 +
@@ -1620,19 +1688,15 @@ index 0000000..02c9616
 +    ctx->pixel_format = si.format;
 +    ctx->refresh = si.refresh;
 +
-+    if (pickup_fds(ctx) < 0)
-+        goto fail;
-+
++    // Daemon handshake only: screen info is in hand, but the consumer fds and
++    // dmabufs are deliberately left for try_exit_fallback() so the backend brings
++    // the consumer up through the single reconnect path. Stay in fallback.
 +    *out = ctx;
 +    return 0;
 +
 +fail:
-+    if (ctx->shm_ptr) munmap((void *)ctx->shm_ptr, sizeof(uint32_t));
-+    if (ctx->shm_fd >= 0)         close(ctx->shm_fd);
-+    if (ctx->ctrl_fd >= 0)         close(ctx->ctrl_fd);
-+    if (ctx->data_fd >= 0)         close(ctx->data_fd);
-+    if (ctx->buf_ready_efd >= 0)   close(ctx->buf_ready_efd);
-+    if (ctx->refresh_done_efd >= 0) close(ctx->refresh_done_efd);
++    if (ctx->ctrl_fd >= 0)
++        close(ctx->ctrl_fd);
 +    free(ctx);
 +    return -1;
 +}
@@ -1641,16 +1705,9 @@ index 0000000..02c9616
 +{
 +    if (!ctx)
 +        return;
-+    for (int i = 0; i < ctx->buf_count; i++) {
-+        if (ctx->dmabuf_fds[i] >= 0)
-+            close(ctx->dmabuf_fds[i]);
-+    }
-+    if (ctx->shm_ptr) munmap((void *)ctx->shm_ptr, sizeof(uint32_t));
-+    if (ctx->shm_fd >= 0)         close(ctx->shm_fd);
-+    if (ctx->ctrl_fd >= 0)         close(ctx->ctrl_fd);
-+    if (ctx->data_fd >= 0)         close(ctx->data_fd);
-+    if (ctx->buf_ready_efd >= 0)   close(ctx->buf_ready_efd);
-+    if (ctx->refresh_done_efd >= 0) close(ctx->refresh_done_efd);
++    release_consumer_resources(ctx);
++    if (ctx->ctrl_fd >= 0)
++        close(ctx->ctrl_fd);
 +    free(ctx);
 +}
 +
@@ -1660,106 +1717,6 @@ index 0000000..02c9616
 +    *height = ctx->screen_h;
 +    *format = ctx->pixel_format;
 +    *refresh = ctx->refresh;
-+    return 0;
-+}
-+
-+int wait_buffer_async(display_ctx *ctx)
-+{
-+    ctx->async_pending = true;
-+    return 0;
-+}
-+
-+static int receive_dmabufs(display_ctx *ctx)
-+{
-+    if (ctx->buf_count > 0)
-+        return 0;
-+
-+    struct data_msg dhdr;
-+    int fds[MAX_BUFS];
-+    int fd_count = 0;
-+
-+    int n = recv_fds(ctx->data_fd, &dhdr, sizeof(dhdr), fds, MAX_BUFS, &fd_count);
-+    if (n < (int)sizeof(struct data_msg) || fd_count < 1) {
-+        enter_fallback(ctx);
-+        return -1;
-+    }
-+
-+    if (dhdr.type != DATA_MSG_BUFS_READY) {
-+        for (int i = 0; i < fd_count; i++)
-+            close(fds[i]);
-+        return -1;
-+    }
-+
-+    int count = dhdr.size / sizeof(struct buf_info);
-+    if (count != fd_count || count > MAX_BUFS) {
-+        for (int i = 0; i < fd_count; i++)
-+            close(fds[i]);
-+        return -1;
-+    }
-+
-+    struct buf_info infos[MAX_BUFS];
-+    if (recv_all(ctx->data_fd, infos, dhdr.size) < 0) {
-+        for (int i = 0; i < fd_count; i++)
-+            close(fds[i]);
-+        enter_fallback(ctx);
-+        return -1;
-+    }
-+
-+    for (int i = 0; i < count; i++) {
-+        ctx->dmabuf_fds[i] = fds[i];
-+        ctx->dmabuf_infos[i] = infos[i];
-+    }
-+    ctx->buf_count = count;
-+    return 0;
-+}
-+
-+int wait_buffer_async_result(display_ctx *ctx, void **buffer)
-+{
-+    *buffer = NULL;
-+
-+    if (ctx->fallback) {
-+        ctx->async_pending = false;
-+        if (pickup_fds(ctx) < 0)
-+            return -1;
-+    }
-+
-+    if (!ctx->async_pending)
-+        return -1;
-+
-+    struct pollfd pfd[2] = {
-+        { .fd = ctx->buf_ready_efd, .events = POLLIN },
-+        { .fd = ctx->data_fd,       .events = POLLIN | POLLHUP | POLLERR },
-+    };
-+
-+    while (1) {
-+        int ret = poll(pfd, 2, 5000);
-+        if (ret < 0) {
-+            if (errno == EINTR) continue;
-+            enter_fallback(ctx);
-+            ctx->async_pending = false;
-+            return -1;
-+        }
-+        if (ret == 0) continue;
-+
-+        if (pfd[1].revents & (POLLHUP | POLLERR)) {
-+            enter_fallback(ctx);
-+            ctx->async_pending = false;
-+            return -1;
-+        }
-+        if (pfd[0].revents & POLLIN)
-+            break;
-+    }
-+
-+    eventfd_t val;
-+    eventfd_read(ctx->buf_ready_efd, &val);
-+
-+    if (receive_dmabufs(ctx) < 0) {
-+        ctx->async_pending = false;
-+        return -1;
-+    }
-+
-+    ctx->async_pending = false;
-+    *buffer = NULL;
 +    return 0;
 +}
 +
@@ -1817,40 +1774,26 @@ index 0000000..02c9616
 +    return ctx->fallback;
 +}
 +
-+int try_reconnect(display_ctx *ctx)
++int try_exit_fallback(display_ctx *ctx)
 +{
 +    if (!ctx->fallback)
 +        return 0;
 +
-+    struct ctrl_msg hdr = { .type = CTRL_MSG_PICKUP_FDS, .size = 0 };
-+    if (send_all(ctx->ctrl_fd, &hdr, sizeof(hdr)) < 0)
++    // Step 1: ask the daemon to hand over the consumer-side fds.
++    if (pickup_fds(ctx) < 0) {
++        release_consumer_resources(ctx);
 +        return -1;
++    }
 +
-+    struct pollfd pfd = { .fd = ctx->ctrl_fd, .events = POLLIN };
-+    if (poll(&pfd, 1, 100) <= 0)
-+        return -1;
-+
-+    int fds[4];
-+    int fd_count = 0;
-+    struct ctrl_msg resp;
-+    int n = recv_fds(ctx->ctrl_fd, &resp, sizeof(resp), fds, 4, &fd_count);
-+    if (n <= 0 || resp.type != CTRL_MSG_FDS_READY || fd_count < 4)
-+        return -1;
-+
-+    ctx->buf_ready_efd = fds[0];
-+    ctx->refresh_done_efd = fds[1];
-+    ctx->data_fd = fds[2];
-+    ctx->shm_fd = fds[3];
-+
-+    ctx->shm_ptr = mmap(NULL, sizeof(uint32_t), PROT_READ,
-+                        MAP_SHARED, ctx->shm_fd, 0);
-+    if (ctx->shm_ptr == MAP_FAILED) {
-+        ctx->shm_ptr = NULL;
++    // Step 2: immediately pull the dmabuf set the consumer pushes right after the
++    // fd handshake. Only leave fallback once both fds and dmabufs are in hand, so
++    // the backend can import straight away.
++    if (receive_dmabufs(ctx) < 0) {
++        release_consumer_resources(ctx);
 +        return -1;
 +    }
 +
 +    ctx->fallback = false;
-+    ctx->buf_count = 0;
 +    return 0;
 +}
 +
@@ -1903,10 +1846,10 @@ index 0000000..02c9616
 +}
 diff --git a/src/backends/anland/display_producer.h b/src/backends/anland/display_producer.h
 new file mode 100644
-index 0000000..b61a405
+index 0000000..32096f1
 --- /dev/null
 +++ b/src/backends/anland/display_producer.h
-@@ -0,0 +1,29 @@
+@@ -0,0 +1,59 @@
 +#ifndef DISPLAY_PRODUCER_H
 +#define DISPLAY_PRODUCER_H
 +
@@ -1916,16 +1859,46 @@ index 0000000..b61a405
 +
 +typedef struct display_ctx display_ctx;
 +
++/*
++ * Producer-side state machine
++ * ----------------------------
++ * connect_to_deamon() performs only the daemon handshake: it fetches the screen
++ * info and leaves the context in *fallback* (no consumer fds, no dmabufs). The
++ * backend then drives a reconnect loop that polls try_exit_fallback(); once that
++ * call succeeds the context owns the consumer fds and the dmabuf set, and
++ * is_fallback() returns false. Losing the consumer drops the context back to
++ * fallback (see set_fallback_callback) and the loop resumes.
++ */
++
++/* Connect to the daemon and fetch screen info only. Leaves the context in
++ * fallback: it does NOT pick up consumer fds or dmabufs. Returns 0 / -1. */
 +int  connect_to_deamon(display_ctx **ctx, const char *socket_path);
++
++/* Tear down everything and disconnect from the daemon. */
 +void disconnect(display_ctx *ctx);
++
 +int  get_screen_info(display_ctx *ctx, uint32_t *width, uint32_t *height, uint32_t *format, uint32_t *refresh);
-+int  wait_buffer_async(display_ctx *ctx);
-+int  wait_buffer_async_result(display_ctx *ctx, void **buffer);
++
++/* Signal the consumer that the current frame is done. No-op in fallback. */
 +int  trigger_refresh(display_ctx *ctx);
++
++/* Pull one pending input event. Returns 1 if an event was written, 0 if none was
++ * available, -1 on consumer loss. No-op (returns 0) in fallback. */
 +int  poll_input_event(display_ctx *ctx, struct InputEvent *event, int timeout_ms);
++
++/* Register a callback invoked when the consumer is lost and the context drops
++ * back to fallback. */
 +int  set_fallback_callback(display_ctx *ctx, void (*on_fallback)(void *), void *userdata);
++
 +bool is_fallback(display_ctx *ctx);
-+int  try_reconnect(display_ctx *ctx);
++
++/* Attempt to leave fallback: pick up the consumer fds and immediately receive the
++ * dmabuf set (the consumer sends the dmabufs right after the fd handshake). Clears
++ * fallback only when BOTH the fds and the dmabufs are in hand, so on a 0 return the
++ * dmabufs are ready to import right away. Returns 0 on success, -1 if there is
++ * still no consumer (stays in fallback; safe to retry on the next tick). */
++int  try_exit_fallback(display_ctx *ctx);
++
 +int  get_data_fd(display_ctx *ctx);
 +int  get_buffer_ready_fd(display_ctx *ctx);
 +int  get_buf_count(display_ctx *ctx);
@@ -2243,6 +2216,3 @@ index 3245c18..7e8f5bc 100644
      }
  
      KWin::WaylandServer *server = KWin::WaylandServer::create();
--- 
-2.53.0
-
