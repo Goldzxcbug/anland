@@ -1,7 +1,7 @@
 diff -ruN a/src/backends/anland/anland_backend.cpp b/src/backends/anland/anland_backend.cpp
 --- a/src/backends/anland/anland_backend.cpp	1970-01-01 08:00:00.000000000 +0800
-+++ b/src/backends/anland/anland_backend.cpp	2026-06-20 15:17:45.745137518 +0800
-@@ -0,0 +1,384 @@
++++ b/src/backends/anland/anland_backend.cpp	2026-06-20 22:53:09.327654112 +0800
+@@ -0,0 +1,394 @@
 +/*
 +    KWin - the KDE window manager
 +    This file is part of the KDE project.
@@ -237,16 +237,26 @@ diff -ruN a/src/backends/anland/anland_backend.cpp b/src/backends/anland/anland_
 +    }
 +}
 +
++QPointF AnlandBackend::mapInputToLogical(const QPointF &devicePoint) const
++{
++    AnlandOutput *output = m_outputs[0];
++    // The compositor maps logical -> device with transform().map(p, pixelSize()),
++    // so the inverse maps device -> logical with the inverted transform bounded by
++    // the device-space size (modeSize, the buffer's native landscape extent).
++    // Then divide out the output scale to land in global logical coordinates.
++    const QPointF logical = output->transform().inverted().map(devicePoint, QSizeF(output->modeSize()));
++    return logical / output->scale();
++}
++
 +void AnlandBackend::processInputEvent(const InputEvent &ev)
 +{
 +    if (!m_inputDevice) {
 +        return;
 +    }
-+    const qreal scale = m_outputs[0]->scale();
 +
 +    switch (ev.type) {
 +    case INPUT_TYPE_POINTER_MOTION:
-+        m_inputDevice->pointerMotionAbsolute(QPointF(ev.pointer_motion.x, ev.pointer_motion.y) / scale);
++        m_inputDevice->pointerMotionAbsolute(mapInputToLogical(QPointF(ev.pointer_motion.x, ev.pointer_motion.y)));
 +        break;
 +    case INPUT_TYPE_POINTER_BUTTON:
 +        m_inputDevice->pointerButton(ev.pointer_button.button, ev.pointer_button.pressed != 0);
@@ -262,7 +272,7 @@ diff -ruN a/src/backends/anland/anland_backend.cpp b/src/backends/anland/anland_
 +        m_inputDevice->keyboardKey(ev.key.keycode, ev.key.action == INPUT_ACTION_DOWN);
 +        break;
 +    case INPUT_TYPE_TOUCH: {
-+        const QPointF pos = QPointF(ev.touch.x, ev.touch.y) / scale;
++        const QPointF pos = mapInputToLogical(QPointF(ev.touch.x, ev.touch.y));
 +        switch (ev.touch.action) {
 +        case INPUT_ACTION_DOWN:
 +            m_inputDevice->touchDown(ev.touch.pointer_id, pos);
@@ -388,8 +398,8 @@ diff -ruN a/src/backends/anland/anland_backend.cpp b/src/backends/anland/anland_
 +} // namespace KWin
 diff -ruN a/src/backends/anland/anland_backend.h b/src/backends/anland/anland_backend.h
 --- a/src/backends/anland/anland_backend.h	1970-01-01 08:00:00.000000000 +0800
-+++ b/src/backends/anland/anland_backend.h	2026-06-19 23:56:13.564169814 +0800
-@@ -0,0 +1,111 @@
++++ b/src/backends/anland/anland_backend.h	2026-06-20 22:52:48.554305243 +0800
+@@ -0,0 +1,122 @@
 +/*
 +    KWin - the KDE window manager
 +    This file is part of the KDE project.
@@ -405,6 +415,7 @@ diff -ruN a/src/backends/anland/anland_backend.h b/src/backends/anland/anland_ba
 +
 +#include "core/outputbackend.h"
 +
++#include <QPointF>
 +#include <QVector>
 +#include <memory>
 +
@@ -479,6 +490,16 @@ diff -ruN a/src/backends/anland/anland_backend.h b/src/backends/anland/anland_ba
 +    void onInputReadable();
 +    void onBufferReady();
 +    void processInputEvent(const InputEvent &ev);
++    /**
++     * Map a point reported by the daemon — physical device pixels in the panel's
++     * native (landscape) orientation — into KWin global logical coordinates,
++     * undoing the output's rotation and scale. The daemon is orientation-agnostic
++     * and always reports in the buffer's coordinate space, so once the output is
++     * rotated the raw coordinates no longer match the logical desktop; this is the
++     * inverse of the compositor's logical->device mapping. Identity for an
++     * un-rotated, scale-1.0 output.
++     */
++    QPointF mapInputToLogical(const QPointF &devicePoint) const;
 +    void onReconnectTimer();
 +    void enterFallback();
 +
@@ -503,8 +524,8 @@ diff -ruN a/src/backends/anland/anland_backend.h b/src/backends/anland/anland_ba
 +} // namespace KWin
 diff -ruN a/src/backends/anland/anland_egl_backend.cpp b/src/backends/anland/anland_egl_backend.cpp
 --- a/src/backends/anland/anland_egl_backend.cpp	1970-01-01 08:00:00.000000000 +0800
-+++ b/src/backends/anland/anland_egl_backend.cpp	2026-06-20 00:47:31.439729404 +0800
-@@ -0,0 +1,309 @@
++++ b/src/backends/anland/anland_egl_backend.cpp	2026-06-21 00:53:38.825674533 +0800
+@@ -0,0 +1,315 @@
 +/*
 +    KWin - the KDE window manager
 +    This file is part of the KDE project.
@@ -556,6 +577,11 @@ diff -ruN a/src/backends/anland/anland_egl_backend.cpp b/src/backends/anland/anl
 +    , m_output(output)
 +    , m_display(backend->display())
 +{
++    // React to runtime orientation changes (System Settings / kscreen-doctor)
++    // through the output's transformChanged signal instead of polling the transform
++    // in the per-frame render path. Qt drops the connection automatically when this
++    // layer (a QObject via OutputLayer) or the output is destroyed.
++    connect(m_output, &BackendOutput::transformChanged, this, &AnlandEglLayer::onOutputTransformChanged);
 +}
 +
 +AnlandEglLayer::~AnlandEglLayer()
@@ -577,8 +603,11 @@ diff -ruN a/src/backends/anland/anland_egl_backend.cpp b/src/backends/anland/anl
 +    for (int i = 0; i < MAX_BUFS; i++) {
 +        m_fbos[i].reset();
 +        m_textures[i].reset();
++        m_renderTargets[i].reset();
 +        m_accumDamage[i] = Region();
 +    }
++    m_damageFlags = 0;
++    m_damageMask = 0;
 +    m_bufCount = 0;
 +}
 +
@@ -589,6 +618,19 @@ diff -ruN a/src/backends/anland/anland_egl_backend.cpp b/src/backends/anland/anl
 +    const QSize size = m_output->modeSize();
 +
 +    releaseBuffers();
++
++    // The consumer reads this dmabuf top-down, while GL renders bottom-up, so the
++    // content transform always carries a vertical flip. On top of that we fold in
++    // the output's configured rotation, so the scene is rendered pre-rotated into
++    // the (fixed-size, landscape) dmabuf — that is what lets the very same buffer
++    // drive a portrait / 180° display. KWin's renderer (RenderTarget/RenderViewport)
++    // bakes this single transform into the root projection with no extra copy; it is
++    // the official 6.x replacement for the old GLFramebuffer::setYInverted() flag the
++    // 5.27 patch carried. Combining the output rotation with FlipY mirrors the DRM
++    // backend exactly (drmOutput()->transform().combine(OutputTransform::FlipY)).
++    // The tag is sticky on each texture; after import it is only ever updated
++    // reactively, in onOutputTransformChanged().
++    const OutputTransform contentTransform = m_output->transform().combine(OutputTransform::FlipY);
 +
 +    for (int i = 0; i < count; i++) {
 +        const int fd = get_dmabuf_fd_at(m_display, i);
@@ -621,14 +663,7 @@ diff -ruN a/src/backends/anland/anland_egl_backend.cpp b/src/backends/anland/anl
 +            return false;
 +        }
 +
-+        // The consumer reads this dmabuf top-down, while GL renders bottom-up.
-+        // Tag the color attachment with a vertical-flip content transform so
-+        // KWin's renderer (RenderTarget/RenderViewport) flips the projection at
-+        // the root and writes straight into the dmabuf the right way up, with no
-+        // extra copy. This is the official 6.x replacement for the old custom
-+        // GLFramebuffer::setYInverted() flag the 5.27 patch carried; projection,
-+        // scissor and blitFromFramebuffer all honour contentTransform natively.
-+        texture->setContentTransform(OutputTransform::FlipY);
++        texture->setContentTransform(contentTransform);
 +        auto fbo = std::make_unique<GLFramebuffer>(texture.get());
 +        if (!fbo->valid()) {
 +            qCWarning(KWIN_ANLAND) << "framebuffer for dmabuf" << i << "is not complete";
@@ -641,32 +676,39 @@ diff -ruN a/src/backends/anland/anland_egl_backend.cpp b/src/backends/anland/anl
 +
 +        m_textures[i] = std::move(texture);
 +        m_fbos[i] = std::move(fbo);
++        m_renderTargets[i].emplace(m_fbos[i].get());
 +        // Freshly imported dmabuf has undefined contents: owe it a full repaint.
 +        m_accumDamage[i] = Region::infinite();
 +    }
 +
 +    m_bufCount = count;
++    m_damageMask = (uint8_t)((1 << m_bufCount) - 1);
++    m_damageFlags = m_damageMask;
 +    return true;
++}
++
++void AnlandEglLayer::onOutputTransformChanged()
++{
++    const OutputTransform contentTransform = m_output->transform().combine(OutputTransform::FlipY);
++    for (int i = 0; i < m_bufCount; i++) {
++        m_textures[i]->setContentTransform(contentTransform);
++        // The cached RenderTarget captured the old transform; rebuild it so the
++        // renderer picks up the new content transform on the next doBeginFrame.
++        m_renderTargets[i].emplace(m_fbos[i].get());
++        m_accumDamage[i] = Region::infinite();
++    }
++    m_damageFlags = m_damageMask;
++    scheduleRepaint(nullptr);
 +}
 +
 +std::optional<OutputLayerBeginFrameInfo> AnlandEglLayer::doBeginFrame()
 +{
 +    m_backend->openglContext()->makeCurrent();
 +
-+    // Buffer import/release is driven by the backend state machine (importBuffers()
-+    // on reconnect, releaseBuffers() on fallback), not here. With nothing imported
-+    // there is no dmabuf to render into.
-+    if (m_bufCount == 0) {
-+        return std::nullopt;
-+    }
-+
 +    m_currentIndex = get_selected_idx(m_display);
-+    if (m_currentIndex < 0 || m_currentIndex >= m_bufCount) {
-+        m_currentIndex = 0;
-+    }
 +
 +    return OutputLayerBeginFrameInfo{
-+        .renderTarget = RenderTarget(m_fbos[m_currentIndex].get()),
++        .renderTarget = *m_renderTargets[m_currentIndex],
 +        .repaint = m_accumDamage[m_currentIndex],
 +    };
 +}
@@ -674,33 +716,18 @@ diff -ruN a/src/backends/anland/anland_egl_backend.cpp b/src/backends/anland/anl
 +bool AnlandEglLayer::doEndFrame(const Region &renderedDeviceRegion, const Region &damagedDeviceRegion, OutputFrame *frame)
 +{
 +    glFlush(); // flush pending rendering commands into the dmabuf.
-+    //虽然会有竞争，但是android的三重缓冲机制可以消除
-+    // 使用 flush 保证流水线执
-+    // Every buffer owes this frame's damage; the buffer we just painted is now
-+    // fully up to date, so clear its debt.
-+    for (int i = 0; i < m_bufCount; i++) {
++    for (int i = 0; i < m_bufCount; i++)
 +        m_accumDamage[i] = m_accumDamage[i] + damagedDeviceRegion;
-+    }
-+    if (m_currentIndex < m_bufCount) {
-+        m_accumDamage[m_currentIndex] = Region();
-+    }
 +
-+    // KWin's OutputLayer::needsRepaint() reflects only scene damage; it knows
-+    // nothing about our external buffer rotation. When the scene goes momentarily
-+    // idle, the compositor would skip rendering (needsRepaint() == false) yet
-+    // still present() — handing the consumer whichever buffer it just rotated to,
-+    // which still owes earlier frames' damage -> stale "dirty buffer" flicker /
-+    // cursor jitter. So while ANY buffer still owes damage, schedule our own
-+    // repaint: that sets m_repaintScheduled, keeping needsRepaint() true so the
-+    // compositor keeps rendering and catches each rotated buffer up. It stops
-+    // on its own once every buffer's debt is cleared (idle scene adds no new
-+    // damage), so there is no busy-loop.
-+    for (int i = 0; i < m_bufCount; i++) {
-+        if (!m_accumDamage[i].isEmpty()) {
-+            scheduleRepaint(nullptr);
-+            break;
-+        }
-+    }
++    if (!damagedDeviceRegion.isEmpty())
++        m_damageFlags = m_damageMask;
++
++    m_accumDamage[m_currentIndex] = Region();
++    
++    m_damageFlags &= ~(uint8_t)(1 << m_currentIndex);
++    if (m_damageFlags != 0) 
++        scheduleRepaint(nullptr);
++
 +    return true;
 +}
 +
@@ -816,8 +843,8 @@ diff -ruN a/src/backends/anland/anland_egl_backend.cpp b/src/backends/anland/anl
 +} // namespace KWin
 diff -ruN a/src/backends/anland/anland_egl_backend.h b/src/backends/anland/anland_egl_backend.h
 --- a/src/backends/anland/anland_egl_backend.h	1970-01-01 08:00:00.000000000 +0800
-+++ b/src/backends/anland/anland_egl_backend.h	2026-06-20 00:47:00.806419319 +0800
-@@ -0,0 +1,109 @@
++++ b/src/backends/anland/anland_egl_backend.h	2026-06-21 00:50:33.955265904 +0800
+@@ -0,0 +1,101 @@
 +/*
 +    KWin - the KDE window manager
 +    This file is part of the KDE project.
@@ -841,6 +868,7 @@ diff -ruN a/src/backends/anland/anland_egl_backend.h b/src/backends/anland/anlan
 +#include <array>
 +#include <map>
 +#include <memory>
++#include <optional>
 +
 +extern "C" {
 +#include "display_producer.h"
@@ -866,34 +894,25 @@ diff -ruN a/src/backends/anland/anland_egl_backend.h b/src/backends/anland/anlan
 +
 +    std::optional<OutputLayerBeginFrameInfo> doBeginFrame() override;
 +    bool doEndFrame(const Region &renderedDeviceRegion, const Region &damagedDeviceRegion, OutputFrame *frame) override;
-+
-+    // 6.6.5 OutputLayer pure virtuals. anland imports the consumer's dmabufs and
-+    // never allocates or scans out through DRM itself, so these are stubs.
 +    DrmDevice *scanoutDevice() const override;
 +    QHash<uint32_t, QList<uint64_t>> supportedDrmFormats() const override;
-+
-+    // Buffer lifetime is driven by the backend state machine, not doBeginFrame():
-+    // importBuffers() imports the daemon's dmabuf set on (re)connect and arms a
-+    // full-output (infinite) repaint on every rotation buffer; releaseBuffers()
-+    // drops them on fallback (and satisfies the OutputLayer interface). Both make
-+    // the GL context current, so they are safe to call from outside a frame.
 +    bool importBuffers(int count);
 +    void releaseBuffers() override;
 +
 +private:
++    void onOutputTransformChanged();
++
 +    AnlandEglBackend *const m_backend;
 +    AnlandOutput *m_output;
-+    // Cached producer handle (stable for the backend's lifetime); avoids the
-+    // m_backend->display() forwarding chain on every doBeginFrame().
 +    display_ctx *const m_display;
 +
 +    int m_bufCount = 0;
 +    int m_currentIndex = 0;
++    uint8_t m_damageFlags = 0;
++    uint8_t m_damageMask = 0;
 +    std::array<std::shared_ptr<GLTexture>, MAX_BUFS> m_textures;
 +    std::array<std::unique_ptr<GLFramebuffer>, MAX_BUFS> m_fbos;
-+    /* Per-buffer accumulated damage: each buffer must remember everything that
-+     * changed since it was last rendered, because the consumer rotates the
-+     * selected index out from under us. */
++    std::array<std::optional<RenderTarget>, MAX_BUFS> m_renderTargets;
 +    std::array<Region, MAX_BUFS> m_accumDamage;
 +};
 +
