@@ -149,19 +149,13 @@ static void handle_client_data(struct client *c)
         if (c == consumer && hdr.size == sizeof(struct screen_info)) {
             struct screen_info si;
             memcpy(&si, payload, sizeof(si));
-            if (has_screen_info) {
-                if (memcmp(&si, &stored_screen, sizeof(si)) != 0) {
-                    fprintf(stderr, "daemon: rejecting consumer (screen info mismatch)\n");
-                    send_ctrl(c->ctrl_fd, CTRL_MSG_REJECT);
-                    handle_disconnect(c);
-                    return;
-                }
-            } else {
-                stored_screen = si;
-                has_screen_info = true;
-                fprintf(stderr, "daemon: screen info %ux%u fmt=%u\n",
-                        si.width, si.height, si.format);
-            }
+            /* Always accept the consumer's screen info, even if it differs from a
+             * previous connection — the Android display may have rotated or switched
+             * resolution. Overwrite and forward to any waiting producer. */
+            stored_screen = si;
+            has_screen_info = true;
+            fprintf(stderr, "daemon: screen info %ux%u fmt=%u\n",
+                    si.width, si.height, si.format);
             if (producer_waiting_screen && producer) {
                 send_screen_info_msg(producer->ctrl_fd);
                 producer_waiting_screen = false;

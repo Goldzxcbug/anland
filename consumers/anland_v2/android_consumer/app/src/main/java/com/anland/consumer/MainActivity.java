@@ -1,7 +1,6 @@
 package com.anland.consumer;
 
 import android.app.Activity;
-import android.content.pm.ActivityInfo;
 import android.hardware.display.DisplayManager;
 import android.os.Bundle;
 import android.util.Log;
@@ -61,8 +60,6 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
-
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);
 
@@ -72,7 +69,6 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
 
         setupFullscreen();
         setupCursorHiding();
-        enterLockTask();
     }
 
     private void setupFullscreen() {
@@ -86,14 +82,6 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
     }
 
-    private void enterLockTask() {
-        try {
-            startLockTask();
-        } catch (Exception e) {
-            Log.w(TAG, "lockTask failed", e);
-        }
-    }
-
     private void setupCursorHiding() {
         surfaceView.setPointerIcon(PointerIcon.getSystemIcon(this, PointerIcon.TYPE_NULL));
     }
@@ -101,7 +89,6 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     @Override
     protected void onResume() {
         super.onResume();
-        setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
         setupFullscreen();
         DisplayManager dm = getSystemService(DisplayManager.class);
         if (dm != null)

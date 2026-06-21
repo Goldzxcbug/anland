@@ -3,6 +3,7 @@
 #include <android/native_window.h>
 #include <android/native_window_jni.h>
 #include <errno.h>
+#include <poll.h>
 #include <jni.h>
 #include <pthread.h>
 #include <stdbool.h>
@@ -37,7 +38,7 @@ struct consumer_state {
     int buf_count;
     int dmabuf_fds[MAX_COLLECT_BUFS];
     struct buf_info dmabuf_infos[MAX_COLLECT_BUFS];
-    void *buf_bits[MAX_COLLECT_BUFS];
+    ANativeWindowBuffer *buf_anb[MAX_COLLECT_BUFS];
 
     int screen_w;
     int screen_h;
@@ -55,99 +56,47 @@ static bool motion_has_last = false;
 static float motion_last_x = 0.0f;
 static float motion_last_y = 0.0f;
 
-static int find_buf_index(struct consumer_state *s, int fd)
-{
-    for (int i = 0; i < s->buf_count; i++) {
-        if (s->dmabuf_fds[i] == fd)
-            return i;
-    }
-    return -1;
-}
-
-/* Find the fd backing a mmap'd address by matching inode from /proc/self/maps
- * against fstat of open fds. */
-static int fd_from_maps(void *addr)
-{
-    FILE *fp = fopen("/proc/self/maps", "r");
-    if (!fp)
-        return -1;
-
-    uintptr_t target = (uintptr_t)addr;
-    char line[512];
-    unsigned long map_inode = 0;
-    bool found_region = false;
-
-    while (fgets(line, sizeof(line), fp)) {
-        uintptr_t start, end;
-        char perms[8];
-        unsigned long offset;
-        unsigned int dev_major, dev_minor;
-        unsigned long inode;
-        if (sscanf(line, "%lx-%lx %s %lx %x:%x %lu",
-                   &start, &end, perms, &offset, &dev_major, &dev_minor, &inode) < 7)
-            continue;
-        if (target >= start && target < end) {
-            map_inode = inode;
-            found_region = true;
-            break;
-        }
-    }
-    fclose(fp);
-
-    if (!found_region || map_inode == 0)
-        return -1;
-
-    DIR *dir = opendir("/proc/self/fd");
-    if (!dir)
-        return -1;
-
-    struct dirent *ent;
-    while ((ent = readdir(dir)) != NULL) {
-        if (ent->d_name[0] == '.')
-            continue;
-        int candidate = atoi(ent->d_name);
-        struct stat st;
-        if (fstat(candidate, &st) == 0 && st.st_ino == (ino_t)map_inode) {
-            closedir(dir);
-            return candidate;
-        }
-    }
-    closedir(dir);
-    return -1;
-}
-
 static int collect_dmabufs(struct consumer_state *s)
 {
     ANativeWindow *win = s->window;
     int target = s->buf_count;
     int found = 0;
 
-    LOGI("collecting %d dma-bufs via lock/post", target);
+    LOGI("collecting %d dma-bufs via dequeue/queue", target);
 
     for (int attempt = 0; attempt < target * 4 && found < target; attempt++) {
-        ANativeWindow_Buffer buf;
-        if (ANativeWindow_lock(win, &buf, NULL) != 0) {
-            LOGE("ANativeWindow_lock failed on attempt %d", attempt);
+        ANativeWindowBuffer *anb = NULL;
+        int fence = -1;
+        if (api.dequeueBuffer(win, &anb, &fence) != 0 || !anb) {
+            LOGE("dequeueBuffer failed on attempt %d", attempt);
+            if (fence >= 0)
+                close(fence);
             break;
         }
+        if (fence >= 0)
+            close(fence);   /* enumeration only: no need to wait the fence */
 
-        void *bits = buf.bits;
-        int fd = fd_from_maps(bits);
-        ANativeWindow_unlockAndPost(win);
-
-        if (fd < 0) {
-            LOGE("fd_from_maps returned -1 on attempt %d", attempt);
+        if (!anb->handle || anb->handle->numFds < 1) {
+            LOGE("dequeued buffer has no dma-buf handle on attempt %d", attempt);
+            api.cancelBuffer(win, anb, -1);
             continue;
         }
 
-        /* deduplicate by bits pointer (stable across lock cycles) */
+        int fd = anb->handle->data[0];   /* first fd backs the dma-buf */
+        int stride = anb->stride, width = anb->width, height = anb->height;
+
+        /* deduplicate by ANativeWindowBuffer pointer (stable per queue slot) */
         bool dup_found = false;
         for (int i = 0; i < found; i++) {
-            if (s->buf_bits[i] == bits) {
+            if (s->buf_anb[i] == anb) {
                 dup_found = true;
                 break;
             }
         }
+
+        /* post it back so the next dequeue rotates to another slot */
+        api.queueBuffer(win, anb, -1);
+
         if (dup_found)
             continue;
 
@@ -155,14 +104,16 @@ static int collect_dmabufs(struct consumer_state *s)
         if (dup_fd < 0)
             continue;
 
-        s->buf_bits[found] = bits;
+        s->buf_anb[found] = anb;
         s->dmabuf_fds[found] = dup_fd;
-        s->dmabuf_infos[found].stride = buf.stride * 4;
+        s->dmabuf_infos[found].stride = stride * 4;
+        s->dmabuf_infos[found].width  = width;
+        s->dmabuf_infos[found].height = height;
         s->dmabuf_infos[found].format = PIXEL_FORMAT_RGBA_8888;
         s->dmabuf_infos[found].modifier = 0;
         s->dmabuf_infos[found].offset = 0;
-        LOGI("  buf[%d]: bits=%p fd=%d dup=%d %dx%d stride=%d",
-             found, bits, fd, dup_fd, buf.width, buf.height, buf.stride);
+        LOGI("  buf[%d]: anb=%p fd=%d dup=%d %dx%d stride=%d",
+             found, (void *)anb, fd, dup_fd, width, height, stride);
         found++;
     }
 
@@ -218,6 +169,14 @@ static int do_connect(struct consumer_state *s)
     ANativeWindow *win = s->window;
     s->screen_w = ANativeWindow_getWidth(win);
     s->screen_h = ANativeWindow_getHeight(win);
+
+    /* dequeueBuffer needs the window connected to an API first (ANativeWindow_lock
+     * did this internally). Disconnect first so reconnect is idempotent. */
+    anw_api_disconnect(win, ANW_API_CPU);
+    if (anw_api_connect(win, ANW_API_CPU) != 0) {
+        LOGE("api_connect(CPU) failed");
+        return -1;
+    }
 
     ANativeWindow_setBuffersGeometry(win, s->screen_w, s->screen_h,
                                      AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM);
@@ -282,33 +241,47 @@ static void *render_thread_func(void *arg)
             continue;
         }
 
-        ANativeWindow_Buffer buf;
-        if (ANativeWindow_lock(s->window, &buf, NULL) != 0) {
+        ANativeWindowBuffer *anb = NULL;
+        int acqfence = -1;
+        if (api.dequeueBuffer(s->window, &anb, &acqfence) != 0 || !anb) {
             usleep(16000);
             continue;
+        }
+        /* Emulate ANativeWindow_lock: CPU-wait the acquire fence so the buffer is
+         * already safe to write (SurfaceFlinger done reading the previous frame)
+         * before we hand it to the producer. A sync_file fd signals POLLIN. */
+        if (acqfence >= 0) {
+            struct pollfd fpfd = { .fd = acqfence, .events = POLLIN };
+            poll(&fpfd, 1, 1000);
+            close(acqfence);
         }
 
         int idx = -1;
         for (int i = 0; i < s->buf_count; i++) {
-            if (s->buf_bits[i] == buf.bits) {
+            if (s->buf_anb[i] == anb) {
                 idx = i;
                 break;
             }
         }
 
         if (idx < 0) {
-            ANativeWindow_unlockAndPost(s->window);
+            api.queueBuffer(s->window, anb, -1);
             usleep(16000);
             continue;
         }
 
-        if (select_dmabuf(s->ctx, idx) < 0 || refresh_done(s->ctx) < 0) {
-            ANativeWindow_unlockAndPost(s->window);
+        if (select_dmabuf(s->ctx, idx) < 0) {
+            api.queueBuffer(s->window, anb, -1);
             usleep(16000);
             continue;
         }
 
-        ANativeWindow_unlockAndPost(s->window);
+        /* The producer renders into the buffer and hands back a render-done fence
+         * over data_fd (reverse). Queue with it so SurfaceFlinger waits GPU-side
+         * before scanout -- this lets the producer submit before its GPU render
+         * completes (no glFinish stall). rfence == -1 falls back to "ready now". */
+        int rfence = refresh_done(s->ctx);
+        api.queueBuffer(s->window, anb, rfence);
     }
 
     LOGI("render thread stopped");

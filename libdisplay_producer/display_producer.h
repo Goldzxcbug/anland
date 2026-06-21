@@ -27,7 +27,14 @@ void disconnect(display_ctx *ctx);
 
 int  get_screen_info(display_ctx *ctx, uint32_t *width, uint32_t *height, uint32_t *format, uint32_t *refresh);
 
-/* Signal the consumer that the current frame is done. No-op in fallback. */
+/* Stash the render-done fence (created in doEndFrame) for the current frame. The
+ * next trigger_refresh hands it to the consumer on the dedicated fence channel, so
+ * SurfaceFlinger waits on it GPU-side instead of the producer CPU-blocking.
+ * Takes ownership of fence_fd (-1 = none). */
+void set_render_fence(display_ctx *ctx, int fence_fd);
+
+/* Signal the consumer that the current frame is done by sending one message (with
+ * the render fence, if any) on the dedicated fence channel. No-op in fallback. */
 int  trigger_refresh(display_ctx *ctx);
 
 /* Pull one pending input event. Returns 1 if an event was written, 0 if none was

@@ -16,13 +16,12 @@ struct display_ctx {
     int      ctrl_fd;
     int      data_fd;
     int      buf_ready_efd;
-    int      refresh_done_efd;
+    int      fence_fd;        /* read end of the dedicated render-done fence channel */
     int      shm_fd;
     volatile uint32_t *shm_ptr;
     uint32_t screen_w, screen_h;
     uint32_t pixel_format;
     bool     fallback;
-    bool     buffer_pending;
 
     int              stored_fds[MAX_BUFS];
     struct buf_info  stored_infos[MAX_BUFS];
@@ -56,15 +55,28 @@ static int create_shm(display_ctx *ctx)
 
 static int send_hello_fds(display_ctx *ctx)
 {
-    int sv[2];
+    /* Two dedicated socketpairs:
+     *   - data:  consumer->producer input/bufs (reverse direction reserved for future)
+     *   - fence: producer->consumer render-done messages; the message itself is the
+     *            "frame rendered" signal (no separate eventfd, no cross-channel ordering).
+     * We keep the read ends and hand the write ends to the producer. The fd slot order
+     * must match the producer's pickup_fds(): { buf_ready, fence, data, shm }. */
+    int sv[2], fv[2];
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) < 0)
         return -1;
-    ctx->data_fd = sv[0];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, fv) < 0) {
+        close(sv[0]);
+        close(sv[1]);
+        return -1;
+    }
+    ctx->data_fd  = sv[0];
+    ctx->fence_fd = fv[0];
 
     struct ctrl_msg hdr = { .type = CTRL_MSG_CONSUMER_HELLO, .size = 0 };
-    int fds[4] = { ctx->buf_ready_efd, ctx->refresh_done_efd, sv[1], ctx->shm_fd };
+    int fds[4] = { ctx->buf_ready_efd, fv[1], sv[1], ctx->shm_fd };
     int ret = send_fds(ctx->ctrl_fd, &hdr, sizeof(hdr), fds, 4);
     close(sv[1]);
+    close(fv[1]);
     return ret;
 }
 
@@ -112,16 +124,16 @@ static void enter_fallback(display_ctx *ctx)
     if (ctx->fallback)
         return;
     ctx->fallback = true;
-    ctx->buffer_pending = false;
 
     if (ctx->data_fd >= 0)         { close(ctx->data_fd);         ctx->data_fd = -1; }
     if (ctx->buf_ready_efd >= 0)   { close(ctx->buf_ready_efd);   ctx->buf_ready_efd = -1; }
-    if (ctx->refresh_done_efd >= 0){ close(ctx->refresh_done_efd); ctx->refresh_done_efd = -1; }
+    if (ctx->fence_fd >= 0)        { close(ctx->fence_fd);        ctx->fence_fd = -1; }
     if (ctx->shm_ptr) { munmap((void *)ctx->shm_ptr, sizeof(uint32_t)); ctx->shm_ptr = NULL; }
     if (ctx->shm_fd >= 0)         { close(ctx->shm_fd);           ctx->shm_fd = -1; }
 
+    /* buf_ready_efd stays an eventfd (consumer->producer pacing signal); fence_fd is
+     * (re)created as a socketpair inside send_hello_fds(). */
     ctx->buf_ready_efd = eventfd(0, EFD_CLOEXEC);
-    ctx->refresh_done_efd = eventfd(0, EFD_CLOEXEC);
     if (create_shm(ctx) < 0) {
         if (ctx->fallback_cb)
             ctx->fallback_cb(ctx->fallback_userdata);
@@ -142,7 +154,7 @@ int connect_to_deamon(display_ctx **out, const char *socket_path)
     ctx->ctrl_fd = -1;
     ctx->data_fd = -1;
     ctx->buf_ready_efd = -1;
-    ctx->refresh_done_efd = -1;
+    ctx->fence_fd = -1;
     ctx->shm_fd = -1;
     ctx->shm_ptr = NULL;
     ctx->fallback = true;
@@ -151,9 +163,10 @@ int connect_to_deamon(display_ctx **out, const char *socket_path)
     if (ctx->ctrl_fd < 0)
         goto fail;
 
+    /* buf_ready_efd is the consumer->producer pacing eventfd; fence_fd is created as a
+     * socketpair inside send_hello_fds(). */
     ctx->buf_ready_efd = eventfd(0, EFD_CLOEXEC);
-    ctx->refresh_done_efd = eventfd(0, EFD_CLOEXEC);
-    if (ctx->buf_ready_efd < 0 || ctx->refresh_done_efd < 0)
+    if (ctx->buf_ready_efd < 0)
         goto fail;
 
     if (create_shm(ctx) < 0)
@@ -171,7 +184,7 @@ fail:
     if (ctx->ctrl_fd >= 0)         close(ctx->ctrl_fd);
     if (ctx->data_fd >= 0)         close(ctx->data_fd);
     if (ctx->buf_ready_efd >= 0)   close(ctx->buf_ready_efd);
-    if (ctx->refresh_done_efd >= 0) close(ctx->refresh_done_efd);
+    if (ctx->fence_fd >= 0)        close(ctx->fence_fd);
     free(ctx);
     return -1;
 }
@@ -185,7 +198,7 @@ void disconnect(display_ctx *ctx)
     if (ctx->ctrl_fd >= 0)         close(ctx->ctrl_fd);
     if (ctx->data_fd >= 0)         close(ctx->data_fd);
     if (ctx->buf_ready_efd >= 0)   close(ctx->buf_ready_efd);
-    if (ctx->refresh_done_efd >= 0) close(ctx->refresh_done_efd);
+    if (ctx->fence_fd >= 0)        close(ctx->fence_fd);
     free(ctx);
 }
 
@@ -205,9 +218,6 @@ int set_screen_info(display_ctx *ctx, uint32_t width, uint32_t height, uint32_t 
 
 int push_dmabufs(display_ctx *ctx, const int *fds, const struct buf_info *infos, int count)
 {
-    if (count <= 0 || count > MAX_BUFS)
-        return -1;
-
     memcpy(ctx->stored_fds, fds, count * sizeof(int));
     memcpy(ctx->stored_infos, infos, count * sizeof(struct buf_info));
     ctx->stored_count = count;
@@ -232,26 +242,56 @@ int select_dmabuf(display_ctx *ctx, int idx)
     *ctx->shm_ptr = (uint32_t)idx;
     eventfd_t val = 1;
     eventfd_write(ctx->buf_ready_efd, val);
-    ctx->buffer_pending = true;
     return 0;
 }
 
+/* Wait for the producer to finish the frame, then return its render-done fence so
+ * the caller can hand it to ANativeWindow_queueBuffer (SurfaceFlinger waits on it
+ * GPU-side before scanout). The producer sends exactly one message per frame on the
+ * dedicated fence channel; the message itself is the "frame rendered" signal (no
+ * separate eventfd, no cross-channel ordering) and the optional fence rides as
+ * SCM_RIGHTS ancillary data. Returns the fence fd (caller owns it), or -1 if none /
+ * on error. */
 int refresh_done(display_ctx *ctx)
 {
-    if (!ctx->buffer_pending)
-        return 0;
-
-    struct pollfd pfd = { .fd = ctx->refresh_done_efd, .events = POLLIN };
+    /* Block (with a 5s safety timeout) on the fence channel: the arrival of the
+     * producer's per-frame message is the render-done signal. Timeout / no POLLIN
+     * (producer stalled or gone) -> fall back so the render thread never hangs. */
+    struct pollfd pfd = { .fd = ctx->fence_fd, .events = POLLIN };
     int ret = poll(&pfd, 1, 5000);
-    if (ret <= 0) {
+    if (ret <= 0 || !(pfd.revents & POLLIN)) {
         enter_fallback(ctx);
         return -1;
     }
-
-    eventfd_t val;
-    eventfd_read(ctx->refresh_done_efd, &val);
-    ctx->buffer_pending = false;
-    return 0;
+    int rfence = -1;
+    char b;
+    struct iovec iov = { .iov_base = &b, .iov_len = 1 };
+    union {
+        char buf[CMSG_SPACE(sizeof(int))];
+        struct cmsghdr align;
+    } cmsg;
+    struct msghdr msg = {
+        .msg_iov = &iov,
+        .msg_iovlen = 1,
+        .msg_control = cmsg.buf,
+        .msg_controllen = sizeof(cmsg.buf),
+    };
+    /* Non-blocking even though poll reported POLLIN: if a concurrent enter_fallback
+     * (from a JNI input thread) swapped fence_fd between the poll and this recvmsg,
+     * we get EAGAIN (n < 0) instead of reading a stale/foreign socket. A clean EOF
+     * (n == 0) means the producer closed the channel -> fall back. No fence in the
+     * message => queue with -1 ("ready now"). */
+    ssize_t n = recvmsg(ctx->fence_fd, &msg, MSG_DONTWAIT);
+    if (n == 0) {
+        enter_fallback(ctx);
+        return -1;
+    }
+    if (n > 0) {
+        struct cmsghdr *c = CMSG_FIRSTHDR(&msg);
+        if (c && c->cmsg_type == SCM_RIGHTS)
+            memcpy(&rfence, CMSG_DATA(c), sizeof(int));
+    }
+    return rfence;
 }
 
 int push_input_event(display_ctx *ctx, const struct InputEvent *event)
