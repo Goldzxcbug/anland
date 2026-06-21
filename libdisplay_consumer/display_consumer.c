@@ -22,6 +22,7 @@ struct display_ctx {
     uint32_t screen_w, screen_h;
     uint32_t pixel_format;
     bool     fallback;
+    bool     buffer_pending;
 
     int              stored_fds[MAX_BUFS];
     struct buf_info  stored_infos[MAX_BUFS];
@@ -124,6 +125,7 @@ static void enter_fallback(display_ctx *ctx)
     if (ctx->fallback)
         return;
     ctx->fallback = true;
+    ctx->buffer_pending = false;
 
     if (ctx->data_fd >= 0)         { close(ctx->data_fd);         ctx->data_fd = -1; }
     if (ctx->buf_ready_efd >= 0)   { close(ctx->buf_ready_efd);   ctx->buf_ready_efd = -1; }
@@ -242,6 +244,7 @@ int select_dmabuf(display_ctx *ctx, int idx)
     *ctx->shm_ptr = (uint32_t)idx;
     eventfd_t val = 1;
     eventfd_write(ctx->buf_ready_efd, val);
+    ctx->buffer_pending = true;
     return 0;
 }
 
@@ -254,6 +257,9 @@ int select_dmabuf(display_ctx *ctx, int idx)
  * on error. */
 int refresh_done(display_ctx *ctx)
 {
+    if (!ctx->buffer_pending)
+        return -1;
+
     /* Block (with a 5s safety timeout) on the fence channel: the arrival of the
      * producer's per-frame message is the render-done signal. Timeout / no POLLIN
      * (producer stalled or gone) -> fall back so the render thread never hangs. */
@@ -263,6 +269,8 @@ int refresh_done(display_ctx *ctx)
         enter_fallback(ctx);
         return -1;
     }
+    ctx->buffer_pending = false;
+
     int rfence = -1;
     char b;
     struct iovec iov = { .iov_base = &b, .iov_len = 1 };
