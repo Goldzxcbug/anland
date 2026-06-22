@@ -227,7 +227,9 @@ int push_dmabufs(display_ctx *ctx, const int *fds, const struct buf_info *infos,
     if (ctx->fallback)
         return 0;
 
-    return push_dmabufs_internal(ctx);
+    int ret = push_dmabufs_internal(ctx);
+    enter_fallback(ctx);
+    return ret;
 }
 
 int select_dmabuf(display_ctx *ctx, int idx)

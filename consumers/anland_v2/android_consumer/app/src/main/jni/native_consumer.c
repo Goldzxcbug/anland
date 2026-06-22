@@ -204,11 +204,6 @@ static int do_connect(struct consumer_state *s)
     set_screen_info(s->ctx, s->screen_w, s->screen_h,
                     PIXEL_FORMAT_RGBA_8888, s->refresh_mhz);
     push_dmabufs(s->ctx, s->dmabuf_fds, s->dmabuf_infos, s->buf_count);
-
-    // screen_info.refresh is only the initial seed; re-send over the data
-    // channel too so a rate learned before this (re)connect is applied.
-    send_refresh_rate(s);
-
     s->need_reconnect = false;
     LOGI("connected");
     return 0;
@@ -218,7 +213,6 @@ static void on_fallback(void *userdata)
 {
     struct consumer_state *s = userdata;
     LOGI("fallback triggered");
-    s->need_reconnect = true;
 }
 
 static void *render_thread_func(void *arg)
