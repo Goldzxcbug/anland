@@ -7,7 +7,6 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/eventfd.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -20,8 +19,9 @@ struct display_ctx {
     int      ctrl_fd;
     int      data_fd;
     int      buf_ready_efd;
-    int      refresh_done_efd;
+    int      fence_fd;        /* write end of the dedicated render-done fence channel */
     int      shm_fd;
+    int      pending_render_fence; /* render-done fence for the in-flight frame */
     volatile uint32_t *shm_ptr;
     uint32_t screen_w, screen_h;
     uint32_t pixel_format;
@@ -53,7 +53,8 @@ static void release_consumer_resources(display_ctx *ctx)
 
     if (ctx->data_fd >= 0)          { close(ctx->data_fd);          ctx->data_fd = -1; }
     if (ctx->buf_ready_efd >= 0)    { close(ctx->buf_ready_efd);    ctx->buf_ready_efd = -1; }
-    if (ctx->refresh_done_efd >= 0) { close(ctx->refresh_done_efd); ctx->refresh_done_efd = -1; }
+    if (ctx->fence_fd >= 0)         { close(ctx->fence_fd);         ctx->fence_fd = -1; }
+    if (ctx->pending_render_fence >= 0) { close(ctx->pending_render_fence); ctx->pending_render_fence = -1; }
     if (ctx->shm_ptr)               { munmap((void *)ctx->shm_ptr, sizeof(uint32_t)); ctx->shm_ptr = NULL; }
     if (ctx->shm_fd >= 0)           { close(ctx->shm_fd);           ctx->shm_fd = -1; }
 }
@@ -96,8 +97,10 @@ static int pickup_fds(display_ctx *ctx)
         return -1;
     }
 
+    /* Slot order matches the consumer's send_hello_fds(): { buf_ready, fence, data, shm }.
+     * fence_fd is the write end of the dedicated producer->consumer render-done channel. */
     ctx->buf_ready_efd    = fds[0];
-    ctx->refresh_done_efd = fds[1];
+    ctx->fence_fd         = fds[1];
     ctx->data_fd          = fds[2];
     ctx->shm_fd           = fds[3];
 
@@ -170,8 +173,9 @@ int connect_to_deamon(display_ctx **out, const char *socket_path)
     ctx->ctrl_fd = -1;
     ctx->data_fd = -1;
     ctx->buf_ready_efd = -1;
-    ctx->refresh_done_efd = -1;
+    ctx->fence_fd = -1;
     ctx->shm_fd = -1;
+    ctx->pending_render_fence = -1;
     ctx->shm_ptr = NULL;
     ctx->fallback = true; // stay in fallback until try_exit_fallback() succeeds
     for (int i = 0; i < MAX_BUFS; i++)
@@ -233,13 +237,60 @@ int get_screen_info(display_ctx *ctx, uint32_t *width, uint32_t *height, uint32_
     return 0;
 }
 
+/* Stash the render-done fence for the in-flight frame (created in doEndFrame).
+ * trigger_refresh sends it to the consumer. Closes any previous unconsumed stash. */
+void set_render_fence(display_ctx *ctx, int fence_fd)
+{
+    if (ctx->pending_render_fence >= 0)
+        close(ctx->pending_render_fence);
+    ctx->pending_render_fence = fence_fd;
+}
+
 int trigger_refresh(display_ctx *ctx)
 {
-    if (ctx->fallback)
+    if (ctx->fallback) {
+        if (ctx->pending_render_fence >= 0) {
+            close(ctx->pending_render_fence);
+            ctx->pending_render_fence = -1;
+        }
         return 0;
+    }
 
-    eventfd_t val = 1;
-    eventfd_write(ctx->refresh_done_efd, val);
+    /* Send exactly one render-done message per frame on the dedicated fence channel
+     * (producer->consumer). The message itself is the "frame rendered" signal -- no
+     * separate eventfd, no cross-channel ordering. The render fence rides as
+     * SCM_RIGHTS ancillary data when we have one; otherwise a bare byte is sent so
+     * the consumer's per-frame recv always has exactly one message (it then queues
+     * with -1). The consumer hands the fence to queueBuffer -> SurfaceFlinger waits
+     * GPU-side. NON-BLOCKING: this runs on kwin's main thread, which must never block
+     * on our socket. In lockstep the consumer always drains, so the one-message
+     * buffer never fills; a momentary miss self-heals via the consumer's 5s
+     * poll->fallback rather than freezing the compositor. data_fd's reverse direction
+     * is intentionally left unused (reserved for future extension). */
+    char b = 0;
+    struct iovec iov = { .iov_base = &b, .iov_len = 1 };
+    union {
+        char buf[CMSG_SPACE(sizeof(int))];
+        struct cmsghdr align;
+    } cmsg;
+    struct msghdr msg = {
+        .msg_iov = &iov,
+        .msg_iovlen = 1,
+    };
+    if (ctx->pending_render_fence >= 0) {
+        msg.msg_control = cmsg.buf;
+        msg.msg_controllen = sizeof(cmsg.buf);
+        struct cmsghdr *c = CMSG_FIRSTHDR(&msg);
+        c->cmsg_level = SOL_SOCKET;
+        c->cmsg_type = SCM_RIGHTS;
+        c->cmsg_len = CMSG_LEN(sizeof(int));
+        memcpy(CMSG_DATA(c), &ctx->pending_render_fence, sizeof(int));
+    }
+    sendmsg(ctx->fence_fd, &msg, MSG_NOSIGNAL | MSG_DONTWAIT);
+    if (ctx->pending_render_fence >= 0) {
+        close(ctx->pending_render_fence);
+        ctx->pending_render_fence = -1;
+    }
     return 0;
 }
 

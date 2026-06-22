@@ -38,6 +38,8 @@ struct screen_info {
 
 struct buf_info {
     uint32_t stride;
+    uint32_t width;      /* buffer logical width  (consumer-side native resolution) */
+    uint32_t height;     /* buffer logical height (consumer-side native resolution) */
     uint32_t format;
     uint64_t modifier;
     uint32_t offset;

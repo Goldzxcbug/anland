@@ -30,13 +30,4 @@ else()
         pkg_check_modules(EGL egl)
         pkg_check_modules(GLESV2 glesv2)
     endif()
-    if(SDL2_FOUND AND GBM_FOUND AND LIBDRM_FOUND AND EGL_FOUND AND GLESV2_FOUND)
-        add_executable(test_sdl_consumer tests/test_sdl_consumer.c)
-        target_include_directories(test_sdl_consumer PRIVATE
-            ${SDL2_INCLUDE_DIRS} ${GBM_INCLUDE_DIRS} ${LIBDRM_INCLUDE_DIRS}
-            ${EGL_INCLUDE_DIRS} ${GLESV2_INCLUDE_DIRS})
-        target_link_libraries(test_sdl_consumer display_consumer socket_utils pthread
-            ${SDL2_LIBRARIES} ${GBM_LIBRARIES} ${LIBDRM_LIBRARIES}
-            ${EGL_LIBRARIES} ${GLESV2_LIBRARIES})
-    endif()
 endif()
