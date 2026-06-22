@@ -9,7 +9,6 @@ index 93e1991..6d08333 100644
  add_subdirectory(libinput)
 diff --git a/src/backends/anland/CMakeLists.txt b/src/backends/anland/CMakeLists.txt
 new file mode 100644
-index 0000000..04985ef
 --- /dev/null
 +++ b/src/backends/anland/CMakeLists.txt
 @@ -0,0 +1,13 @@
@@ -28,10 +27,9 @@ index 0000000..04985ef
 +target_link_libraries(kwin PRIVATE Libdrm::Libdrm)
 diff --git a/src/backends/anland/anland_backend.cpp b/src/backends/anland/anland_backend.cpp
 new file mode 100644
-index 0000000..55e16ef
 --- /dev/null
 +++ b/src/backends/anland/anland_backend.cpp
-@@ -0,0 +1,381 @@
+@@ -0,0 +1,391 @@
 +/*
 +    KWin - the KDE window manager
 +    This file is part of the KDE project.
@@ -254,17 +252,24 @@ index 0000000..55e16ef
 +
 +void AnlandBackend::onInputReadable()
 +{
-+    if (m_inFallback) {
-+        return;
-+    }
++    if (m_inFallback) return;
 +
 +    InputEvent ev;
 +    while (poll_input_event(m_display, &ev, 0) > 0) {
 +        processInputEvent(ev);
-+        if (m_inFallback) {
-+            break; // poll_input_event may have triggered fallback
-+        }
++        if (m_inFallback) break; // poll_input_event may have triggered fallback
 +    }
++}
++
++QPointF AnlandBackend::mapInputToLogical(const QPointF &devicePoint) const
++{
++    AnlandOutput *output = m_outputs[0];
++    // The compositor maps logical -> device with transform().map(p, pixelSize()),
++    // so the inverse maps device -> logical with the inverted transform bounded by
++    // the device-space size (modeSize, the buffer's native landscape extent).
++    // Then divide out the output scale to land in global logical coordinates.
++    const QPointF logical = output->transform().inverted().map(devicePoint, QSizeF(output->modeSize()));
++    return logical / output->scale();
 +}
 +
 +void AnlandBackend::processInputEvent(const InputEvent &ev)
@@ -272,11 +277,10 @@ index 0000000..55e16ef
 +    if (!m_inputDevice) {
 +        return;
 +    }
-+    const qreal scale = m_outputs[0]->scale();
 +
 +    switch (ev.type) {
 +    case INPUT_TYPE_POINTER_MOTION:
-+        m_inputDevice->pointerMotionAbsolute(QPointF(ev.pointer_motion.x, ev.pointer_motion.y) / scale);
++        m_inputDevice->pointerMotionAbsolute(mapInputToLogical(QPointF(ev.pointer_motion.x, ev.pointer_motion.y)));
 +        break;
 +    case INPUT_TYPE_POINTER_BUTTON:
 +        m_inputDevice->pointerButton(ev.pointer_button.button, ev.pointer_button.pressed != 0);
@@ -292,7 +296,7 @@ index 0000000..55e16ef
 +        m_inputDevice->keyboardKey(ev.key.keycode, ev.key.action == INPUT_ACTION_DOWN);
 +        break;
 +    case INPUT_TYPE_TOUCH: {
-+        const QPointF pos = QPointF(ev.touch.x, ev.touch.y) / scale;
++        const QPointF pos = mapInputToLogical(QPointF(ev.touch.x, ev.touch.y));
 +        switch (ev.touch.action) {
 +        case INPUT_ACTION_DOWN:
 +            m_inputDevice->touchDown(ev.touch.pointer_id, pos);
@@ -310,6 +314,11 @@ index 0000000..55e16ef
 +    }
 +    case INPUT_TYPE_TOUCH_FRAME:
 +        m_inputDevice->touchFrame();
++        break;
++    case INPUT_TYPE_DISPLAY_REFRESH:
++        // Not an input event: the consumer reports its live display refresh rate
++        // (mHz) so we can repace the RenderLoop.
++        m_outputs[0]->setRefreshRate(static_cast<int>(ev.display.refresh_mhz));
 +        break;
 +    default:
 +        break;
@@ -357,7 +366,7 @@ index 0000000..55e16ef
 +
 +    // A frame may be in flight awaiting a buffer-ready that will never come now;
 +    // fail it so the RenderLoop's frame accounting does not stall.
-+    m_outputs[0]->onConsumerLost();
++    m_outputs[0]->stopRendering();
 +
 +    teardownNotifiers();
 +
@@ -382,20 +391,18 @@ index 0000000..55e16ef
 +        return;
 +    }
 +
-+    try_exit_fallback(m_display);
-+    if (is_fallback(m_display)) {
++    if (try_exit_fallback(m_display) != 0) {
 +        return; // still down, keep retrying
 +    }
 +
 +    qCInfo(KWIN_ANLAND) << "consumer reconnected";
 +    m_inFallback = false;
 +    m_consumerReady = false;
-+    setupNotifiers();
 +    m_reconnectTimer->stop();
 +
 +    // try_exit_fallback() already received a fresh dmabuf set. Import it into the
 +    // layer (which arms an infinite/full-output repaint on every rotation buffer),
-+    // resume the RenderLoop (uninhibit, balancing the inhibit from onConsumerLost),
++    // resume the RenderLoop (uninhibit, balancing the inhibit from stopRendering),
 +    // and mark the layer dirty. addRepaint() keeps the layer's needsRepaint()
 +    // true so the next composite() paints into the new dmabufs even on an idle
 +    // desktop. resumeRendering() runs unconditionally to keep inhibit/uninhibit
@@ -404,6 +411,7 @@ index 0000000..55e16ef
 +    if (layer) {
 +        layer->importBuffers(get_buf_count(m_display));
 +    }
++    setupNotifiers();
 +    m_outputs[0]->resumeRendering();
 +    if (layer) {
 +        layer->addRepaint(infiniteRegion());
@@ -415,10 +423,9 @@ index 0000000..55e16ef
 +#include "moc_anland_backend.cpp"
 diff --git a/src/backends/anland/anland_backend.h b/src/backends/anland/anland_backend.h
 new file mode 100644
-index 0000000..417e1fa
 --- /dev/null
 +++ b/src/backends/anland/anland_backend.h
-@@ -0,0 +1,110 @@
+@@ -0,0 +1,122 @@
 +/*
 +    KWin - the KDE window manager
 +    This file is part of the KDE project.
@@ -434,6 +441,7 @@ index 0000000..417e1fa
 +
 +#include "core/outputbackend.h"
 +
++#include <QPointF>
 +#include <QVector>
 +#include <memory>
 +
@@ -495,11 +503,21 @@ index 0000000..417e1fa
 +
 +    /**
 +     * Called by AnlandEglBackend::present(): hand the freshly painted buffer to
-+     * the consumer (signals refresh_done_efd). Returns true if the buffer was
++     * the consumer (signals the render-done fence channel). Returns true if the buffer was
 +     * actually handed over (consumer was ready), false otherwise — the caller
 +     * uses this to decide how to complete the RenderLoop frame.
 +     */
 +    bool notifyFramePresented();
++
++    /** Re-run the Workspace output layout after an output changed its mode at
++     *  runtime (AnlandOutput::resize). The backend mutates the mode directly via
++     *  setState() instead of going through OutputConfiguration, so it must emit
++     *  outputsQueried() itself; the mode-changed signal alone does not trigger a
++     *  relayout. */
++    void notifyOutputsChanged()
++    {
++        Q_EMIT outputsQueried();
++    }
 +
 +private:
 +    void setupNotifiers();
@@ -507,6 +525,7 @@ index 0000000..417e1fa
 +    void onInputReadable();
 +    void onBufferReady();
 +    void processInputEvent(const InputEvent &ev);
++    QPointF mapInputToLogical(const QPointF &devicePoint) const;
 +    void onReconnectTimer();
 +    void enterFallback();
 +
@@ -531,10 +550,9 @@ index 0000000..417e1fa
 +} // namespace KWin
 diff --git a/src/backends/anland/anland_egl_backend.cpp b/src/backends/anland/anland_egl_backend.cpp
 new file mode 100644
-index 0000000..7eab5b9
 --- /dev/null
 +++ b/src/backends/anland/anland_egl_backend.cpp
-@@ -0,0 +1,339 @@
+@@ -0,0 +1,368 @@
 +/*
 +    KWin - the KDE window manager
 +    This file is part of the KDE project.
@@ -551,6 +569,7 @@ index 0000000..7eab5b9
 +#include "core/output.h" // OutputTransform
 +#include "opengl/eglcontext.h"
 +#include "opengl/egldisplay.h"
++#include "opengl/eglnativefence.h"
 +#include "opengl/glutils.h"
 +#include "platformsupport/scenes/opengl/basiceglsurfacetexture_wayland.h"
 +#include "utils/filedescriptor.h"
@@ -587,6 +606,9 @@ index 0000000..7eab5b9
 +    , m_output(output)
 +    , m_display(backend->display())
 +{
++    // React to runtime orientation changes through the output's transformChanged
++    // signal instead of polling the transform in the per-frame render path.
++    connect(m_output, &Output::transformChanged, this, &AnlandEglLayer::onOutputTransformChanged);
 +}
 +
 +AnlandEglLayer::~AnlandEglLayer()
@@ -617,9 +639,13 @@ index 0000000..7eab5b9
 +{
 +    m_backend->makeCurrent();
 +
-+    const QSize size = m_output->modeSize();
-+
 +    releaseBuffers();
++
++    // The consumer reads this dmabuf top-down, while GL renders bottom-up, so the
++    // content transform always carries a vertical flip. On top of that we fold in
++    // the output's configured rotation, so the scene is rendered pre-rotated into
++    // the consumer's fixed-size dmabuf.
++    const OutputTransform contentTransform = m_output->transform().combine(OutputTransform::FlipY);
 +
 +    for (int i = 0; i < count; i++) {
 +        const int fd = get_dmabuf_fd_at(m_display, i);
@@ -630,10 +656,23 @@ index 0000000..7eab5b9
 +            return false;
 +        }
 +
++        /* The per-buffer width/height come from the consumer's native resolution
++         * (buf_info, filled by collect_dmabufs). If it differs from the current
++         * OutputMode, resize the output to match. All buffers in a set share the
++         * same size, so we only need to check the first buffer. */
++        if (i == 0) {
++            const QSize bufSize(info.width, info.height);
++            if (bufSize != m_output->modeSize() && bufSize.isValid()) {
++                qCInfo(KWIN_ANLAND) << "dmabuf size changed, resizing output to" << bufSize;
++                m_output->resize(bufSize);
++            }
++        }
++        const QSize actual(info.width, info.height);
++
 +        DmaBufAttributes attrs;
 +        attrs.planeCount = 1;
-+        attrs.width = size.width();
-+        attrs.height = size.height();
++        attrs.width = actual.width();
++        attrs.height = actual.height();
 +        attrs.format = protocol_format_to_drm(info.format);
 +        attrs.modifier = info.modifier;
 +        // The producer owns the dmabuf fd; DmaBufAttributes (and the EGLImage we
@@ -652,14 +691,7 @@ index 0000000..7eab5b9
 +            return false;
 +        }
 +
-+        // The consumer reads this dmabuf top-down, while GL renders bottom-up.
-+        // Tag the color attachment with a vertical-flip content transform so
-+        // KWin's renderer (RenderTarget/RenderViewport) flips the projection at
-+        // the root and writes straight into the dmabuf the right way up, with no
-+        // extra copy. This is the official 6.x replacement for the old custom
-+        // GLFramebuffer::setYInverted() flag the 5.27 patch carried; projection,
-+        // scissor and blitFromFramebuffer all honour contentTransform natively.
-+        texture->setContentTransform(OutputTransform::FlipY);
++        texture->setContentTransform(contentTransform);
 +        auto fbo = std::make_unique<GLFramebuffer>(texture.get());
 +        if (!fbo->valid()) {
 +            qCWarning(KWIN_ANLAND) << "framebuffer for dmabuf" << i << "is not complete";
@@ -667,7 +699,7 @@ index 0000000..7eab5b9
 +            return false;
 +        }
 +
-+        qCDebug(KWIN_ANLAND) << "imported buffer" << i << "fd" << fd << size
++        qCDebug(KWIN_ANLAND) << "imported buffer" << i << "fd" << fd << actual
 +                             << "fmt" << Qt::hex << attrs.format << "mod" << attrs.modifier;
 +
 +        m_textures[i] = std::move(texture);
@@ -678,6 +710,16 @@ index 0000000..7eab5b9
 +
 +    m_bufCount = count;
 +    return true;
++}
++
++void AnlandEglLayer::onOutputTransformChanged()
++{
++    const OutputTransform contentTransform = m_output->transform().combine(OutputTransform::FlipY);
++    for (int i = 0; i < m_bufCount; i++) {
++        m_textures[i]->setContentTransform(contentTransform);
++        m_accumDamage[i] = infiniteRegion();
++    }
++    addRepaint(infiniteRegion());
 +}
 +
 +std::optional<OutputLayerBeginFrameInfo> AnlandEglLayer::doBeginFrame()
@@ -705,8 +747,6 @@ index 0000000..7eab5b9
 +bool AnlandEglLayer::doEndFrame(const QRegion &renderedDeviceRegion, const QRegion &damagedDeviceRegion, OutputFrame *frame)
 +{
 +    glFlush(); // flush pending rendering commands into the dmabuf.
-+    //虽然会有竞争，但是android的三重缓冲机制可以消除
-+    // 使用 flush 保证流水线执
 +    // Every buffer owes this frame's damage; the buffer we just painted is now
 +    // fully up to date, so clear its debt.
 +    for (int i = 0; i < m_bufCount; i++) {
@@ -732,6 +772,13 @@ index 0000000..7eab5b9
 +            break;
 +        }
 +    }
++
++    // Instead of CPU-blocking on glFinish, create a fence for the just-submitted
++    // GPU work and hand it to the consumer. The consumer passes it to
++    // ANativeWindow_queueBuffer, so SurfaceFlinger waits on it GPU-side before
++    // scanout.
++    EGLNativeFence fence{m_backend->eglDisplayObject()};
++    set_render_fence(m_display, fence.takeFileDescriptor().take());
 +    return true;
 +}
 +
@@ -876,10 +923,9 @@ index 0000000..7eab5b9
 +#include "moc_anland_egl_backend.cpp"
 diff --git a/src/backends/anland/anland_egl_backend.h b/src/backends/anland/anland_egl_backend.h
 new file mode 100644
-index 0000000..5433170
 --- /dev/null
 +++ b/src/backends/anland/anland_egl_backend.h
-@@ -0,0 +1,115 @@
+@@ -0,0 +1,117 @@
 +/*
 +    KWin - the KDE window manager
 +    This file is part of the KDE project.
@@ -946,6 +992,8 @@ index 0000000..5433170
 +    std::shared_ptr<GLTexture> texture() const;
 +
 +private:
++    void onOutputTransformChanged();
++
 +    AnlandEglBackend *const m_backend;
 +    AnlandOutput *m_output;
 +    // Cached producer handle (stable for the backend's lifetime); avoids the
@@ -997,7 +1045,6 @@ index 0000000..5433170
 +} // namespace KWin
 diff --git a/src/backends/anland/anland_input.cpp b/src/backends/anland/anland_input.cpp
 new file mode 100644
-index 0000000..f18fa22
 --- /dev/null
 +++ b/src/backends/anland/anland_input.cpp
 @@ -0,0 +1,165 @@
@@ -1168,7 +1215,6 @@ index 0000000..f18fa22
 +#include "moc_anland_input.cpp"
 diff --git a/src/backends/anland/anland_input.h b/src/backends/anland/anland_input.h
 new file mode 100644
-index 0000000..bc7d6ec
 --- /dev/null
 +++ b/src/backends/anland/anland_input.h
 @@ -0,0 +1,71 @@
@@ -1245,7 +1291,6 @@ index 0000000..bc7d6ec
 +} // namespace KWin
 diff --git a/src/backends/anland/anland_logging.cpp b/src/backends/anland/anland_logging.cpp
 new file mode 100644
-index 0000000..130469f
 --- /dev/null
 +++ b/src/backends/anland/anland_logging.cpp
 @@ -0,0 +1,8 @@
@@ -1259,7 +1304,6 @@ index 0000000..130469f
 +Q_LOGGING_CATEGORY(KWIN_ANLAND, "kwin_backend_anland", QtWarningMsg)
 diff --git a/src/backends/anland/anland_logging.h b/src/backends/anland/anland_logging.h
 new file mode 100644
-index 0000000..d3928b8
 --- /dev/null
 +++ b/src/backends/anland/anland_logging.h
 @@ -0,0 +1,10 @@
@@ -1275,10 +1319,9 @@ index 0000000..d3928b8
 +Q_DECLARE_LOGGING_CATEGORY(KWIN_ANLAND)
 diff --git a/src/backends/anland/anland_output.cpp b/src/backends/anland/anland_output.cpp
 new file mode 100644
-index 0000000..d935c60
 --- /dev/null
 +++ b/src/backends/anland/anland_output.cpp
-@@ -0,0 +1,151 @@
+@@ -0,0 +1,199 @@
 +/*
 +    KWin - the KDE window manager
 +    This file is part of the KDE project.
@@ -1287,6 +1330,7 @@ index 0000000..d935c60
 +*/
 +#include "anland_output.h"
 +#include "anland_backend.h"
++#include "anland_logging.h"
 +
 +#include "core/renderbackend.h" // OutputFrame
 +#include "core/renderloop.h"
@@ -1362,6 +1406,24 @@ index 0000000..d935c60
 +    setState(next);
 +}
 +
++void AnlandOutput::setRefreshRate(int refresh)
++{
++    // refresh is in mHz. Ignore noise and no-op changes; RenderLoop::setRefreshRate
++    // already guards the latter, but we also skip rebuilding the mode below.
++    if (refresh <= 0 || refresh == m_renderLoop->refreshRate()) {
++        return;
++    }
++    m_renderLoop->setRefreshRate(refresh);
++
++    // Keep the OutputMode in lockstep with the RenderLoop, mirroring init(), so
++    // currentMode()->refreshRate() and any mode-based logic see the new rate.
++    auto mode = std::make_shared<OutputMode>(modeSize(), refresh, OutputMode::Flag::Preferred);
++    State next = m_state;
++    next.modes = {mode};
++    next.currentMode = mode;
++    setState(next);
++}
++
 +void AnlandOutput::completeFrame()
 +{
 +    if (!m_frame) {
@@ -1387,6 +1449,35 @@ index 0000000..d935c60
 +    m_renderLoop->scheduleRepaint();
 +}
 +
++void AnlandOutput::resize(const QSize &newSize)
++{
++    if (newSize == modeSize() || !newSize.isValid()) {
++        return;
++    }
++
++    qCInfo(KWIN_ANLAND) << "resizing output to" << newSize;
++
++    // Keep the same refresh rate; update both the OutputMode and the RenderLoop
++    // pacing. Mirroring setRefreshRate() / init().
++    const int refresh = m_renderLoop->refreshRate();
++    auto mode = std::make_shared<OutputMode>(newSize, refresh, OutputMode::Flag::Preferred);
++    State next = m_state;
++    next.modes = {mode};
++    next.currentMode = mode;
++    setState(next);
++
++    // setState() only emits currentModeChanged(); Workspace recomputes geometry
++    // when OutputBackend::outputsQueried drives updateOutputs()/desktopResized().
++    m_backend->notifyOutputsChanged();
++
++    // Invalidate any in-flight frame: the mode just changed, so the buffer that
++    // was being presented corresponds to a different layout.
++    if (m_awaitingPresent) {
++        m_awaitingPresent = false;
++        m_frame.reset();
++    }
++}
++
 +void AnlandOutput::setEglLayer(AnlandEglLayer *layer)
 +{
 +    m_eglLayer = layer;
@@ -1397,7 +1488,7 @@ index 0000000..d935c60
 +    return m_eglLayer;
 +}
 +
-+void AnlandOutput::onConsumerLost()
++void AnlandOutput::stopRendering()
 +{
 +    if (m_awaitingPresent) {
 +        m_awaitingPresent = false;
@@ -1432,10 +1523,9 @@ index 0000000..d935c60
 +#include "moc_anland_output.cpp"
 diff --git a/src/backends/anland/anland_output.h b/src/backends/anland/anland_output.h
 new file mode 100644
-index 0000000..bcec5fb
 --- /dev/null
 +++ b/src/backends/anland/anland_output.h
-@@ -0,0 +1,79 @@
+@@ -0,0 +1,91 @@
 +/*
 +    KWin - the KDE window manager
 +    This file is part of the KDE project.
@@ -1444,7 +1534,7 @@ index 0000000..bcec5fb
 +
 +    Native output for the "anland" backend. The render cycle is paced by the
 +    display daemon's eventfds, not a software timer: present() hands the buffer
-+    to the consumer (refresh_done_efd) and the consumer's buffer-ready signal
++    to the consumer (render-done fence channel) and the consumer's buffer-ready signal
 +    (buf_ready_efd) completes the frame — mirroring how the DRM backend completes
 +    a frame on a page-flip event. This keeps KWin's compositing in lockstep with
 +    the frontend instead of free-running on a vsync timer.
@@ -1480,14 +1570,26 @@ index 0000000..bcec5fb
 +    void init(const QSize &pixelSize, int refresh, qreal scale);
 +    void updateEnabled(bool enabled);
 +
++    /** Retune the render cycle when the consumer reports a new display refresh
++     *  rate at runtime (INPUT_TYPE_DISPLAY_REFRESH). @p refresh is in mHz; values
++     *  <= 0 or equal to the current rate are ignored. Updates both the RenderLoop
++     *  pacing and the OutputMode so currentMode() stays consistent. */
++    void setRefreshRate(int refresh);
++
 +    /** Consumer signalled buffer-ready (buf_ready_efd): complete the in-flight
 +     *  frame and schedule the next one, keeping the cycle consumer-paced. */
 +    void onConsumerReady();
 +
++    /** Reconfigure the output when the consumer uses a different buffer size
++     *  (e.g. screen rotation / resolution switch). Updates the OutputMode and asks
++     *  the backend to emit outputsQueried() so the Workspace re-lays-out windows
++     *  for the new size. */
++    void resize(const QSize &newSize);
++
 +    /** Consumer went away (fallback): fail any in-flight frame and inhibit() the
 +     *  RenderLoop so the compositor stops trying to render into dmabufs that no
 +     *  longer exist. */
-+    void onConsumerLost();
++    void stopRendering();
 +
 +    /** Consumer reconnected: uninhibit() the RenderLoop so compositing resumes. */
 +    void resumeRendering();
@@ -1510,17 +1612,16 @@ index 0000000..bcec5fb
 +    AnlandEglLayer *m_eglLayer = nullptr;
 +    bool m_awaitingPresent = false;
 +    // Tracks our RenderLoop::inhibit() so inhibit/uninhibit stay balanced
-+    // (uninhibit() asserts the count is > 0). See onConsumerLost()/resumeRendering().
++    // (uninhibit() asserts the count is > 0). See stopRendering()/resumeRendering().
 +    bool m_renderingInhibited = false;
 +};
 +
 +} // namespace KWin
 diff --git a/src/backends/anland/display_producer.c b/src/backends/anland/display_producer.c
 new file mode 100644
-index 0000000..396bdf5
 --- /dev/null
 +++ b/src/backends/anland/display_producer.c
-@@ -0,0 +1,359 @@
+@@ -0,0 +1,404 @@
 +#define _GNU_SOURCE
 +#include "display_producer.h"
 +#include "socket_utils.h"
@@ -1530,7 +1631,6 @@ index 0000000..396bdf5
 +#include <stdbool.h>
 +#include <stdlib.h>
 +#include <string.h>
-+#include <sys/eventfd.h>
 +#include <sys/mman.h>
 +#include <sys/socket.h>
 +#include <unistd.h>
@@ -1543,8 +1643,9 @@ index 0000000..396bdf5
 +    int      ctrl_fd;
 +    int      data_fd;
 +    int      buf_ready_efd;
-+    int      refresh_done_efd;
++    int      fence_fd;        /* write end of the dedicated render-done fence channel */
 +    int      shm_fd;
++    int      pending_render_fence; /* render-done fence for the in-flight frame */
 +    volatile uint32_t *shm_ptr;
 +    uint32_t screen_w, screen_h;
 +    uint32_t pixel_format;
@@ -1576,7 +1677,8 @@ index 0000000..396bdf5
 +
 +    if (ctx->data_fd >= 0)          { close(ctx->data_fd);          ctx->data_fd = -1; }
 +    if (ctx->buf_ready_efd >= 0)    { close(ctx->buf_ready_efd);    ctx->buf_ready_efd = -1; }
-+    if (ctx->refresh_done_efd >= 0) { close(ctx->refresh_done_efd); ctx->refresh_done_efd = -1; }
++    if (ctx->fence_fd >= 0)         { close(ctx->fence_fd);         ctx->fence_fd = -1; }
++    if (ctx->pending_render_fence >= 0) { close(ctx->pending_render_fence); ctx->pending_render_fence = -1; }
 +    if (ctx->shm_ptr)               { munmap((void *)ctx->shm_ptr, sizeof(uint32_t)); ctx->shm_ptr = NULL; }
 +    if (ctx->shm_fd >= 0)           { close(ctx->shm_fd);           ctx->shm_fd = -1; }
 +}
@@ -1619,8 +1721,10 @@ index 0000000..396bdf5
 +        return -1;
 +    }
 +
++    /* Slot order matches the consumer's send_hello_fds(): { buf_ready, fence, data, shm }.
++     * fence_fd is the write end of the dedicated producer->consumer render-done channel. */
 +    ctx->buf_ready_efd    = fds[0];
-+    ctx->refresh_done_efd = fds[1];
++    ctx->fence_fd         = fds[1];
 +    ctx->data_fd          = fds[2];
 +    ctx->shm_fd           = fds[3];
 +
@@ -1693,8 +1797,9 @@ index 0000000..396bdf5
 +    ctx->ctrl_fd = -1;
 +    ctx->data_fd = -1;
 +    ctx->buf_ready_efd = -1;
-+    ctx->refresh_done_efd = -1;
++    ctx->fence_fd = -1;
 +    ctx->shm_fd = -1;
++    ctx->pending_render_fence = -1;
 +    ctx->shm_ptr = NULL;
 +    ctx->fallback = true; // stay in fallback until try_exit_fallback() succeeds
 +    for (int i = 0; i < MAX_BUFS; i++)
@@ -1756,13 +1861,54 @@ index 0000000..396bdf5
 +    return 0;
 +}
 +
++/* Stash the render-done fence for the in-flight frame (created in doEndFrame).
++ * trigger_refresh sends it to the consumer. Closes any previous unconsumed stash. */
++void set_render_fence(display_ctx *ctx, int fence_fd)
++{
++    if (ctx->pending_render_fence >= 0)
++        close(ctx->pending_render_fence);
++    ctx->pending_render_fence = fence_fd;
++}
++
 +int trigger_refresh(display_ctx *ctx)
 +{
-+    if (ctx->fallback)
++    if (ctx->fallback) {
++        if (ctx->pending_render_fence >= 0) {
++            close(ctx->pending_render_fence);
++            ctx->pending_render_fence = -1;
++        }
 +        return 0;
++    }
 +
-+    eventfd_t val = 1;
-+    eventfd_write(ctx->refresh_done_efd, val);
++    /* Send exactly one render-done message per frame on the dedicated fence channel
++     * (producer->consumer). The message itself is the "frame rendered" signal -- no
++     * separate eventfd, no cross-channel ordering. The render fence rides as
++     * SCM_RIGHTS ancillary data when we have one; otherwise a bare byte is sent so
++     * the consumer's per-frame recv always has exactly one message. */
++    char b = 0;
++    struct iovec iov = { .iov_base = &b, .iov_len = 1 };
++    union {
++        char buf[CMSG_SPACE(sizeof(int))];
++        struct cmsghdr align;
++    } cmsg;
++    struct msghdr msg = {
++        .msg_iov = &iov,
++        .msg_iovlen = 1,
++    };
++    if (ctx->pending_render_fence >= 0) {
++        msg.msg_control = cmsg.buf;
++        msg.msg_controllen = sizeof(cmsg.buf);
++        struct cmsghdr *c = CMSG_FIRSTHDR(&msg);
++        c->cmsg_level = SOL_SOCKET;
++        c->cmsg_type = SCM_RIGHTS;
++        c->cmsg_len = CMSG_LEN(sizeof(int));
++        memcpy(CMSG_DATA(c), &ctx->pending_render_fence, sizeof(int));
++    }
++    sendmsg(ctx->fence_fd, &msg, MSG_NOSIGNAL | MSG_DONTWAIT);
++    if (ctx->pending_render_fence >= 0) {
++        close(ctx->pending_render_fence);
++        ctx->pending_render_fence = -1;
++    }
 +    return 0;
 +}
 +
@@ -1882,10 +2028,9 @@ index 0000000..396bdf5
 +}
 diff --git a/src/backends/anland/display_producer.h b/src/backends/anland/display_producer.h
 new file mode 100644
-index 0000000..32096f1
 --- /dev/null
 +++ b/src/backends/anland/display_producer.h
-@@ -0,0 +1,59 @@
+@@ -0,0 +1,63 @@
 +#ifndef DISPLAY_PRODUCER_H
 +#define DISPLAY_PRODUCER_H
 +
@@ -1914,6 +2059,10 @@ index 0000000..32096f1
 +void disconnect(display_ctx *ctx);
 +
 +int  get_screen_info(display_ctx *ctx, uint32_t *width, uint32_t *height, uint32_t *format, uint32_t *refresh);
++
++/* Stash the native fence for the current rendered frame. trigger_refresh() sends
++ * it to the consumer; ownership of @p fence_fd transfers to display_ctx. */
++void set_render_fence(display_ctx *ctx, int fence_fd);
 +
 +/* Signal the consumer that the current frame is done. No-op in fallback. */
 +int  trigger_refresh(display_ctx *ctx);
@@ -1947,10 +2096,9 @@ index 0000000..32096f1
 +#endif
 diff --git a/src/backends/anland/protocol.h b/src/backends/anland/protocol.h
 new file mode 100644
-index 0000000..744179a
 --- /dev/null
 +++ b/src/backends/anland/protocol.h
-@@ -0,0 +1,88 @@
+@@ -0,0 +1,99 @@
 +#ifndef DISPLAY_PROTOCOL_H
 +#define DISPLAY_PROTOCOL_H
 +
@@ -1991,6 +2139,8 @@ index 0000000..744179a
 +
 +struct buf_info {
 +    uint32_t stride;
++    uint32_t width;      /* buffer logical width  (consumer-side native resolution) */
++    uint32_t height;     /* buffer logical height (consumer-side native resolution) */
 +    uint32_t format;
 +    uint64_t modifier;
 +    uint32_t offset;
@@ -2002,6 +2152,12 @@ index 0000000..744179a
 +#define INPUT_TYPE_POINTER_BUTTON 4
 +#define INPUT_TYPE_POINTER_AXIS   5
 +#define INPUT_TYPE_TOUCH_FRAME    6
++/* Not really input: the consumer reports its current display refresh rate over
++ * the same data channel so the producer can repace its RenderLoop at runtime.
++ * Deliberately reuses the InputEvent framing (DATA_MSG_INPUT_EVENT) so the
++ * producer's poll_input_event() drains it like any other event instead of
++ * stalling the stream on an unknown DATA_MSG_* header. */
++#define INPUT_TYPE_DISPLAY_REFRESH 7
 +
 +#define INPUT_ACTION_DOWN    0
 +#define INPUT_ACTION_UP      1
@@ -2035,13 +2191,15 @@ index 0000000..744179a
 +            float    value;
 +            int32_t  discrete;
 +        } pointer_axis;
++        struct {
++            uint32_t refresh_mhz; // current display refresh rate, milli-Hz
++        } display;
 +    };
 +} __attribute__((packed));
 +
 +#endif
 diff --git a/src/backends/anland/socket_utils.c b/src/backends/anland/socket_utils.c
 new file mode 100644
-index 0000000..1b4ef31
 --- /dev/null
 +++ b/src/backends/anland/socket_utils.c
 @@ -0,0 +1,121 @@
@@ -2168,7 +2326,6 @@ index 0000000..1b4ef31
 +}
 diff --git a/src/backends/anland/socket_utils.h b/src/backends/anland/socket_utils.h
 new file mode 100644
-index 0000000..06ba8f4
 --- /dev/null
 +++ b/src/backends/anland/socket_utils.h
 @@ -0,0 +1,18 @@
