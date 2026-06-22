@@ -1,7 +1,7 @@
 diff -ruN a/src/backends/anland/anland_backend.cpp b/src/backends/anland/anland_backend.cpp
 --- a/src/backends/anland/anland_backend.cpp	1970-01-01 08:00:00.000000000 +0800
-+++ b/src/backends/anland/anland_backend.cpp	2026-06-21 16:16:45.501543122 +0800
-@@ -0,0 +1,390 @@
++++ b/src/backends/anland/anland_backend.cpp	2026-06-22 17:56:25.740051028 +0800
+@@ -0,0 +1,397 @@
 +/*
 +    KWin - the KDE window manager
 +    This file is part of the KDE project.
@@ -251,9 +251,16 @@ diff -ruN a/src/backends/anland/anland_backend.cpp b/src/backends/anland/anland_
 +    }
 +
 +    switch (ev.type) {
-+    case INPUT_TYPE_POINTER_MOTION:
-+        m_inputDevice->pointerMotionAbsolute(mapInputToLogical(QPointF(ev.pointer_motion.x, ev.pointer_motion.y)));
++    case INPUT_TYPE_POINTER_MOTION: {
++        // Both absolute position (x, y) and relative delta (dx, dy) come from the
++        // consumer. Use the same mapInputToLogical for both so that dx/dy delivered
++        // via wl_pointer.relative_motion match the cursor's position space, giving
++        // Wayland clients correct velocity for momentum/kinetic scrolling.
++        const QPointF pos = mapInputToLogical(QPointF(ev.pointer_motion.x, ev.pointer_motion.y));
++        const QPointF delta = mapInputToLogical(QPointF(ev.pointer_motion.dx, ev.pointer_motion.dy));
++        m_inputDevice->pointerMotion(pos, delta, delta);
 +        break;
++    }
 +    case INPUT_TYPE_POINTER_BUTTON:
 +        m_inputDevice->pointerButton(ev.pointer_button.button, ev.pointer_button.pressed != 0);
 +        break;
@@ -394,7 +401,7 @@ diff -ruN a/src/backends/anland/anland_backend.cpp b/src/backends/anland/anland_
 +} // namespace KWin
 diff -ruN a/src/backends/anland/anland_backend.h b/src/backends/anland/anland_backend.h
 --- a/src/backends/anland/anland_backend.h	1970-01-01 08:00:00.000000000 +0800
-+++ b/src/backends/anland/anland_backend.h	2026-06-21 21:57:38.771490589 +0800
++++ b/src/backends/anland/anland_backend.h	2026-06-22 17:56:02.800150904 +0800
 @@ -0,0 +1,112 @@
 +/*
 +    KWin - the KDE window manager
@@ -953,8 +960,8 @@ diff -ruN a/src/backends/anland/anland_egl_backend.h b/src/backends/anland/anlan
 +} // namespace KWin
 diff -ruN a/src/backends/anland/anland_input.cpp b/src/backends/anland/anland_input.cpp
 --- a/src/backends/anland/anland_input.cpp	1970-01-01 08:00:00.000000000 +0800
-+++ b/src/backends/anland/anland_input.cpp	2026-06-21 16:16:45.501747680 +0800
-@@ -0,0 +1,163 @@
++++ b/src/backends/anland/anland_input.cpp	2026-06-22 17:55:20.792835694 +0800
+@@ -0,0 +1,170 @@
 +/*
 +    KWin - the KDE window manager
 +    This file is part of the KDE project.
@@ -1055,6 +1062,13 @@ diff -ruN a/src/backends/anland/anland_input.cpp b/src/backends/anland/anland_in
 +    Q_EMIT InputDevice::pointerFrame(this);
 +}
 +
++void AnlandInputDevice::pointerMotion(const QPointF &pos, const QPointF &delta, const QPointF &deltaUnaccel)
++{
++    Q_EMIT InputDevice::pointerMotionAbsolute(pos, now(), this);
++    Q_EMIT InputDevice::pointerMotion(delta, deltaUnaccel, now(), this);
++    Q_EMIT InputDevice::pointerFrame(this);
++}
++
 +void AnlandInputDevice::pointerButton(quint32 button, bool pressed)
 +{
 +    Q_EMIT pointerButtonChanged(button,
@@ -1120,8 +1134,8 @@ diff -ruN a/src/backends/anland/anland_input.cpp b/src/backends/anland/anland_in
 +} // namespace KWin
 diff -ruN a/src/backends/anland/anland_input.h b/src/backends/anland/anland_input.h
 --- a/src/backends/anland/anland_input.h	1970-01-01 08:00:00.000000000 +0800
-+++ b/src/backends/anland/anland_input.h	2026-06-21 16:16:45.501791283 +0800
-@@ -0,0 +1,71 @@
++++ b/src/backends/anland/anland_input.h	2026-06-22 17:55:13.958911948 +0800
+@@ -0,0 +1,72 @@
 +/*
 +    KWin - the KDE window manager
 +    This file is part of the KDE project.
@@ -1166,6 +1180,7 @@ diff -ruN a/src/backends/anland/anland_input.h b/src/backends/anland/anland_inpu
 +
 +    // Event injection helpers (called by AnlandBackend from the data-fd reader).
 +    void pointerMotionAbsolute(const QPointF &position);
++    void pointerMotion(const QPointF &pos, const QPointF &delta, const QPointF &deltaUnaccel);
 +    void pointerButton(quint32 button, bool pressed);
 +    void pointerAxis(PointerAxis axis, qreal delta, qint32 deltaV120);
 +    void keyboardKey(quint32 keycode, bool pressed);
