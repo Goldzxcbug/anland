@@ -852,14 +852,13 @@ void *event_thread_func(void *arg) {
 This project's own code is **MIT**‑licensed. Each non‑reference compositor backend
 carries **its own upstream license** instead.
 
-本项目自有代码采用 **MIT** 许可。每个非参考合成器后端则**附带其自身的上游许可**。
+本项目自有代码采用 **MIT** 许可。每个合成器后端则**附带其自身的上游许可**。
 
 ### 16.1 MIT‑licensed components · MIT 许可的组成部分
 
 | Component 组成部分 | Path 路径 |
 |--------------------|-----------|
 | V3 consumer (Android) | [consumers/anland_v3/](consumers/anland_v3/) |
-| V3 producer patches (KWin) | [producers/kde/ubuntu2604_v3](producers/kde/ubuntu2604_v3) |
 | Shared protocol & utils 共享协议与工具 | [common/](common/) |
 | Broker daemon 中介守护进程 | [daemon/](daemon/) |
 | Reference C libraries 参考 C 库 | [libdisplay_consumer/](libdisplay_consumer/), [libdisplay_producer/](libdisplay_producer/) |
