@@ -27,6 +27,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private SurfaceView surfaceView;
     private boolean surfaceReady = false;
     private String mLastSentClip = null;
+    private boolean mClipListening = false;
 
     static {
         System.loadLibrary("anland_consumer");
@@ -64,19 +65,25 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         }
     }
 
-    // Forwards the current display refresh rate to the daemon so KWin can repace
-    // its RenderLoop. Re-fires on every onDisplayChanged (e.g. 60/90/120 switch).
-    private final DisplayManager.DisplayListener displayListener =
-        new DisplayManager.DisplayListener() {
-            @Override public void onDisplayAdded(int displayId) {}
-            @Override public void onDisplayRemoved(int displayId) {}
-            @Override public void onDisplayChanged(int displayId) {
-                Display d = getDisplay();
-                if (d != null && d.getDisplayId() == displayId)
-                    pushRefreshRate();
-            }
-        };
+    private final ClipboardManager.OnPrimaryClipChangedListener clipListener =
+        () -> pushClipboard();
 
+    // Called from native C: true = register clip listener, false = unregister
+    public void nativeClipListening(boolean enable) {
+        ClipboardManager cm = getSystemService(ClipboardManager.class);
+        if (cm == null) return;
+        if (enable) {
+            if (mClipListening) return;  // already registered
+            cm.addPrimaryClipChangedListener(clipListener);
+            mClipListening = true;
+        } else {
+            if (!mClipListening) return;  // not registered
+            cm.removePrimaryClipChangedListener(clipListener);
+            mClipListening = false;
+        }
+    }
+
+    // Push clipboard only if content actually changed
     private void pushClipboard() {
         ClipboardManager cm = getSystemService(ClipboardManager.class);
         if (cm == null) return;
@@ -92,6 +99,19 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             }
         }
     }
+
+    // Forwards the current display refresh rate to the daemon so KWin can repace
+    // its RenderLoop. Re-fires on every onDisplayChanged (e.g. 60/90/120 switch).
+    private final DisplayManager.DisplayListener displayListener =
+        new DisplayManager.DisplayListener() {
+            @Override public void onDisplayAdded(int displayId) {}
+            @Override public void onDisplayRemoved(int displayId) {}
+            @Override public void onDisplayChanged(int displayId) {
+                Display d = getDisplay();
+                if (d != null && d.getDisplayId() == displayId)
+                    pushRefreshRate();
+            }
+        };
 
     @Override
     public void onWindowFocusChanged(boolean hasFocus) {

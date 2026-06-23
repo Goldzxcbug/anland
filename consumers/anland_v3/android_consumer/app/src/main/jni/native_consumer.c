@@ -306,28 +306,54 @@ static void on_fallback(void *userdata)
 {
     struct consumer_state *s = userdata;
     LOGI("fallback triggered");
+
+    // Disable clip listener on Java side before stopping event thread
+    if (g_jvm && g_activity_obj) {
+        JNIEnv *env = NULL;
+        bool attached = false;
+        if ((*g_jvm)->GetEnv(g_jvm, (void **)&env, JNI_VERSION_1_6) == JNI_EDETACHED) {
+            if ((*g_jvm)->AttachCurrentThread(g_jvm, &env, NULL) == 0)
+                attached = true;
+        }
+        if (env) {
+            jclass cls = (*env)->GetObjectClass(env, g_activity_obj);
+            jmethodID mid = (*env)->GetMethodID(env, cls, "nativeClipListening", "(Z)V");
+            if (mid)
+                (*env)->CallVoidMethod(env, g_activity_obj, mid, JNI_FALSE);
+        }
+        if (attached)
+            (*g_jvm)->DetachCurrentThread(g_jvm);
+    }
+
     stop_event_thread(s);
 }
 
 static void on_exit_fallback(void *userdata)
 {
     struct consumer_state *s = userdata;
-    LOGI("exit fallback triggered, starting event thread");
-    start_event_thread(s);
+    LOGI("exit fallback triggered");
 
-    /* Initial clipboard sync: read current system clipboard and send to producer. */
+    send_refresh_rate(&g_state);
+    
     JNIEnv *env = NULL;
     if ((*g_jvm)->AttachCurrentThread(g_jvm, &env, NULL) != 0) {
         LOGE("on_exit_fallback: AttachCurrentThread failed");
         return;
     }
+
+    // Enable clip listener on Java side
     jclass cls = (*env)->GetObjectClass(env, g_activity_obj);
+    jmethodID listenMid = (*env)->GetMethodID(env, cls, "nativeClipListening", "(Z)V");
+    if (listenMid)
+        (*env)->CallVoidMethod(env, g_activity_obj, listenMid, JNI_TRUE);
+
+    start_event_thread(s);
+
+    // Initial clipboard sync: read current system clipboard and send to producer
     jmethodID syncMethod = (*env)->GetMethodID(env, cls, "nativeClipboardSync", "()V");
-    if (syncMethod) {
+    if (syncMethod)
         (*env)->CallVoidMethod(env, g_activity_obj, syncMethod);
-    } else {
-        LOGE("on_exit_fallback: nativeClipboardSync not found");
-    }
+
     (*g_jvm)->DetachCurrentThread(g_jvm);
 }
 
@@ -469,6 +495,25 @@ Java_com_anland_consumer_MainActivity_nativeStop(
         disconnect(g_state.ctx);
         g_state.ctx = NULL;
     }
+
+    // Disable clip listener on Java side
+    if (g_jvm && g_activity_obj) {
+        JNIEnv *env = NULL;
+        bool attached = false;
+        if ((*g_jvm)->GetEnv(g_jvm, (void **)&env, JNI_VERSION_1_6) == JNI_EDETACHED) {
+            if ((*g_jvm)->AttachCurrentThread(g_jvm, &env, NULL) == 0)
+                attached = true;
+        }
+        if (env) {
+            jclass cls = (*env)->GetObjectClass(env, g_activity_obj);
+            jmethodID mid = (*env)->GetMethodID(env, cls, "nativeClipListening", "(Z)V");
+            if (mid)
+                (*env)->CallVoidMethod(env, g_activity_obj, mid, JNI_FALSE);
+        }
+        if (attached)
+            (*g_jvm)->DetachCurrentThread(g_jvm);
+    }
+
     cleanup_dmabufs(&g_state);
 
     if (g_state.window) {
