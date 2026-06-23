@@ -87,6 +87,13 @@ build_pkg() {
     tree="$(find "$WORKDIR/$src" -maxdepth 1 -type d -name "${src}-*" | head -1)"
     [ -n "$tree" ] || die "could not find unpacked source tree for $src"
 
+    # ---- overlay: copy local overrides into the source tree if present ------
+    local overlay_dir="$SCRIPT_DIR/$src"
+    if [ -d "$overlay_dir" ]; then
+        log "Overlaying '$overlay_dir' -> $tree (overwrite-merge)"
+        cp -a "$overlay_dir/." "$tree/"
+    fi
+
     log "Applying patch: $patch -> $tree"
     if ( cd "$tree" && patch -p1 --forward --reject-file=- < "$patch" ); then
         :
@@ -97,12 +104,6 @@ build_pkg() {
         else
             die "patch did not apply cleanly for $src"
         fi
-    fi
-    # ---- overlay: copy local overrides into the source tree if present ------
-    local overlay_dir="$SCRIPT_DIR/$src"
-    if [ -d "$overlay_dir" ]; then
-        log "Overlaying '$overlay_dir' -> $tree (overwrite-merge)"
-        cp -a "$overlay_dir/." "$tree/"
     fi
 
     log "Building '$src' (.deb, keeping official version)"
