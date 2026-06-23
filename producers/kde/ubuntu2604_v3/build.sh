@@ -98,6 +98,13 @@ build_pkg() {
             die "patch did not apply cleanly for $src"
         fi
     fi
+    # ---- overlay: copy local overrides into the source tree if present ------
+    local overlay_dir="$SCRIPT_DIR/$src"
+    if [ -d "$overlay_dir" ]; then
+        log "Overlaying '$overlay_dir' -> $tree (overwrite-merge)"
+        cp -a "$overlay_dir/." "$tree/"
+    fi
+
     log "Building '$src' (.deb, keeping official version)"
     # -d: don't re-check build-deps (already installed above)
     # -b -uc -us: binary only, unsigned. changelog untouched -> official version.
