@@ -282,11 +282,11 @@ sequenceDiagram
     Note over C,P: input flows the other way 输入反向流动
     C->>P: INPUT_EVENT (data channel, poll_input_event)
 
-    Note over C,P: (V3) clipboard flows bidirectionally 剪贴板双向流动
+    Note over C,P: (V2/V3) clipboard flows bidirectionally 剪贴板双向流动
     C-->>P: INPUT_EVENT(INPUT_TYPE_CLIPBOARD) + data
     P-->>C: OUTPUT_EVENT(OUTPUT_TYPE_CLIPBOARD) + data
 
-    Note over C,P: (V3) consumer reports display refresh rate 刷新率上报
+    Note over C,P: (V2/V3) consumer reports display refresh rate 刷新率上报
     C-->>P: INPUT_EVENT(INPUT_TYPE_DISPLAY_REFRESH, mHz)
     P-->>P: update RenderLoop pacing 调整渲染节拍
 ```
@@ -334,7 +334,7 @@ two‑packet protocol: a **header** packet (`InputEvent` / `OutputEvent` with
 > 为防止剪贴板回声循环，consumer 跟踪最近发送的剪贴板文本，不会重新发送从 producer
 > 接收到的文本。
 
-### 6.2 Display refresh rate reporting (V3) · 显示刷新率上报
+### 6.2 Display refresh rate reporting (V2/V3) · 显示刷新率上报
 
 The consumer periodically reports its display refresh rate (in milli‑Hz) to the
 producer via an `INPUT_TYPE_DISPLAY_REFRESH` input event. The producer uses this
@@ -359,7 +359,7 @@ if (ev.type == INPUT_TYPE_DISPLAY_REFRESH) {
 }
 ```
 
-### 6.3 Runtime resolution change (V3) · 运行时分辨率变更
+### 6.3 Runtime resolution change (V2/V3) · 运行时分辨率变更
 
 In V3, `struct buf_info` carries the buffer's logical **width** and **height** in
 addition to stride. When the consumer's native resolution changes (e.g. screen
