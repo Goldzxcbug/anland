@@ -13,6 +13,7 @@
 #define DATA_MSG_BUF_READY       100
 #define DATA_MSG_REFRESH_DONE    101
 #define DATA_MSG_INPUT_EVENT     102
+#define DATA_MSG_OUTPUT_EVENT    103
 #define DATA_MSG_BUFS_READY      200
 
 #define MAX_BUFS 8
@@ -57,6 +58,7 @@ struct buf_info {
  * producer's poll_input_event() drains it like any other event instead of
  * stalling the stream on an unknown DATA_MSG_* header. */
 #define INPUT_TYPE_DISPLAY_REFRESH 7
+#define INPUT_TYPE_CLIPBOARD      8
 
 #define INPUT_ACTION_DOWN    0
 #define INPUT_ACTION_UP      1
@@ -93,7 +95,30 @@ struct InputEvent {
         struct {
             uint32_t refresh_mhz; // current display refresh rate, milli-Hz
         } display;
+        struct {
+            uint32_t size; //这个packet只是通知包 作为header真正数据会集中发送,这里通知随后数据的大小
+        } clipboard;
+        struct {
+            uint32_t padding[4];
+        };
     };
 } __attribute__((packed));
+
+struct OutputEvent{
+    uint32_t type;
+    union {
+        struct {
+            uint32_t size; //这个packet只是通知包 作为header真正数据会集中发送,这里通知随后数据的大小
+        } clipboard;
+        struct
+        {
+            uint32_t padding[4];
+        };
+
+    };
+} __attribute__((packed));
+
+#define OUTPUT_TYPE_CLIPBOARD 1
+
 
 #endif

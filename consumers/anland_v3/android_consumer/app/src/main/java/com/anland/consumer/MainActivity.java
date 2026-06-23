@@ -1,6 +1,8 @@
 package com.anland.consumer;
 
 import android.app.Activity;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.hardware.display.DisplayManager;
 import android.os.Bundle;
 import android.util.Log;
@@ -16,12 +18,15 @@ import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
 
+import java.nio.charset.StandardCharsets;
+
 
 public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private static final String TAG = "Anland";
 
     private SurfaceView surfaceView;
     private boolean surfaceReady = false;
+    private String mLastSentClip = null;
 
     static {
         System.loadLibrary("anland_consumer");
@@ -36,6 +41,28 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private native void nativeSendMouseButton(int button, boolean pressed);
     private native void nativeSendMouseScroll(int axis, float value);
     private native void nativeSetRefreshRate(float hz);
+    private native void nativeSendClipboard(byte[] data);
+    // Called from native event thread to set clipboard text on Android
+    public void nativeSetClipboardText(String text) {
+        ClipboardManager cm = getSystemService(ClipboardManager.class);
+        if (cm != null) {
+            mLastSentClip = text;  // 记录，clipListener 回环时会比对跳过
+            cm.setPrimaryClip(ClipData.newPlainText("anland", text));
+        }
+    }
+    // Called from native C on exit_fallback to send initial clipboard sync
+    public void nativeClipboardSync() {
+        ClipboardManager cm = getSystemService(ClipboardManager.class);
+        if (cm == null) return;
+        ClipData clip = cm.getPrimaryClip();
+        if (clip != null && clip.getItemCount() > 0) {
+            CharSequence text = clip.getItemAt(0).getText();
+            if (text != null) {
+                mLastSentClip = text.toString();
+                nativeSendClipboard(text.toString().getBytes(StandardCharsets.UTF_8));
+            }
+        }
+    }
 
     // Forwards the current display refresh rate to the daemon so KWin can repace
     // its RenderLoop. Re-fires on every onDisplayChanged (e.g. 60/90/120 switch).
@@ -49,6 +76,30 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                     pushRefreshRate();
             }
         };
+
+    private void pushClipboard() {
+        ClipboardManager cm = getSystemService(ClipboardManager.class);
+        if (cm == null) return;
+        ClipData clip = cm.getPrimaryClip();
+        if (clip != null && clip.getItemCount() > 0) {
+            CharSequence text = clip.getItemAt(0).getText();
+            if (text != null) {
+                String clipText = text.toString();
+                if (!clipText.equals(mLastSentClip)) {
+                    mLastSentClip = clipText;
+                    nativeSendClipboard(clipText.getBytes(StandardCharsets.UTF_8));
+                }
+            }
+        }
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) {
+            pushClipboard();
+        }
+    }
 
     private void pushRefreshRate() {
         Display d = getDisplay();

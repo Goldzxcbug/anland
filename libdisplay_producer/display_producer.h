@@ -2,6 +2,7 @@
 #define DISPLAY_PRODUCER_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include "../common/protocol.h"
 
@@ -40,7 +41,14 @@ int  trigger_refresh(display_ctx *ctx);
 /* Pull one pending input event. Returns 1 if an event was written, 0 if none was
  * available, -1 on consumer loss. No-op (returns 0) in fallback. */
 int  poll_input_event(display_ctx *ctx, struct InputEvent *event, int timeout_ms);
+int poll_input_event_extend_data(display_ctx *ctx, void* payload, size_t size, int timeout_ms);
 
+int push_output_event(display_ctx *ctx, const struct OutputEvent *event);
+//接收到输出事件时，可能会有额外的数据需要接收，所以增加一个带长度的版本
+//但是发送方必须设置变长事件的size字段，表示随后数据的大小，而且必须紧跟事件发送数据
+//变长事件不得使用push_output_event发送，必须使用push_output_event_with_length发送
+//接收端使用标准事件接收后根据size字段知道后续数据的大小，务必使用socket手动接收变长数据（必须有超时，避免对端挂掉）
+int push_output_event_with_length(display_ctx *ctx, const struct OutputEvent *event, void* payload, size_t size);
 /* Register a callback invoked when the consumer is lost and the context drops
  * back to fallback. */
 int  set_fallback_callback(display_ctx *ctx, void (*on_fallback)(void *), void *userdata);

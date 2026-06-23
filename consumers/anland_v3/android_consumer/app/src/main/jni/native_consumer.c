@@ -24,15 +24,24 @@
 #define PIXEL_FORMAT_RGBA_8888 1
 #define MAX_COLLECT_BUFS 8
 
+/* Saved JVM / activity reference for event-thread JNI callbacks. */
+static JavaVM *g_jvm = NULL;
+static jobject g_activity_obj = NULL;
+
 static struct anw_api api;
 static bool api_loaded = false;
+static void on_fallback(void *userdata);
 
+static void on_exit_fallback(void *userdata);
 struct consumer_state {
     pthread_mutex_t lock;
     ANativeWindow *window;
     display_ctx *ctx;
     pthread_t render_thread;
     volatile bool running;
+
+    //Note: it is Deamon's Reconnect, not Fallback Flag
+    //Fallback is maintained by display lib, and the consumer should not care about it.
     volatile bool need_reconnect;
 
     int buf_count;
@@ -46,6 +55,10 @@ struct consumer_state {
     // Latest display refresh rate (milli-Hz) reported from Java. Read on
     // (re)connect to seed the producer; updated live by nativeSetRefreshRate.
     volatile uint32_t refresh_mhz;
+
+    // Event (output) thread
+    pthread_t event_thread;
+    volatile bool event_running;
 };
 
 static struct consumer_state g_state = {
@@ -156,6 +169,82 @@ static void send_refresh_rate(struct consumer_state *s)
     push_input_event(s->ctx, &ev);
 }
 
+/*
+ * Event thread: listens for output events (clipboard, etc.) from the producer
+ * on the data_fd. Runs while s->event_running is true.
+ */
+static void *event_thread_func(void *arg)
+{
+    struct consumer_state *s = arg;
+    LOGI("event thread started");
+
+    JNIEnv *env = NULL;
+    if ((*g_jvm)->AttachCurrentThread(g_jvm, &env, NULL) != 0) {
+        LOGE("event thread: AttachCurrentThread failed");
+        return NULL;
+    }
+
+    /* Find classes/methods once */
+    jclass ctxClass = (*env)->GetObjectClass(env, g_activity_obj);
+    jmethodID setClipMethod = (*env)->GetMethodID(env, ctxClass, "nativeSetClipboardText", "(Ljava/lang/String;)V");
+    if (!setClipMethod) {
+        LOGE("event thread: nativeSetClipboardText not found");
+        (*g_jvm)->DetachCurrentThread(g_jvm);
+        return NULL;
+    }
+
+    while (s->event_running) {
+        if (!s->ctx) {
+            usleep(50000);
+            continue;
+        }
+
+        struct OutputEvent ev;
+        int ret = poll_output_event(s->ctx, &ev, 500);
+        if (ret <= 0)
+            continue;
+
+        if (ev.type == OUTPUT_TYPE_CLIPBOARD && ev.clipboard.size > 0) {
+            char *buf = malloc(ev.clipboard.size + 1);
+            if (!buf)
+                continue;
+
+            if (poll_output_event_extend_data(s->ctx, buf, ev.clipboard.size, 5000) == 1) {
+                buf[ev.clipboard.size] = '\0';
+                jstring jstr = (*env)->NewStringUTF(env, buf);
+                if (jstr) {
+                    (*env)->CallVoidMethod(env, g_activity_obj, setClipMethod, jstr);
+                    (*env)->DeleteLocalRef(env, jstr);
+                }
+            }
+            free(buf);
+        } else {
+            /* Unknown or zero-length event: drain any trailing data if size > 0 */
+            LOGI("event thread: unknown output event type=%u size=%u", ev.type, ev.clipboard.size);
+        }
+    }
+
+    (*g_jvm)->DetachCurrentThread(g_jvm);
+    LOGI("event thread stopped");
+    return NULL;
+}
+
+static void start_event_thread(struct consumer_state *s)
+{
+    if (s->event_running)
+        return;
+    s->event_running = true;
+    pthread_create(&s->event_thread, NULL, event_thread_func, s);
+}
+
+static void stop_event_thread(struct consumer_state *s)
+{
+    if (!s->event_running)
+        return;
+    s->event_running = false;
+    pthread_join(s->event_thread, NULL);
+}
+
 static int do_connect(struct consumer_state *s)
 {
     const char *sock = "/data/local/tmp/display_daemon.sock";
@@ -204,6 +293,10 @@ static int do_connect(struct consumer_state *s)
     set_screen_info(s->ctx, s->screen_w, s->screen_h,
                     PIXEL_FORMAT_RGBA_8888, s->refresh_mhz);
     push_dmabufs(s->ctx, s->dmabuf_fds, s->dmabuf_infos, s->buf_count);
+
+    set_fallback_callback(s->ctx, on_fallback, s);
+    set_exit_fallback_callback(s->ctx, on_exit_fallback, s);
+
     s->need_reconnect = false;
     LOGI("connected");
     return 0;
@@ -213,6 +306,29 @@ static void on_fallback(void *userdata)
 {
     struct consumer_state *s = userdata;
     LOGI("fallback triggered");
+    stop_event_thread(s);
+}
+
+static void on_exit_fallback(void *userdata)
+{
+    struct consumer_state *s = userdata;
+    LOGI("exit fallback triggered, starting event thread");
+    start_event_thread(s);
+
+    /* Initial clipboard sync: read current system clipboard and send to producer. */
+    JNIEnv *env = NULL;
+    if ((*g_jvm)->AttachCurrentThread(g_jvm, &env, NULL) != 0) {
+        LOGE("on_exit_fallback: AttachCurrentThread failed");
+        return;
+    }
+    jclass cls = (*env)->GetObjectClass(env, g_activity_obj);
+    jmethodID syncMethod = (*env)->GetMethodID(env, cls, "nativeClipboardSync", "()V");
+    if (syncMethod) {
+        (*env)->CallVoidMethod(env, g_activity_obj, syncMethod);
+    } else {
+        LOGE("on_exit_fallback: nativeClipboardSync not found");
+    }
+    (*g_jvm)->DetachCurrentThread(g_jvm);
 }
 
 static void *render_thread_func(void *arg)
@@ -227,12 +343,6 @@ static void *render_thread_func(void *arg)
                 usleep(500000);
                 continue;
             }
-            set_fallback_callback(s->ctx, on_fallback, s);
-        }
-
-        if (!s->ctx) {
-            usleep(100000);
-            continue;
         }
 
         ANativeWindowBuffer *anb = NULL;
@@ -325,6 +435,15 @@ Java_com_anland_consumer_MainActivity_nativeStart(
         return;
     }
 
+    /* Save JVM & activity refs for event-thread JNI callbacks. */
+    if (!g_jvm) {
+        (*env)->GetJavaVM(env, &g_jvm);
+    }
+    if (g_activity_obj) {
+        (*env)->DeleteGlobalRef(env, g_activity_obj);
+    }
+    g_activity_obj = (*env)->NewGlobalRef(env, thiz);
+
     g_state.running = true;
     g_state.need_reconnect = true;
     pthread_create(&g_state.render_thread, NULL, render_thread_func, &g_state);
@@ -346,6 +465,7 @@ Java_com_anland_consumer_MainActivity_nativeStop(
     }
 
     if (g_state.ctx) {
+        stop_event_thread(&g_state);
         disconnect(g_state.ctx);
         g_state.ctx = NULL;
     }
@@ -455,4 +575,28 @@ Java_com_anland_consumer_MainActivity_nativeSendMouseScroll(
         .pointer_axis = { .axis = axis, .value = value, .discrete = 0 },
     };
     push_input_event(g_state.ctx, &ev);
+}
+
+JNIEXPORT void JNICALL
+Java_com_anland_consumer_MainActivity_nativeSendClipboard(
+    JNIEnv *env, jobject thiz, jbyteArray data)
+{
+    if (!g_state.ctx)
+        return;
+
+    jsize len = (*env)->GetArrayLength(env, data);
+    if (len <= 0)
+        return;
+
+    char *buf = malloc(len);
+    if (!buf)
+        return;
+    (*env)->GetByteArrayRegion(env, data, 0, len, (jbyte *)buf);
+
+    struct InputEvent ev = {
+        .type = INPUT_TYPE_CLIPBOARD,
+        .clipboard = { .size = (uint32_t)len },
+    };
+    push_input_event_with_length(g_state.ctx, &ev, buf, len);
+    free(buf);
 }

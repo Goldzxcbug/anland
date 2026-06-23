@@ -13,6 +13,11 @@ int  push_dmabufs(display_ctx *ctx, const int *fds, const struct buf_info *infos
 int  select_dmabuf(display_ctx *ctx, int idx);
 int  refresh_done(display_ctx *ctx);
 int  push_input_event(display_ctx *ctx, const struct InputEvent *event);
+int  push_input_event_with_length(display_ctx *ctx, const struct InputEvent *event, void* payload, size_t size);
 int  set_fallback_callback(display_ctx *ctx, void (*on_fallback)(void *), void *userdata);
+int  poll_output_event(display_ctx *ctx, struct OutputEvent *event, int timeout_ms);
+int  poll_output_event_extend_data(display_ctx *ctx, void* payload, size_t size, int timeout_ms);
+int  set_exit_fallback_callback(display_ctx *ctx, void (*on_exit_fallback)(void *), void *userdata);
+int  get_data_fd(display_ctx *ctx);
 
 #endif

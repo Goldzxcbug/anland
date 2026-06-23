@@ -325,7 +325,59 @@ int poll_input_event(display_ctx *ctx, struct InputEvent *event, int timeout_ms)
     memcpy(event, msg_buf + sizeof(struct data_msg), sizeof(*event));
     return 1;
 }
+int push_output_event(display_ctx *ctx, const struct OutputEvent *event)
+{
+    if (ctx->fallback)
+        return 0;
 
+    struct data_msg hdr = { .type = DATA_MSG_OUTPUT_EVENT, .size = sizeof(struct OutputEvent) };
+    uint8_t msg[sizeof(struct data_msg) + sizeof(struct OutputEvent)];
+    memcpy(msg, &hdr, sizeof(hdr));
+    memcpy(msg + sizeof(hdr), event, sizeof(*event));
+
+    if (send_all(ctx->data_fd, msg, sizeof(msg)) < 0) {
+        enter_fallback(ctx);
+        return -1;
+    }
+    return 0;
+}
+int push_output_event_with_length(display_ctx *ctx, const struct OutputEvent *event, void* payload, size_t size)
+{
+    if (ctx->fallback)
+        return 0;
+
+    struct data_msg hdr = { .type = DATA_MSG_OUTPUT_EVENT, .size = sizeof(struct OutputEvent) };
+    uint8_t *msg = (uint8_t *)malloc(sizeof(struct data_msg) + sizeof(struct OutputEvent) + size);
+    memcpy(msg, &hdr, sizeof(hdr));
+    memcpy(msg + sizeof(hdr), event, sizeof(*event));
+    memcpy(msg + sizeof(hdr) + sizeof(struct OutputEvent), payload, size);
+
+    if (send_all(ctx->data_fd, msg, sizeof(struct data_msg) + sizeof(struct OutputEvent) + size) < 0) {
+        free(msg);
+        enter_fallback(ctx);
+        return -1;
+    }
+    free(msg);
+    return 0;
+}
+int poll_input_event_extend_data(display_ctx *ctx, void* payload, size_t size, int timeout_ms)
+{
+    if (ctx->fallback)
+        return 0;
+
+    struct pollfd pfd = { .fd = ctx->data_fd, .events = POLLIN };
+    int ret = poll(&pfd, 1, timeout_ms);
+    if (ret <= 0)
+        return 0;
+
+    if (pfd.revents & (POLLHUP | POLLERR)) {
+        enter_fallback(ctx);
+        return -1;
+    }
+    if (recv_all(ctx->data_fd, payload, size) < 0)
+        return -1;
+    return 1;
+}
 int set_fallback_callback(display_ctx *ctx, void (*on_fallback)(void *), void *userdata)
 {
     ctx->fallback_cb = on_fallback;

@@ -29,7 +29,9 @@ struct display_ctx {
     int              stored_count;
 
     void (*fallback_cb)(void *);
+    void (*exit_fallback_cb)(void *);
     void  *fallback_userdata;
+    void  *exit_fallback_userdata;
 };
 
 static int create_shm(display_ctx *ctx)
@@ -114,6 +116,9 @@ static bool try_exit_fallback(display_ctx *ctx)
             hdr.type == CTRL_MSG_FDS_READY) {
             ctx->fallback = false;
             push_dmabufs_internal(ctx);
+            if (ctx->exit_fallback_cb){
+                ctx->exit_fallback_cb(ctx->exit_fallback_userdata);
+            }
             return true;
         }
     }
@@ -239,6 +244,10 @@ int select_dmabuf(display_ctx *ctx, int idx)
         if (ctx->fallback)
             return 0;
     }
+
+    if (idx < 0 || idx >= ctx->stored_count)
+        return -1;
+
     *ctx->shm_ptr = (uint32_t)idx;
     eventfd_t val = 1;
     eventfd_write(ctx->buf_ready_efd, val);
@@ -316,10 +325,88 @@ int push_input_event(display_ctx *ctx, const struct InputEvent *event)
     }
     return 0;
 }
+int push_input_event_with_length(display_ctx *ctx, const struct InputEvent *event, void* payload, size_t size)
+{
+    if (ctx->fallback)
+        return 0;
 
+    struct data_msg hdr = { .type = DATA_MSG_INPUT_EVENT, .size = sizeof(struct InputEvent) };
+    uint8_t *msg = (uint8_t *)malloc(sizeof(struct data_msg) + sizeof(struct InputEvent) + size);
+    memcpy(msg, &hdr, sizeof(hdr));
+    memcpy(msg + sizeof(hdr), event, sizeof(*event));
+    memcpy(msg + sizeof(hdr) + sizeof(struct InputEvent), payload, size);
+
+    if (send_all(ctx->data_fd, msg, sizeof(struct data_msg) + sizeof(struct InputEvent) + size) < 0) {
+        free(msg);
+        enter_fallback(ctx);
+        return -1;
+    }
+    free(msg);
+    return 0;
+}
+int poll_output_event(display_ctx *ctx, struct OutputEvent *event, int timeout_ms)
+{
+    if (ctx->fallback)
+        return 0;
+
+    struct pollfd pfd = { .fd = ctx->data_fd, .events = POLLIN };
+    int ret = poll(&pfd, 1, timeout_ms);
+    if (ret <= 0)
+        return 0;
+
+    if (pfd.revents & (POLLHUP | POLLERR)) {
+        enter_fallback(ctx);
+        return -1;
+    }
+
+    uint8_t msg_buf[sizeof(struct data_msg) + sizeof(struct OutputEvent)];
+    ssize_t n = recv(ctx->data_fd, msg_buf, sizeof(msg_buf), MSG_PEEK);
+    if (n < (ssize_t)sizeof(struct data_msg))
+        return 0;
+
+    struct data_msg hdr;
+    memcpy(&hdr, msg_buf, sizeof(hdr));
+    if (hdr.type != DATA_MSG_OUTPUT_EVENT)
+        return 0;
+
+    if (recv_all(ctx->data_fd, msg_buf, sizeof(struct data_msg) + sizeof(struct OutputEvent)) < 0)
+        return -1;
+
+    memcpy(event, msg_buf + sizeof(struct data_msg), sizeof(*event));
+    return 1;
+}
+int poll_output_event_extend_data(display_ctx *ctx, void* payload, size_t size, int timeout_ms)
+{
+    if (ctx->fallback)
+        return 0;
+
+    struct pollfd pfd = { .fd = ctx->data_fd, .events = POLLIN };
+    int ret = poll(&pfd, 1, timeout_ms);
+    if (ret <= 0)
+        return 0;
+
+    if (pfd.revents & (POLLHUP | POLLERR)) {
+        enter_fallback(ctx);
+        return -1;
+    }
+    if (recv_all(ctx->data_fd, payload, size) < 0)
+        return -1;
+    return 1;
+}
 int set_fallback_callback(display_ctx *ctx, void (*on_fallback)(void *), void *userdata)
 {
     ctx->fallback_cb = on_fallback;
     ctx->fallback_userdata = userdata;
     return 0;
+}
+
+int set_exit_fallback_callback(display_ctx *ctx, void (*on_exit_fallback)(void *), void *userdata)
+{
+    ctx->exit_fallback_cb = on_exit_fallback;
+    ctx->exit_fallback_userdata = userdata;
+    return 0;
+}
+int get_data_fd(display_ctx *ctx)
+{
+    return ctx->data_fd;
 }
