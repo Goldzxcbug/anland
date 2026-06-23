@@ -532,7 +532,6 @@ carries **its own upstream license** instead.
 | Component 组成部分 | Path 路径 |
 |--------------------|-----------|
 | Reference consumer 参考消费端 (Android) V2 | [consumers/anland_v2/](consumers/anland_v2/) |
-| Reference consumer 参考生产端 (Android) V2 | [producers/kde/ubuntu2604_v2](producers/kde/ubuntu2604_v2) |
 | Shared protocol & utils 共享协议与工具 | [common/](common/) |
 | Broker daemon 中介守护进程 | [daemon/](daemon/) |
 | Reference C libraries 参考 C 库 | [libdisplay_consumer/](libdisplay_consumer/), [libdisplay_producer/](libdisplay_producer/) |
