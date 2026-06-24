@@ -152,11 +152,11 @@ static void enter_fallback(display_ctx *ctx)
         ctx->fallback_cb(ctx->fallback_userdata);
 }
 
-int connect_to_deamon(display_ctx **out, const char *socket_path)
+static display_ctx *alloc_ctx(void)
 {
     display_ctx *ctx = calloc(1, sizeof(*ctx));
     if (!ctx)
-        return -1;
+        return NULL;
 
     ctx->ctrl_fd = -1;
     ctx->data_fd = -1;
@@ -165,27 +165,29 @@ int connect_to_deamon(display_ctx **out, const char *socket_path)
     ctx->shm_fd = -1;
     ctx->shm_ptr = NULL;
     ctx->fallback = true;
+    return ctx;
+}
 
-    ctx->ctrl_fd = connect_unix(socket_path);
-    if (ctx->ctrl_fd < 0)
-        goto fail;
-
+/* Bring up the eventfd/shm/hello channels once ctrl_fd is connected. */
+static int setup_ctx_channels(display_ctx *ctx)
+{
     /* buf_ready_efd is the consumer->producer pacing eventfd; fence_fd is created as a
      * socketpair inside send_hello_fds(). */
     ctx->buf_ready_efd = eventfd(0, EFD_CLOEXEC);
     if (ctx->buf_ready_efd < 0)
-        goto fail;
+        return -1;
 
     if (create_shm(ctx) < 0)
-        goto fail;
+        return -1;
 
     if (send_hello_fds(ctx) < 0)
-        goto fail;
+        return -1;
 
-    *out = ctx;
     return 0;
+}
 
-fail:
+static void free_ctx(display_ctx *ctx)
+{
     if (ctx->shm_ptr) munmap((void *)ctx->shm_ptr, sizeof(uint32_t));
     if (ctx->shm_fd >= 0)         close(ctx->shm_fd);
     if (ctx->ctrl_fd >= 0)         close(ctx->ctrl_fd);
@@ -193,6 +195,50 @@ fail:
     if (ctx->buf_ready_efd >= 0)   close(ctx->buf_ready_efd);
     if (ctx->fence_fd >= 0)        close(ctx->fence_fd);
     free(ctx);
+}
+
+int connect_to_deamon(display_ctx **out, const char *socket_path)
+{
+    display_ctx *ctx = alloc_ctx();
+    if (!ctx)
+        return -1;
+
+    ctx->ctrl_fd = connect_unix(socket_path);
+    if (ctx->ctrl_fd < 0)
+        goto fail;
+
+    if (setup_ctx_channels(ctx) < 0)
+        goto fail;
+
+    *out = ctx;
+    return 0;
+
+fail:
+    free_ctx(ctx);
+    return -1;
+}
+
+int connect_to_deamon_with_fd(display_ctx **out, int ctrl_fd)
+{
+    if (ctrl_fd < 0)
+        return -1;
+
+    display_ctx *ctx = alloc_ctx();
+    if (!ctx) {
+        close(ctrl_fd);
+        return -1;
+    }
+
+    ctx->ctrl_fd = ctrl_fd;   /* take ownership */
+
+    if (setup_ctx_channels(ctx) < 0)
+        goto fail;
+
+    *out = ctx;
+    return 0;
+
+fail:
+    free_ctx(ctx);
     return -1;
 }
 

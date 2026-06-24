@@ -10,12 +10,16 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <sys/wait.h>
 #include <dirent.h>
 #include <unistd.h>
 
 #include "anw_hidden.h"
 #include "display_consumer.h"
 #include "protocol.h"
+#include "socket_utils.h"
 
 #define TAG "Anland"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
@@ -64,6 +68,14 @@ struct consumer_state {
 static struct consumer_state g_state = {
     .lock = PTHREAD_MUTEX_INITIALIZER,
 };
+
+/* Connection config, set from Java via nativeConfigure() and read on each
+ * (re)connect in do_connect(). Guarded by cfg_lock. */
+static pthread_mutex_t cfg_lock = PTHREAD_MUTEX_INITIALIZER;
+static char cfg_socket_path[256] = "/data/local/tmp/display_daemon.sock";
+static bool cfg_use_root = false;
+static char cfg_helper_path[512] = "";
+static char cfg_bridge_path[512] = "";
 
 static bool motion_has_last = false;
 static float motion_last_x = 0.0f;
@@ -245,9 +257,108 @@ static void stop_event_thread(struct consumer_state *s)
     //pthread_join(s->event_thread, NULL);
 }
 
+/*
+ * "Connect with root" handshake. The app cannot connect() to a root-owned
+ * daemon socket directly, so it listens on a bridge socket, launches the bundled
+ * helper through `su -c`, and the helper (as root) connects to the daemon and
+ * passes the connected fd back over the bridge. Returns the received fd (caller
+ * owns it) or -1 on failure.
+ */
+static int recv_fd_via_root_helper(const char *daemon_sock,
+                                   const char *helper_path,
+                                   const char *bridge_path)
+{
+    if (helper_path[0] == '\0' || bridge_path[0] == '\0') {
+        LOGE("root helper: helper/bridge path not configured");
+        return -1;
+    }
+
+    unlink(bridge_path);
+
+    int lfd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (lfd < 0) {
+        LOGE("root helper: socket() failed: %s", strerror(errno));
+        return -1;
+    }
+
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, bridge_path, sizeof(addr.sun_path) - 1);
+
+    if (bind(lfd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        LOGE("root helper: bind(%s) failed: %s", bridge_path, strerror(errno));
+        close(lfd);
+        return -1;
+    }
+    /* Root helper runs in a different SELinux/uid context; make the socket file
+     * reachable. (Root bypasses DAC, but be permissive anyway.) */
+    chmod(bridge_path, 0777);
+
+    if (listen(lfd, 1) < 0) {
+        LOGE("root helper: listen() failed: %s", strerror(errno));
+        close(lfd);
+        unlink(bridge_path);
+        return -1;
+    }
+
+    /* Build the command su runs: "<helper> <daemon_sock> <bridge_path>". */
+    char inner[1100];
+    snprintf(inner, sizeof(inner), "%s %s %s",
+             helper_path, daemon_sock, bridge_path);
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        LOGE("root helper: fork() failed: %s", strerror(errno));
+        close(lfd);
+        unlink(bridge_path);
+        return -1;
+    }
+    if (pid == 0) {
+        execlp("su", "su", "-c", inner, (char *)NULL);
+        _exit(127);   /* su not found / exec failed */
+    }
+
+    /* Wait for the helper to connect (root prompt may take a while). */
+    int fd = -1;
+    struct pollfd pfd = { .fd = lfd, .events = POLLIN };
+    if (poll(&pfd, 1, 30000) > 0 && (pfd.revents & POLLIN)) {
+        int cfd = accept(lfd, NULL, NULL);
+        if (cfd >= 0) {
+            char b;
+            int got = 0;
+            if (recv_fds(cfd, &b, 1, &fd, 1, &got) < 0 || got < 1)
+                fd = -1;
+            close(cfd);
+        }
+    } else {
+        LOGE("root helper: timed out waiting for helper connection");
+    }
+
+    int status = 0;
+    waitpid(pid, &status, 0);
+    close(lfd);
+    unlink(bridge_path);
+
+    if (fd < 0)
+        LOGE("root helper: did not receive daemon fd (su status=%d)", status);
+    return fd;
+}
+
 static int do_connect(struct consumer_state *s)
 {
-    const char *sock = "/data/local/tmp/display_daemon.sock";
+    /* Snapshot the connection config for this attempt. */
+    pthread_mutex_lock(&cfg_lock);
+    bool use_root = cfg_use_root;
+    char sock_path[sizeof(cfg_socket_path)];
+    char helper_path[sizeof(cfg_helper_path)];
+    char bridge_path[sizeof(cfg_bridge_path)];
+    memcpy(sock_path, cfg_socket_path, sizeof(sock_path));
+    memcpy(helper_path, cfg_helper_path, sizeof(helper_path));
+    memcpy(bridge_path, cfg_bridge_path, sizeof(bridge_path));
+    pthread_mutex_unlock(&cfg_lock);
+
+    const char *sock = sock_path;
 
     if (s->ctx) {
         disconnect(s->ctx);
@@ -282,10 +393,20 @@ static int do_connect(struct consumer_state *s)
     if (collect_dmabufs(s) < 0)
         return -1;
 
-    LOGI("connecting to %s (%dx%d, %d bufs)", sock,
-         s->screen_w, s->screen_h, s->buf_count);
+    LOGI("connecting to %s (%dx%d, %d bufs, root=%d)", sock,
+         s->screen_w, s->screen_h, s->buf_count, use_root);
 
-    if (connect_to_deamon(&s->ctx, sock) < 0) {
+    if (use_root) {
+        int ctrl_fd = recv_fd_via_root_helper(sock, helper_path, bridge_path);
+        if (ctrl_fd < 0) {
+            LOGE("root helper connect failed");
+            return -1;
+        }
+        if (connect_to_deamon_with_fd(&s->ctx, ctrl_fd) < 0) {
+            LOGE("connect_to_deamon_with_fd failed");
+            return -1;
+        }
+    } else if (connect_to_deamon(&s->ctx, sock) < 0) {
         LOGE("connect_to_deamon failed");
         return -1;
     }
@@ -419,6 +540,41 @@ static void *render_thread_func(void *arg)
 }
 
 /* ---------- JNI ---------- */
+
+static void copy_jstring(JNIEnv *env, jstring js, char *dst, size_t dstsz)
+{
+    if (!js) {
+        dst[0] = '\0';
+        return;
+    }
+    const char *s = (*env)->GetStringUTFChars(env, js, NULL);
+    if (s) {
+        strncpy(dst, s, dstsz - 1);
+        dst[dstsz - 1] = '\0';
+        (*env)->ReleaseStringUTFChars(env, js, s);
+    } else {
+        dst[0] = '\0';
+    }
+}
+
+JNIEXPORT void JNICALL
+Java_com_anland_consumer_MainActivity_nativeConfigure(
+    JNIEnv *env, jobject thiz, jstring socketPath, jboolean useRoot,
+    jstring helperPath, jstring bridgePath)
+{
+    pthread_mutex_lock(&cfg_lock);
+    char tmp[sizeof(cfg_socket_path)];
+    copy_jstring(env, socketPath, tmp, sizeof(tmp));
+    if (tmp[0] != '\0')
+        memcpy(cfg_socket_path, tmp, sizeof(cfg_socket_path));
+    cfg_use_root = (useRoot == JNI_TRUE);
+    copy_jstring(env, helperPath, cfg_helper_path, sizeof(cfg_helper_path));
+    copy_jstring(env, bridgePath, cfg_bridge_path, sizeof(cfg_bridge_path));
+    pthread_mutex_unlock(&cfg_lock);
+
+    LOGI("configured: socket=%s root=%d helper=%s bridge=%s",
+         cfg_socket_path, cfg_use_root, cfg_helper_path, cfg_bridge_path);
+}
 
 JNIEXPORT void JNICALL
 Java_com_anland_consumer_MainActivity_nativeStart(
