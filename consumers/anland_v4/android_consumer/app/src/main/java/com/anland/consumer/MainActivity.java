@@ -40,6 +40,9 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private boolean mClipListening = false;
     private static final String PREFS_NAME = "anland_settings";
     private static final String KEY_BOUND_KEYCODE = "bound_keycode";
+    private static final String KEY_SOCKET_PATH = "socket_path";
+    private static final String KEY_USE_ROOT = "use_root";
+    private static final String DEFAULT_SOCKET_PATH = "/data/local/tmp/display_daemon.sock";
     private EditText hiddenInput;
     private InputMethodManager imm;
     private int mImeInset = -1;  // last IME bottom inset applied to the surface
@@ -60,6 +63,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         System.loadLibrary("anland_consumer");
     }
 
+    private native void nativeConfigure(String socketPath, boolean useRoot,
+                                        String helperPath, String bridgePath);
     private native void nativeStart(Surface surface);
     private native void nativeStop();
     private native void nativeSendTouch(int action, float x, float y, int pointerId);
@@ -155,6 +160,21 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             nativeSetRefreshRate(d.getRefreshRate());
     }
 
+    // Push the current connection settings (socket path / root mode) to native
+    // before (re)connecting. The root helper is the executable bundled in the
+    // app's native lib dir; the bridge is a unix socket in our cache dir that
+    // the helper, launched via su, uses to hand back the daemon fd.
+    private void applyConnectionConfig() {
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        String sock = prefs.getString(KEY_SOCKET_PATH, DEFAULT_SOCKET_PATH);
+        if (sock == null || sock.trim().isEmpty())
+            sock = DEFAULT_SOCKET_PATH;
+        boolean useRoot = prefs.getBoolean(KEY_USE_ROOT, false);
+        String helperPath = getApplicationInfo().nativeLibraryDir + "/libfdhelper.so";
+        String bridgePath = getCacheDir().getAbsolutePath() + "/anland_fdbridge.sock";
+        nativeConfigure(sock.trim(), useRoot, helperPath, bridgePath);
+    }
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -216,6 +236,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             dm.registerDisplayListener(displayListener, null);
         if (surfaceReady) {
             nativeStop();
+            applyConnectionConfig();
             nativeStart(surfaceView.getHolder().getSurface());
             pushRefreshRate();
         }
@@ -239,6 +260,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         Log.i(TAG, "surfaceChanged: " + width + "x" + height);
         surfaceReady = true;
         nativeStop();
+        applyConnectionConfig();
         nativeStart(holder.getSurface());
         pushRefreshRate();
     }

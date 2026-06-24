@@ -37,4 +37,12 @@ android {
             minifyEnabled false
         }
     }
+
+    // Extract native libs onto disk so the bundled root helper (libfdhelper.so)
+    // is a real executable file that `su -c` can run from nativeLibraryDir.
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
 }

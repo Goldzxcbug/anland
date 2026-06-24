@@ -22,3 +22,24 @@ target_link_libraries(anland_consumer
     log
     dl
 )
+
+# Root helper for "connect with root" mode. Built as an executable but named
+# lib*.so so the Android packager extracts it into the app's nativeLibraryDir
+# with execute permission (requires useLegacyPackaging=true). Launched by the
+# app via `su -c` to connect the daemon socket and pass the fd back.
+add_executable(fdhelper
+    fd_helper.c
+    ${LIBDISPLAY_DIR}/common/socket_utils.c
+)
+
+target_include_directories(fdhelper PRIVATE
+    ${LIBDISPLAY_DIR}/common
+)
+
+set_target_properties(fdhelper PROPERTIES
+    PREFIX "lib"
+    OUTPUT_NAME "fdhelper"
+    SUFFIX ".so"
+)
+
+target_link_libraries(fdhelper log)
