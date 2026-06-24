@@ -12,6 +12,6 @@ chmod 755 "$MODULE_DIR/display_daemon"
 
 rm -f "$OUTPUT"
 cd "$MODULE_DIR"
-zip -r "$OUTPUT" module.prop customize.sh service.sh display_daemon
+zip -r "$OUTPUT" module.prop customize.sh service.sh sepolicy.rule display_daemon
 
 echo "Magisk module: $OUTPUT"
