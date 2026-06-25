@@ -271,10 +271,10 @@ static int connect_stream(struct pw_stream *stream, enum spa_direction direction
     if (quantum > 0) {
         char latency[32];
         snprintf(latency, sizeof(latency), "%u/%u", quantum, rate);
-        pw_stream_update_properties(stream,
-            &SPA_DICT_INIT((struct spa_dict_item[]){
-                SPA_DICT_ITEM_INIT(PW_KEY_NODE_LATENCY, latency),
-            }, 1));
+        struct spa_dict_item items[] = {
+            SPA_DICT_ITEM_INIT(PW_KEY_NODE_LATENCY, latency),};
+        struct spa_dict dict = SPA_DICT_INIT(items, 1);
+        pw_stream_update_properties(stream, &dict);
     }
 
     uint8_t buffer[1024];
