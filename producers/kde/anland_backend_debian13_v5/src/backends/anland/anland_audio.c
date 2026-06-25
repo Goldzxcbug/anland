@@ -172,33 +172,32 @@ static const struct pw_stream_events source_events = {
  * channel count changed. Runs on the loop thread, so the pw_stream calls are safe. */
 static void apply_format(struct anland_audio *a, const struct audio_format *f)
 {
-    uint32_t rate = f->rate ? f->rate : 48000;
-    uint32_t channels = f->channels ? f->channels : 2;
+    const bool playback = (f->role == AUDIO_ROLE_PLAYBACK);
+    const uint32_t rate = f->rate ? f->rate : DEFAULT_RATE;
+    const uint32_t channels = f->channels ? f->channels
+                                          : (playback ? DEFAULT_PLAY_CHANNELS : DEFAULT_CAP_CHANNELS);
 
-    if (f->role == AUDIO_ROLE_PLAYBACK) {
-        if (rate == a->play_rate && channels == a->play_channels &&
-            f->quantum == a->play_quantum)
-            return;
-        a->play_rate = rate;
-        a->play_channels = channels;
-        a->play_quantum = f->quantum;
-        if (a->pw_connected && a->capture) {
-            pw_stream_disconnect(a->capture);
-            connect_stream(a->capture, PW_DIRECTION_INPUT, rate, channels, a->play_quantum);
-        }
-    } else if (f->role == AUDIO_ROLE_CAPTURE) {
-        if (rate == a->cap_rate && channels == a->cap_channels &&
-            f->quantum == a->cap_quantum)
-            return;
-        a->cap_rate = rate;
-        a->cap_channels = channels;
-        a->cap_quantum = f->quantum;
-        if (a->pw_connected && a->source) {
-            pw_stream_disconnect(a->source);
-            connect_stream(a->source, PW_DIRECTION_OUTPUT, rate, channels, a->cap_quantum);
-        }
+    uint32_t *cur_rate     = playback ? &a->play_rate : &a->cap_rate;
+    uint32_t *cur_channels = playback ? &a->play_channels : &a->cap_channels;
+    uint32_t *cur_quantum  = playback ? &a->play_quantum : &a->cap_quantum;
+    struct pw_stream *stream = playback ? a->capture : a->source;
+    const enum spa_direction dir = playback ? PW_DIRECTION_INPUT : PW_DIRECTION_OUTPUT;
+
+    if (rate == *cur_rate && channels == *cur_channels && f->quantum == *cur_quantum)
+        return;   /* unchanged -> keep the device online, no hot-plug */
+
+    *cur_rate = rate;
+    *cur_channels = channels;
+    *cur_quantum = f->quantum;
+
+    /* Only a genuine format change hot-plugs the device. If PipeWire is not connected
+     * yet, build_pw() will pick up the new values when it (re)creates the stream. */
+    if (a->pw_connected && stream) {
+        pw_stream_disconnect(stream);
+        connect_stream(stream, dir, rate, channels, f->quantum);
     }
 }
+
 
 /* Mic PCM / format announcements arriving from the consumer. Runs on the loop thread. */
 static void on_audio_readable(void *data, int fd, uint32_t mask)
