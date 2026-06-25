@@ -5,6 +5,7 @@
     SPDX-License-Identifier: GPL-2.0-or-later
 */
 #include "anland_backend.h"
+#include "anland_audio.h"
 #include "anland_egl_backend.h"
 #include "anland_input.h"
 #include "anland_logging.h"
@@ -88,6 +89,8 @@ AnlandBackend::AnlandBackend(const QString &socketPath, QObject *parent)
 AnlandBackend::~AnlandBackend()
 {
     teardownNotifiers();
+    // Stop the audio engine before disconnect() closes the audio fd it borrows.
+    anland_audio_stop();
     if (m_reconnectTimer) {
         m_reconnectTimer->stop();
     }
@@ -141,6 +144,15 @@ bool AnlandBackend::initialize()
     m_reconnectTimer = new QTimer(this);
     m_reconnectTimer->setInterval(s_reconnectIntervalMs);
     connect(m_reconnectTimer, &QTimer::timeout, this, &AnlandBackend::onReconnectTimer);
+
+    // Bring up the audio engine up front: its PipeWire sink-monitor capture and
+    // virtual mic Source live for the whole session, independent of the consumer,
+    // so Linux apps never see the devices appear/disappear as the consumer comes and
+    // goes. The socket fd is attached later (onReconnectTimer) and detached in
+    // enterFallback(). Audio is non-critical, so a failure here is not fatal.
+    if (anland_audio_start() < 0) {
+        qCWarning(KWIN_ANLAND) << "failed to start audio engine; continuing without audio";
+    }
 
     // connect_to_deamon() only fetched screen info; the context is still in
     // fallback with no consumer fds or dmabufs. Enter fallback explicitly so the
@@ -396,6 +408,10 @@ void AnlandBackend::enterFallback()
     m_consumerReady = false;
     m_inFallback = true;
 
+    // Detach the audio socket: the streams keep running (capture drops its PCM, the
+    // mic Source feeds silence) so PipeWire never perceives the disconnect.
+    anland_audio_set_fd(-1);
+
     if (m_reconnectTimer) {
         m_reconnectTimer->start();
     }
@@ -429,6 +445,8 @@ void AnlandBackend::onReconnectTimer()
         layer->importBuffers(get_buf_count(m_display));
     }
     setupNotifiers();
+    // Attach the fresh audio socket (a new socketpair was installed by pickup_fds).
+    anland_audio_set_fd(get_audio_fd(m_display));
     m_outputs[0]->resumeRendering();
     if (layer) {
         layer->addRepaint(infiniteRegion());

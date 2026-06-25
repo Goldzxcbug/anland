@@ -57,6 +57,9 @@ bool is_fallback(display_ctx *ctx);
 int  try_exit_fallback(display_ctx *ctx);
 
 int  get_data_fd(display_ctx *ctx);
+/* Current local end of the audio socketpair, or -1 in fallback. Changes across
+ * reconnects; re-point the audio engine on each exit/enter fallback. */
+int  get_audio_fd(display_ctx *ctx);
 int  get_buffer_ready_fd(display_ctx *ctx);
 int  get_buf_count(display_ctx *ctx);
 int  get_selected_idx(display_ctx *ctx);

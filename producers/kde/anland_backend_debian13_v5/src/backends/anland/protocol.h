@@ -122,4 +122,46 @@ struct OutputEvent {
 
 #define OUTPUT_TYPE_CLIPBOARD 1
 
+/*
+ * Audio runs on its own dedicated bidirectional socketpair (hello fd slot 4),
+ * deliberately kept off the data channel so a burst of PCM never head-of-line
+ * blocks input/clipboard. The socket is full duplex: the producer writes desktop
+ * playback PCM that the consumer reads, and the consumer writes microphone PCM
+ * that the producer reads -- each side only ever reads what the other wrote.
+ * Every direction sends one AUDIO_MSG_FORMAT, then a stream of AUDIO_MSG_PCM.
+ *
+ * PCM is interleaved per frame. For stereo (channels == 2) the sample order
+ * within each frame is LEFT then RIGHT, i.e. channel positions FL, FR -- the
+ * producer's SPA channel map and the consumer's AAudio stereo layout must both
+ * honour this order so the left/right channels are never swapped.
+ *
+ * Audio quality is negotiated, not pinned: the consumer owns the real hardware,
+ * so on connect it opens its AAudio streams, reads back the rate/channels the
+ * device actually chose, and sends one AUDIO_MSG_FORMAT per direction (tagged with
+ * role) to the producer. The producer builds its PipeWire sink/source to match,
+ * so neither side resamples blindly and the PCM byte math lines up on both ends.
+ */
+#define AUDIO_MSG_FORMAT 1
+#define AUDIO_MSG_PCM    2
+
+/* PCM sample format codes for struct audio_format.format. */
+#define AUDIO_FORMAT_S16LE 0
+
+/* Which direction a struct audio_format describes. */
+#define AUDIO_ROLE_PLAYBACK 0   /* producer -> consumer (desktop sound -> speaker) */
+#define AUDIO_ROLE_CAPTURE  1   /* consumer -> producer (mic -> virtual source)    */
+
+struct audio_format {
+    uint32_t rate;       /* frames per second the device chose, e.g. 48000 / 44100 */
+    uint32_t channels;   /* interleaved; stereo is L,R (FL,FR) */
+    uint32_t format;     /* AUDIO_FORMAT_* */
+    uint32_t role;       /* AUDIO_ROLE_* -- which direction this describes */
+    uint32_t quantum;    /* requested buffer in frames (latency preset); 0 = engine default */
+} __attribute__((packed));
+
+struct audio_msg {
+    uint32_t type;       /* AUDIO_MSG_FORMAT | AUDIO_MSG_PCM */
+    uint32_t size;       /* payload bytes that follow this header */
+} __attribute__((packed));
+
 #endif

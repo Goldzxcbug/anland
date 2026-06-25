@@ -21,6 +21,7 @@ struct display_ctx {
     int      buf_ready_efd;
     int      fence_fd;        /* write end of the dedicated render-done fence channel */
     int      shm_fd;
+    int      audio_fd;        /* local end of the bidirectional audio socketpair (hello slot 4) */
     int      pending_render_fence; /* render-done fence for the in-flight frame */
     volatile uint32_t *shm_ptr;
     uint32_t screen_w, screen_h;
@@ -54,6 +55,7 @@ static void release_consumer_resources(display_ctx *ctx)
     if (ctx->data_fd >= 0)          { close(ctx->data_fd);          ctx->data_fd = -1; }
     if (ctx->buf_ready_efd >= 0)    { close(ctx->buf_ready_efd);    ctx->buf_ready_efd = -1; }
     if (ctx->fence_fd >= 0)         { close(ctx->fence_fd);         ctx->fence_fd = -1; }
+    if (ctx->audio_fd >= 0)         { close(ctx->audio_fd);         ctx->audio_fd = -1; }
     if (ctx->pending_render_fence >= 0) { close(ctx->pending_render_fence); ctx->pending_render_fence = -1; }
     if (ctx->shm_ptr)               { munmap((void *)ctx->shm_ptr, sizeof(uint32_t)); ctx->shm_ptr = NULL; }
     if (ctx->shm_fd >= 0)           { close(ctx->shm_fd);           ctx->shm_fd = -1; }
@@ -74,7 +76,7 @@ static void enter_fallback(display_ctx *ctx)
 /*
  * Ask the daemon for the consumer-side fds and map the shm index. Polls ctrl_fd
  * with a short timeout so it returns promptly when no consumer is up yet. On
- * success the four fds and shm_ptr are installed on ctx; the caller releases them
+ * success the five fds and shm_ptr are installed on ctx; the caller releases them
  * via release_consumer_resources() on any later failure. Returns 0 / -1.
  */
 static int pickup_fds(display_ctx *ctx)
@@ -87,22 +89,24 @@ static int pickup_fds(display_ctx *ctx)
     if (poll(&pfd, 1, HANDSHAKE_TIMEOUT_MS) <= 0)
         return -1;
 
-    int fds[4];
+    int fds[5];
     int fd_count = 0;
     struct ctrl_msg resp;
-    int n = recv_fds(ctx->ctrl_fd, &resp, sizeof(resp), fds, 4, &fd_count);
-    if (n <= 0 || resp.type != CTRL_MSG_FDS_READY || fd_count < 4) {
+    int n = recv_fds(ctx->ctrl_fd, &resp, sizeof(resp), fds, 5, &fd_count);
+    if (n <= 0 || resp.type != CTRL_MSG_FDS_READY || fd_count < 5) {
         for (int i = 0; i < fd_count; i++)
             close(fds[i]);
         return -1;
     }
 
-    /* Slot order matches the consumer's send_hello_fds(): { buf_ready, fence, data, shm }.
-     * fence_fd is the write end of the dedicated producer->consumer render-done channel. */
+    /* Slot order matches the consumer's send_hello_fds(): { buf_ready, fence, data, shm, audio }.
+     * fence_fd is the write end of the dedicated producer->consumer render-done channel;
+     * audio_fd is the full-duplex PCM socket (producer writes playback, reads mic). */
     ctx->buf_ready_efd    = fds[0];
     ctx->fence_fd         = fds[1];
     ctx->data_fd          = fds[2];
     ctx->shm_fd           = fds[3];
+    ctx->audio_fd         = fds[4];
 
     ctx->shm_ptr = mmap(NULL, sizeof(uint32_t), PROT_READ, MAP_SHARED, ctx->shm_fd, 0);
     if (ctx->shm_ptr == MAP_FAILED) {
@@ -175,6 +179,7 @@ int connect_to_deamon(display_ctx **out, const char *socket_path)
     ctx->buf_ready_efd = -1;
     ctx->fence_fd = -1;
     ctx->shm_fd = -1;
+    ctx->audio_fd = -1;
     ctx->pending_render_fence = -1;
     ctx->shm_ptr = NULL;
     ctx->fallback = true; // stay in fallback until try_exit_fallback() succeeds
@@ -419,6 +424,14 @@ int try_exit_fallback(display_ctx *ctx)
 int get_data_fd(display_ctx *ctx)
 {
     return ctx->data_fd;
+}
+
+/* Current local end of the audio socketpair, or -1 in fallback. The value changes
+ * across reconnects (each pickup installs a fresh socket), so the audio engine must
+ * be re-pointed via anland_audio_set_fd() rather than caching it. */
+int get_audio_fd(display_ctx *ctx)
+{
+    return ctx->fallback ? -1 : ctx->audio_fd;
 }
 
 int get_buffer_ready_fd(display_ctx *ctx)

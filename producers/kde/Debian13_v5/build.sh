@@ -139,6 +139,9 @@ main() {
     # (no regex metacharacters, so plain grep matches it verbatim).
     build_pkg kwin     "$kwin_patch" "BackendType::Anland"
     build_pkg xwayland "$xwl_patch" "No usable linux-dmabuf main device"
+
+    sed -i '/PULSE_SERVER=unix:\/tmp\/.pulse-socket/d' /etc/environment
+
     log "Done. Patched kwin and Xwayland built and installed."
     echo "Built packages are under: $WORKDIR/{kwin,xwayland}/"
     echo "Restart the compositor session for the changes to take effect."
