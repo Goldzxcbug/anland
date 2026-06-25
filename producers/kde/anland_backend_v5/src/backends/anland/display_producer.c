@@ -1,6 +1,6 @@
 #define _GNU_SOURCE
 #include "display_producer.h"
-#include "../common/socket_utils.h"
+#include "socket_utils.h"
 
 #include <errno.h>
 #include <poll.h>

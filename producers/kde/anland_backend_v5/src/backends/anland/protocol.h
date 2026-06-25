@@ -60,9 +60,6 @@ struct buf_info {
 #define INPUT_TYPE_DISPLAY_REFRESH 7
 #define INPUT_TYPE_CLIPBOARD      8
 #define INPUT_TYPE_TEXT_INPUT      9
-#define INPUT_TYPE_ACTION 10
-
-#define INPUT_ACTION_DOWN    0
 
 #define INPUT_ACTION_DOWN    0
 #define INPUT_ACTION_UP      1
@@ -105,10 +102,6 @@ struct InputEvent {
         struct {
             uint32_t size; //这个packet只是通知包 作为header真正数据会集中发送,这里通知随后数据的大小
         } text_input;
-        struct {
-            uint32_t action;
-            int32_t value;
-        } input_action;
         struct {
             uint32_t padding[4];
         };

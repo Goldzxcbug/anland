@@ -13,7 +13,9 @@
 #include "../common/socket_utils.h"
 
 #define MAX_EVENTS 16
-#define MAX_FDS    4
+/* Hello fd set: { buf_ready, fence, data, shm, audio }. The daemon only relays
+ * the fds; it never interprets the slots. */
+#define MAX_FDS    5
 
 struct client {
     int  ctrl_fd;
@@ -74,7 +76,7 @@ static int send_screen_info_msg(int fd)
 
 static void try_deliver_fds(void)
 {
-    if (!producer || deposited_fd_count < 4) {
+    if (!producer || deposited_fd_count < MAX_FDS) {
         producer_waiting_fds = true;
         return;
     }
@@ -149,7 +151,7 @@ static void handle_client_data(struct client *c)
 
     switch (hdr.type) {
     case CTRL_MSG_CONSUMER_HELLO:
-        if (c == consumer && fd_count >= 3) {
+        if (c == consumer && fd_count >= MAX_FDS - 1) {
             clear_deposited_fds();
             memcpy(deposited_fds, fds, sizeof(int) * fd_count);
             deposited_fd_count = fd_count;
