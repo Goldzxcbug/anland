@@ -24,18 +24,12 @@ jobs:
     - name: Setup Android SDK
       uses: android-actions/setup-android@v3
       
-    - name: Generate Gradle Wrapper
-      run: |
-        gradle wrapper --gradle-version 8.2
-        
-    - name: Grant execute permission for gradlew
-      run: chmod +x gradlew
-      
     - name: Build with Gradle
       run: ./gradlew assembleDebug
+      working-directory: consumers/anland_v5/android_consumer
       
     - name: Upload APK
       uses: actions/upload-artifact@v4
       with:
         name: app-debug
-        path: app/build/outputs/apk/debug/app-debug.apk
+        path: consumers/anland_v5/android_consumer/app/build/outputs/apk/debug/app-debug.apk
