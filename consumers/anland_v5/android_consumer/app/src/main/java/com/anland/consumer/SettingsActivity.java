@@ -8,6 +8,7 @@ import android.os.Bundle;
 import android.os.CountDownTimer;
 import android.text.Editable;
 import android.text.TextWatcher;
+import android.text.InputType;
 import android.util.Log;
 import android.util.SparseArray;
 import android.view.Gravity;
@@ -21,6 +22,7 @@ import android.widget.LinearLayout;
 import android.widget.Spinner;
 import android.widget.Switch;
 import android.widget.TextView;
+
 
 public class SettingsActivity extends Activity {
     private static final String TAG = "AnlandSettings";
@@ -102,6 +104,8 @@ public class SettingsActivity extends Activity {
         root.addView(bindButton);
 
         addConnectionSection(root);
+
+        addResolutionSection(root);
 
         setContentView(root);
 
@@ -209,6 +213,60 @@ public class SettingsActivity extends Activity {
         root.addView(latHint);
     }
 
+    private void addResolutionSection(LinearLayout root) {
+    SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+    
+    TextView header = new TextView(this);
+    header.setText("Display Resolution");
+    header.setTextSize(16);
+    header.setTypeface(null, Typeface.BOLD);
+    header.setPadding(0, dp(32), 0, dp(8));
+    root.addView(header);
+    
+    // Ширина
+    EditText widthInput = new EditText(this);
+    widthInput.setSingleLine(true);
+    widthInput.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+    widthInput.setHint("Width (e.g. 1920)");
+    widthInput.setText(String.valueOf(prefs.getInt("custom_width", 0)));
+    widthInput.addTextChangedListener(new TextWatcher() {
+        public void beforeTextChanged(CharSequence s, int a, int b, int c) {}
+        public void onTextChanged(CharSequence s, int a, int b, int c) {}
+        public void afterTextChanged(Editable s) {
+            try {
+                int w = Integer.parseInt(s.toString().trim());
+                prefs.edit().putInt("custom_width", w).apply();
+            } catch (NumberFormatException e) {}
+        }
+    });
+    root.addView(widthInput);
+    
+    // Высота
+    EditText heightInput = new EditText(this);
+    heightInput.setSingleLine(true);
+    heightInput.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+    heightInput.setHint("Height (e.g. 1080)");
+    heightInput.setText(String.valueOf(prefs.getInt("custom_height", 0)));
+    heightInput.addTextChangedListener(new TextWatcher() {
+        public void beforeTextChanged(CharSequence s, int a, int b, int c) {}
+        public void onTextChanged(CharSequence s, int a, int b, int c) {}
+        public void afterTextChanged(Editable s) {
+            try {
+                int h = Integer.parseInt(s.toString().trim());
+                prefs.edit().putInt("custom_height", h).apply();
+            } catch (NumberFormatException e) {}
+        }
+    });
+    root.addView(heightInput);
+    
+    TextView hint = new TextView(this);
+    hint.setText("Leave 0 for native resolution. Takes effect on next connect.");
+    hint.setTextSize(12);
+    hint.setTextColor(Color.GRAY);
+    hint.setPadding(0, dp(4), 0, 0);
+    root.addView(hint);
+    }
+    
     /* A labelled latency picker that persists the selected preset (ms) under `key`. */
     private View makeLatencySpinner(String label, final String key, SharedPreferences prefs) {
         LinearLayout box = new LinearLayout(this);
