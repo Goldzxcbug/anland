@@ -182,8 +182,13 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         String helperPath = getApplicationInfo().nativeLibraryDir + "/libfdhelper.so";
         String bridgePath = getCacheDir().getAbsolutePath() + "/anland_fdbridge.sock";
         nativeConfigure(sock.trim(), useRoot, helperPath, bridgePath);
+        int customW = prefs.getInt("custom_width", 0);
+        int customH = prefs.getInt("custom_height", 0);
+        nativeSetCustomResolution(customW, customH);
     }
-
+    
+    private native void nativeSetCustomResolution(int width, int height);
+    
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
