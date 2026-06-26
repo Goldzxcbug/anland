@@ -595,9 +595,6 @@ Java_com_anland_consumer_MainActivity_nativeConfigure(
          cfg_socket_path, cfg_use_root, cfg_helper_path, cfg_bridge_path);
 }
 
-static int cfg_custom_width = 0;
-static int cfg_custom_height = 0;
-
 JNIEXPORT void JNICALL
 Java_com_anland_consumer_MainActivity_nativeSetCustomResolution(
     JNIEnv* env, jobject thiz, jint width, jint height)
