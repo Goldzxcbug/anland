@@ -41,6 +41,10 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private String mLastSentClip = null;
     private boolean mClipListening = false;
     private static final String PREFS_NAME = "anland_settings";
+    private int customScreenWidth = 0;
+    private int customScreenHeight = 0;
+    private int viewWidth = 0;
+    private int viewHeight = 0;
     private static final String KEY_BOUND_KEYCODE = "bound_keycode";
     private static final String KEY_SOCKET_PATH = "socket_path";
     private static final String KEY_USE_ROOT = "use_root";
@@ -184,6 +188,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         nativeConfigure(sock.trim(), useRoot, helperPath, bridgePath);
         int customW = prefs.getInt("custom_width", 0);
         int customH = prefs.getInt("custom_height", 0);
+        customScreenWidth = prefs.getInt("custom_width", 0);
+        customScreenHeight = prefs.getInt("custom_height", 0);
         nativeSetCustomResolution(customW, customH);
     }
     
@@ -316,6 +322,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     @Override
     public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
         Log.i(TAG, "surfaceChanged: " + width + "x" + height);
+        viewWidth = width;
+        viewHeight = height;
         surfaceReady = true;
         nativeStop();
         applyConnectionConfig();
@@ -658,35 +666,54 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     }
 
     private boolean handleTouchEvent(MotionEvent event) {
-        int action = event.getActionMasked();
-        int pointerIdx = event.getActionIndex();
-        int pointerId = event.getPointerId(pointerIdx);
-
-        switch (action) {
-            case MotionEvent.ACTION_DOWN:
-            case MotionEvent.ACTION_POINTER_DOWN:
-                nativeSendTouch(0, event.getX(pointerIdx), event.getY(pointerIdx), pointerId);
-                nativeSendTouchFrame();
-                return true;
-            case MotionEvent.ACTION_UP:
-            case MotionEvent.ACTION_POINTER_UP:
-                nativeSendTouch(1, event.getX(pointerIdx), event.getY(pointerIdx), pointerId);
-                nativeSendTouchFrame();
-                return true;
-            case MotionEvent.ACTION_MOVE:
-                for (int i = 0; i < event.getPointerCount(); i++) {
-                    nativeSendTouch(2, event.getX(i), event.getY(i), event.getPointerId(i));
-                }
-                nativeSendTouchFrame();
-                return true;
-            case MotionEvent.ACTION_CANCEL:
-                for (int i = 0; i < event.getPointerCount(); i++) {
-                    nativeSendTouch(1, event.getX(i), event.getY(i), event.getPointerId(i));
-                }
-                nativeSendTouchFrame();
-                return true;
-        }
-        return false;
+    int action = event.getActionMasked();
+    int pointerIdx = event.getActionIndex();
+    int pointerId = event.getPointerId(pointerIdx);
+    
+    // Масштабирование
+    float scaleX = (customScreenWidth > 0 && viewWidth > 0) ? 
+                   (float)customScreenWidth / viewWidth : 1.0f;
+    float scaleY = (customScreenHeight > 0 && viewHeight > 0) ? 
+                   (float)customScreenHeight / viewHeight : 1.0f;
+    
+    switch (action) {
+        case MotionEvent.ACTION_DOWN:
+        case MotionEvent.ACTION_POINTER_DOWN:
+            nativeSendTouch(0, 
+                event.getX(pointerIdx) * scaleX, 
+                event.getY(pointerIdx) * scaleY, 
+                pointerId);
+            nativeSendTouchFrame();
+            return true;
+            
+        case MotionEvent.ACTION_UP:
+        case MotionEvent.ACTION_POINTER_UP:
+            nativeSendTouch(1, 
+                event.getX(pointerIdx) * scaleX, 
+                event.getY(pointerIdx) * scaleY, 
+                pointerId);
+            nativeSendTouchFrame();
+            return true;
+            
+        case MotionEvent.ACTION_MOVE:
+            for (int i = 0; i < event.getPointerCount(); i++) {
+                nativeSendTouch(2, 
+                    event.getX(i) * scaleX, 
+                    event.getY(i) * scaleY, 
+                    event.getPointerId(i));
+            }
+            nativeSendTouchFrame();
+            return true;
+            
+        case MotionEvent.ACTION_CANCEL:
+            for (int i = 0; i < event.getPointerCount(); i++) {
+                nativeSendTouch(1, 
+                    event.getX(i) * scaleX, 
+                    event.getY(i) * scaleY, 
+                    event.getPointerId(i));
+            }
+            nativeSendTouchFrame();
+            return true;
     }
-
-}
+    return false;
+    }
