@@ -4,6 +4,7 @@ import android.Manifest;
 import android.app.Activity;
 import android.content.ClipData;
 import android.content.ClipboardManager;
+import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.hardware.display.DisplayManager;
 import android.content.SharedPreferences;
@@ -13,6 +14,7 @@ import android.util.Log;
 import android.view.Display;
 import android.view.Gravity;
 import android.view.InputDevice;
+import android.view.KeyCharacterMap;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.PointerIcon;
@@ -54,9 +56,15 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     static final String KEY_MIC_LATENCY_MS = "mic_latency_ms";
     private static final int REQ_RECORD_AUDIO = 1001;
     private static final String DEFAULT_SOCKET_PATH = "/data/local/tmp/display_daemon.sock";
+    private static final String KEY_ACCESSIBILITY_ENABLED = "accessibility_key_intercept";
+    private static final String KEY_EXTRA_KEYS_ENABLED = "extra_keys_bar";
     private EditText hiddenInput;
     private InputMethodManager imm;
-    private int mImeInset = -1;  // last IME bottom inset applied to the surface
+    private int mImeBottom = 0;   // last IME bottom inset
+    private int mBarHeight = 0;   // extra-keys bar height in px
+    private ExtraKeysBar extraKeysBar;
+
+    public static MainActivity sInstance;
 
     // evdev keycodes (linux/input-event-codes.h) for the editing keys a soft
     // keyboard emits as key events rather than text.
@@ -199,6 +207,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
+        sInstance = this;
+
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);
         // Take over inset handling: the IME insets are dispatched to our
@@ -215,6 +225,25 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             FrameLayout.LayoutParams.MATCH_PARENT));
         // 1x1 so the IME target never overlaps the surface and steals touches.
         root.addView(hiddenInput, new FrameLayout.LayoutParams(1, 1));
+
+        // Bottom extra-keys bar (Termux-style). Hidden by default; toggled by the
+        // settings switch and synced in onResume. Height mirrors Termux: 37.5dp/row.
+        float density = getResources().getDisplayMetrics().density;
+        mBarHeight = Math.round(37.5f * density * ExtraKeysBar.rowCount());
+        extraKeysBar = new ExtraKeysBar(this, new ExtraKeysBar.Sender() {
+            @Override public void key(int action, int evdev) { nativeSendKey(action, evdev); }
+            @Override public void text(String s) {
+                if (!s.isEmpty()) nativeSendTextInput(s.getBytes(StandardCharsets.UTF_8));
+            }
+            @Override public void toggleKeyboard() { MainActivity.this.toggleKeyboard(); }
+            @Override public void openSettings() {
+                startActivity(new Intent(MainActivity.this, SettingsActivity.class));
+            }
+        });
+        extraKeysBar.setVisibility(View.GONE);
+        root.addView(extraKeysBar, new FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT, mBarHeight, Gravity.BOTTOM));
+
         setContentView(root);
         surfaceView.getHolder().addCallback(this);
 
@@ -250,6 +279,14 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     @Override
     protected void onResume() {
         super.onResume();
+
+        // Re-check accessibility service state on resume
+        KeyInterceptor.recheck();
+
+        // Sync extra-keys bar visibility with the settings switch.
+        setExtraKeysBarVisible(getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            .getBoolean(KEY_EXTRA_KEYS_ENABLED, false));
+
         setupFullscreen();
         DisplayManager dm = getSystemService(DisplayManager.class);
         if (dm != null)
@@ -382,6 +419,46 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         nativeSendKey(1, evdevCode);
     }
 
+    // Maps soft-keyboard characters to Android key codes so a bar modifier can be
+    // combined with them. Shared instance; KeyCharacterMap.getEvents is read-only.
+    private final KeyCharacterMap mVirtualKcm =
+        KeyCharacterMap.load(KeyCharacterMap.VIRTUAL_KEYBOARD);
+
+    /*
+     * If an extra-keys-bar modifier (CTRL/ALT/SHIFT) is currently held, take the
+     * first key-mappable character of `s` and send it as a modifier combo (e.g.
+     * Ctrl+C) through the bar, which also clears the unlocked modifiers. Returns
+     * true if the input was consumed this way, false to fall back to plain text.
+     */
+    private boolean maybeSendModifierCombo(String s) {
+        if (extraKeysBar == null || !extraKeysBar.hasActiveModifier()
+                || s == null || s.isEmpty())
+            return false;
+        for (int i = 0; i < s.length(); i++) {
+            int evdev = charToEvdev(s.charAt(i));
+            if (evdev != -1) {
+                extraKeysBar.sendKeyComboFromExternal(evdev);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Convert a character to an evdev scancode via the virtual key character map
+    // and KeyCodeMapper. Returns -1 if it can't be expressed as a single key.
+    private int charToEvdev(char ch) {
+        KeyEvent[] events = mVirtualKcm.getEvents(new char[]{ch});
+        if (events != null) {
+            for (KeyEvent e : events) {
+                if (e.getAction() == KeyEvent.ACTION_DOWN) {
+                    int evdev = KeyCodeMapper.getScanCode(e.getKeyCode());
+                    if (evdev != -1) return evdev;
+                }
+            }
+        }
+        return -1;
+    }
+
     // Map the few Android key codes a soft keyboard delivers as key events to the
     // evdev keycodes KWin expects. Returns 0 for keys we don't forward.
     private static int toEvdevKey(int keyCode) {
@@ -419,6 +496,12 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         @Override
         public boolean commitText(CharSequence text, int newCursorPosition) {
             final String s = text == null ? "" : text.toString();
+            // If a bar modifier (CTRL/ALT/...) is held, combine it with the typed
+            // character and send as a key combo instead of inserting text.
+            if (maybeSendModifierCombo(s)) {
+                composing.setLength(0);
+                return true;
+            }
             // Fast path: the commit just finalizes the current composition
             // unchanged — already forwarded, so only drop the tracker.
             if (composing.length() > 0 && composing.toString().equals(s)) {
@@ -432,7 +515,12 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
 
         @Override
         public boolean setComposingText(CharSequence text, int newCursorPosition) {
-            replaceComposing(text == null ? "" : text.toString());
+            final String s = text == null ? "" : text.toString();
+            if (maybeSendModifierCombo(s)) {
+                composing.setLength(0);
+                return true;
+            }
+            replaceComposing(s);
             return true;
         }
 
@@ -499,19 +587,43 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         }
     }
 
-    // Shrink the surface to the area above the keyboard by giving it a bottom
-    // margin equal to the IME height. The size change flows through
+    // Shrink the surface to the area above the keyboard (and the extra-keys bar,
+    // if shown) by giving it a bottom margin. The size change flows through
     // surfaceChanged -> nativeStart and the producer's resize path, so the
     // focused window relayouts into the upper region instead of hiding behind
-    // the keyboard. Reset to 0 when the IME goes away.
+    // the keyboard. Reset when the IME goes away.
     private void applyImeInset(WindowInsets insets) {
-        int imeBottom = insets.getInsets(WindowInsets.Type.ime()).bottom;
-        if (imeBottom == mImeInset) return;  // no change — skip surface restart
-        mImeInset = imeBottom;
+        mImeBottom = insets.getInsets(WindowInsets.Type.ime()).bottom;
+        relayout();
+    }
+
+    // Recompute the surface bottom margin and the bar position from the current
+    // IME inset and bar visibility. The surface ends above the bar, which sits
+    // directly on top of the IME: "surface / extra-keys bar / IME" bottom-up.
+    private void relayout() {
+        boolean barVisible = extraKeysBar != null && extraKeysBar.getVisibility() == View.VISIBLE;
+        int barH = barVisible ? mBarHeight : 0;
+        int target = mImeBottom + barH;
+
         FrameLayout.LayoutParams lp =
             (FrameLayout.LayoutParams) surfaceView.getLayoutParams();
-        lp.bottomMargin = imeBottom;
-        surfaceView.setLayoutParams(lp);
+        if (lp.bottomMargin != target) {       // skip redundant surface restart
+            lp.bottomMargin = target;
+            surfaceView.setLayoutParams(lp);
+        }
+        if (extraKeysBar != null)
+            extraKeysBar.setTranslationY(-mImeBottom);
+    }
+
+    // Show/hide the extra-keys bar and re-apply the layout so the display area
+    // is compressed (shown) or restored (hidden).
+    private void setExtraKeysBarVisible(boolean visible) {
+        if (extraKeysBar == null) return;
+        boolean cur = extraKeysBar.getVisibility() == View.VISIBLE;
+        if (cur == visible) return;
+        extraKeysBar.setVisibility(visible ? View.VISIBLE : View.GONE);
+        if (!visible) extraKeysBar.reset();
+        relayout();
     }
 
     private boolean isImeVisible() {
@@ -594,7 +706,46 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             nativeSendKey(0, scanCode);
             return true;
         }
+
+        // fallback: when scancode is 0 (e.g. Fn key combos), map via KeyCodeMapper
+        int evdev = KeyCodeMapper.getScanCode(keyCode);
+        if (evdev != -1) {
+            nativeSendKey(0, evdev);
+            return true;
+        }
         return true;
+    }
+
+    // Called from KeyInterceptor (accessibility service) to handle keys that
+    // the normal onKeyDown/onKeyUp might miss (e.g. Fn combos).
+    public boolean handleAccessibilityKey(KeyEvent event) {
+        if (event.getRepeatCount() > 0)
+            return true;
+
+        int scanCode = event.getScanCode();
+        if (scanCode != 0 && event.getKeyCode() == KeyEvent.KEYCODE_UNKNOWN) {
+            // Some Fn combos deliver KEYCODE_UNKNOWN with a valid scancode
+            nativeSendKey(event.getAction() == KeyEvent.ACTION_DOWN ? 0 : 1, scanCode);
+            return true;
+        }
+
+        int evdev = KeyCodeMapper.getScanCode(event.getKeyCode());
+        if (evdev != -1) {
+            nativeSendKey(event.getAction() == KeyEvent.ACTION_DOWN ? 0 : 1, evdev);
+            return true;
+        }
+
+        // If both keyCode and scancode are unknown, store/replay raw scancode anyway
+        if (scanCode != 0) {
+            nativeSendKey(event.getAction() == KeyEvent.ACTION_DOWN ? 0 : 1, scanCode);
+            return true;
+        }
+        return true;
+    }
+
+    public boolean isAccessibilityInterceptEnabled() {
+        return getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                .getBoolean(KEY_ACCESSIBILITY_ENABLED, false);
     }
 
     @Override
@@ -602,6 +753,13 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         int scanCode = event.getScanCode();
         if (scanCode != 0) {
             nativeSendKey(1, scanCode);
+            return true;
+        }
+
+        // fallback: when scancode is 0, map via KeyCodeMapper
+        int evdev = KeyCodeMapper.getScanCode(keyCode);
+        if (evdev != -1) {
+            nativeSendKey(1, evdev);
             return true;
         }
         return true;
