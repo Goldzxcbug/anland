@@ -31,6 +31,7 @@ public class SettingsActivity extends Activity {
     private static final String KEY_MIC_ENABLED = "mic_enabled";
     private static final String KEY_SPEAKER_LATENCY_MS = "speaker_latency_ms";
     private static final String KEY_MIC_LATENCY_MS = "mic_latency_ms";
+    private static final String KEY_ACCESSIBILITY_ENABLED = "accessibility_key_intercept";
     private static final String DEFAULT_SOCKET_PATH = "/data/local/tmp/display_daemon.sock";
     private static final int UNBOUND = -1;
 
@@ -100,6 +101,34 @@ public class SettingsActivity extends Activity {
         bindButton.setText("Bind Virtual Keyboard Key");
         bindButton.setOnClickListener(v -> startListening());
         root.addView(bindButton);
+
+        // === Accessibility key intercept switch ===
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        Switch accessibilitySwitch = new Switch(this);
+        accessibilitySwitch.setText("Accessibility Key Interception");
+        accessibilitySwitch.setTextSize(14);
+        accessibilitySwitch.setPadding(0, dp(16), 0, 0);
+        accessibilitySwitch.setChecked(prefs.getBoolean(KEY_ACCESSIBILITY_ENABLED, false));
+        accessibilitySwitch.setOnCheckedChangeListener((v, checked) -> {
+            getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+                .putBoolean(KEY_ACCESSIBILITY_ENABLED, checked).apply();
+            if (checked) {
+                KeyInterceptor.launch(SettingsActivity.this);
+            } else {
+                KeyInterceptor.shutdown(false);
+            }
+        });
+        root.addView(accessibilitySwitch);
+
+        TextView accessibilityHint = new TextView(this);
+        accessibilityHint.setText("Intercept function keys (Fn, F1-F12 etc.) via "
+            + "AccessibilityService. Enable this if external keyboard Fn combos "
+            + "don't reach the desktop. Requires Accessibility permission granted "
+            + "in system Settings > Accessibility (one-time).");
+        accessibilityHint.setTextSize(12);
+        accessibilityHint.setTextColor(Color.GRAY);
+        accessibilityHint.setPadding(0, dp(4), 0, dp(8));
+        root.addView(accessibilityHint);
 
         addConnectionSection(root);
 
