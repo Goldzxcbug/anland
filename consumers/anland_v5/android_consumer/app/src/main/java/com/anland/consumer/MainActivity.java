@@ -50,9 +50,12 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     static final String KEY_MIC_LATENCY_MS = "mic_latency_ms";
     private static final int REQ_RECORD_AUDIO = 1001;
     private static final String DEFAULT_SOCKET_PATH = "/data/local/tmp/display_daemon.sock";
+    private static final String KEY_ACCESSIBILITY_ENABLED = "accessibility_key_intercept";
     private EditText hiddenInput;
     private InputMethodManager imm;
     private int mImeInset = -1;  // last IME bottom inset applied to the surface
+
+    public static MainActivity sInstance;
 
     // evdev keycodes (linux/input-event-codes.h) for the editing keys a soft
     // keyboard emits as key events rather than text.
@@ -188,6 +191,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
+        sInstance = this;
+
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);
         // Take over inset handling: the IME insets are dispatched to our
@@ -239,6 +244,10 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     @Override
     protected void onResume() {
         super.onResume();
+
+        // Re-check accessibility service state on resume
+        KeyInterceptor.recheck();
+
         setupFullscreen();
         DisplayManager dm = getSystemService(DisplayManager.class);
         if (dm != null)
@@ -589,6 +598,38 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             return true;
         }
         return true;
+    }
+
+    // Called from KeyInterceptor (accessibility service) to handle keys that
+    // the normal onKeyDown/onKeyUp might miss (e.g. Fn combos).
+    public boolean handleAccessibilityKey(KeyEvent event) {
+        if (event.getRepeatCount() > 0)
+            return true;
+
+        int scanCode = event.getScanCode();
+        if (scanCode != 0 && event.getKeyCode() == KeyEvent.KEYCODE_UNKNOWN) {
+            // Some Fn combos deliver KEYCODE_UNKNOWN with a valid scancode
+            nativeSendKey(event.getAction() == KeyEvent.ACTION_DOWN ? 0 : 1, scanCode);
+            return true;
+        }
+
+        int evdev = KeyCodeMapper.getScanCode(event.getKeyCode());
+        if (evdev != -1) {
+            nativeSendKey(event.getAction() == KeyEvent.ACTION_DOWN ? 0 : 1, evdev);
+            return true;
+        }
+
+        // If both keyCode and scancode are unknown, store/replay raw scancode anyway
+        if (scanCode != 0) {
+            nativeSendKey(event.getAction() == KeyEvent.ACTION_DOWN ? 0 : 1, scanCode);
+            return true;
+        }
+        return true;
+    }
+
+    public boolean isAccessibilityInterceptEnabled() {
+        return getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                .getBoolean(KEY_ACCESSIBILITY_ENABLED, false);
     }
 
     @Override
