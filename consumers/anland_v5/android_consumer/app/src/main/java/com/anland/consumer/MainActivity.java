@@ -581,6 +581,13 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             nativeSendKey(0, scanCode);
             return true;
         }
+
+        // fallback: when scancode is 0 (e.g. Fn key combos), map via KeyCodeMapper
+        int evdev = KeyCodeMapper.getScanCode(keyCode);
+        if (evdev != -1) {
+            nativeSendKey(0, evdev);
+            return true;
+        }
         return true;
     }
 
@@ -589,6 +596,13 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         int scanCode = event.getScanCode();
         if (scanCode != 0) {
             nativeSendKey(1, scanCode);
+            return true;
+        }
+
+        // fallback: when scancode is 0, map via KeyCodeMapper
+        int evdev = KeyCodeMapper.getScanCode(keyCode);
+        if (evdev != -1) {
+            nativeSendKey(1, evdev);
             return true;
         }
         return true;
