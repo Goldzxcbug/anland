@@ -23,6 +23,7 @@
 #include "wayland/seat.h"
 #include "wayland_server.h"
 
+#include <QFutureWatcher>
 #include <QScopeGuard>
 #include <QSocketNotifier>
 #include <QTimer>
@@ -491,14 +492,19 @@ static QByteArray readDataFromFd(FileDescriptor &fd)
 }
 
 /*
- * Read the text/plain content of a Wayland AbstractDataSource (the clipboard
- * selection).  Picks text/plain;charset=utf-8 preferentially, falls back to
- * text/plain.  Returns an empty QByteArray if nothing useful is available.
+ * Ask a Wayland AbstractDataSource (the clipboard selection) to serve its
+ * text/plain content into a pipe.  Picks text/plain;charset=utf-8 preferentially,
+ * falls back to text/plain.  Returns the pipe's read endpoint that the caller
+ * should drain with readDataFromFd(), or nullopt if nothing useful is available.
+ *
+ * This touches the Wayland server (requestData/flush) and so must run on the
+ * compositor's main thread; the blocking drain of the returned fd can then be
+ * handed off to a worker thread.
  */
-static QByteArray requestClipboardText(AbstractDataSource *source)
+static std::optional<FileDescriptor> requestClipboardData(AbstractDataSource *source)
 {
     if (!source)
-        return QByteArray();
+        return std::nullopt;
 
     const QStringList types = source->mimeTypes();
     QString mimeType;
@@ -507,15 +513,15 @@ static QByteArray requestClipboardText(AbstractDataSource *source)
     else if (types.contains(QStringLiteral("text/plain")))
         mimeType = QStringLiteral("text/plain");
     else
-        return QByteArray(); // no text type available
+        return std::nullopt; // no text type available
 
     std::optional<Pipe> pipe = Pipe::create(O_CLOEXEC);
     if (!pipe)
-        return QByteArray();
+        return std::nullopt;
 
     source->requestData(mimeType, std::move(pipe->writeEndpoint));
     waylandServer()->display()->flush();
-    return readDataFromFd(pipe->readEndpoint);
+    return std::move(pipe->readEndpoint);
 }
 
 /*
@@ -530,13 +536,28 @@ void AnlandBackend::onClipboardChanged()
         return;
 
     AbstractDataSource *source = waylandServer()->seat()->selection();
-    QByteArray text = requestClipboardText(source);
+    std::optional<FileDescriptor> readFd = requestClipboardData(source);
+    if (!readFd)
+        return;
+    // Draining the pipe can block for up to a second waiting for the owning
+    // client to serve the data. Do it on a worker thread so the compositor's
+    // main loop never stalls, then deliver the result back here.
+    auto *watcher = new QFutureWatcher<QByteArray>(this);
+    connect(watcher, &QFutureWatcher<QByteArray>::finished, this, [this, watcher]() {
+        watcher->deleteLater();
+        if (m_inFallback)
+            return;
 
-    if (text == m_clipboardText)
-        return; // already in sync
+        const QByteArray text = watcher->result();
+        if (text == m_clipboardText)
+            return; // already in sync
 
-    m_clipboardText = text;
-    sendClipboardToConsumer(text);
+        m_clipboardText = text;
+        sendClipboardToConsumer(text);
+    });
+    watcher->setFuture(QtConcurrent::run([fd = std::move(*readFd)]() mutable {
+        return readDataFromFd(fd);
+    }));
 }
 
 /*
@@ -660,3 +681,4 @@ void AnlandBackend::sendTextInputToKWin(const QByteArray &text)
 }
 
 } // namespace KWin
+
