@@ -284,9 +284,10 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         // Re-check accessibility service state on resume
         KeyInterceptor.recheck();
 
-        // Sync extra-keys bar visibility with the settings switch.
-        setExtraKeysBarVisible(getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-            .getBoolean(KEY_EXTRA_KEYS_ENABLED, false));
+        // Sync extra-keys bar visibility with the settings switches. With auto-show
+        // ON the bar tracks the keyboard (hidden now if the IME isn't up); with it
+        // OFF the master switch decides. See shouldShowBar.
+        setExtraKeysBarVisible(shouldShowBar(isImeVisible()));
 
         setupFullscreen();
         DisplayManager dm = getSystemService(DisplayManager.class);
@@ -600,17 +601,23 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     
         mImeBottom = newImeBottom;
     
-        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
-        if (prefs.getBoolean(KEY_EXTRA_KEYS_ENABLED, false)
-                && prefs.getBoolean("auto_show_extra_keys", true)) {
-            if (imeVisible && !wasImeVisible) {
-                setExtraKeysBarVisible(true);
-            } else if (!imeVisible && wasImeVisible) {
-                setExtraKeysBarVisible(false);
-            }
-        }
-    
+        if (imeVisible != wasImeVisible)
+            setExtraKeysBarVisible(shouldShowBar(imeVisible));
+
         relayout();
+    }
+
+    // Desired extra-keys bar visibility for the current keyboard state. The two
+    // switches are independent: with "auto-show" ON the bar tracks the keyboard
+    // (regardless of the master switch), so it appears whenever the IME opens —
+    // including via the bound virtual-keyboard key, the app's only other opener.
+    // With "auto-show" OFF the master switch keeps the bar persistently visible.
+    private boolean shouldShowBar(boolean imeVisible) {
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        boolean autoShow = prefs.getBoolean(KEY_AUTO_SHOW_EXTRA_KEYS, true);
+        if (autoShow)
+            return imeVisible;
+        return prefs.getBoolean(KEY_EXTRA_KEYS_ENABLED, false);
     }
 
     // Recompute the surface bottom margin and the bar position from the current
