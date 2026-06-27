@@ -8,8 +8,6 @@
 
     <application
         android:label="Anland"
-        android:icon="@drawable/ic_launcher"
-        android:roundIcon="@drawable/ic_launcher"
         android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
 
         <!-- AccessibilityService: intercept hardware keys (Fn combos, etc.) -->
