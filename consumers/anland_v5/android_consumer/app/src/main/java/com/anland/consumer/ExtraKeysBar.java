@@ -31,11 +31,12 @@ import java.util.Map;
  */
 public class ExtraKeysBar extends GridLayout {
 
-    /** Bridge to the host: native key/text injection and IME toggle. */
+    /** Bridge to the host: native key/text injection, IME toggle and settings. */
     public interface Sender {
         void key(int action, int evdev);   // action: 0 = down, 1 = up
         void text(String s);
         void toggleKeyboard();
+        void openSettings();
     }
 
     // evdev keycodes (linux/input-event-codes.h)
@@ -55,6 +56,11 @@ public class ExtraKeysBar extends GridLayout {
     private static final int TYPE_TEXT = 1;      // text out
     private static final int TYPE_MODIFIER = 2;  // CTRL/ALT/SHIFT toggle
     private static final int TYPE_KEYBOARD = 3;  // toggle IME
+    private static final int TYPE_SETTINGS = 4;  // open settings
+
+    // Glyphs for icon-style keys.
+    private static final String GLYPH_KEYBOARD = "⌨";  // ⌨
+    private static final String GLYPH_SETTINGS = "⚙";  // ⚙
 
     private static final int ROWS = 2;
     private static final int COLS = 8;
@@ -83,6 +89,7 @@ public class ExtraKeysBar extends GridLayout {
         static Key textPopup(String d, Key popup) { return new Key(d, TYPE_TEXT, 0, d, false, popup); }
         static Key mod(String d, int evdev) { return new Key(d, TYPE_MODIFIER, evdev, null, false, null); }
         static Key kbd(String d) { return new Key(d, TYPE_KEYBOARD, 0, null, false, null); }
+        static Key settings(String d) { return new Key(d, TYPE_SETTINGS, 0, null, false, null); }
     }
 
     /** Mutable modifier state shared by name. */
@@ -123,7 +130,7 @@ public class ExtraKeysBar extends GridLayout {
                 Key.rep("↑", EV_UP),
                 Key.rep("END", EV_END),
                 Key.rep("PGUP", EV_PAGEUP),
-                Key.rep("DEL", EV_DELETE),
+                Key.settings(GLYPH_SETTINGS),
             },
             {
                 Key.key("TAB", EV_TAB),
@@ -133,7 +140,7 @@ public class ExtraKeysBar extends GridLayout {
                 Key.rep("↓", EV_DOWN),
                 Key.rep("→", EV_RIGHT),
                 Key.rep("PGDN", EV_PAGEDOWN),
-                Key.kbd("KBD"),
+                Key.kbd(GLYPH_KEYBOARD),
             },
         };
     }
@@ -226,6 +233,9 @@ public class ExtraKeysBar extends GridLayout {
         switch (key.type) {
             case TYPE_KEYBOARD:
                 mSender.toggleKeyboard();
+                return;
+            case TYPE_SETTINGS:
+                mSender.openSettings();
                 return;
             case TYPE_MODIFIER:
                 toggleModifier(key.display);

@@ -4,6 +4,7 @@ import android.Manifest;
 import android.app.Activity;
 import android.content.ClipData;
 import android.content.ClipboardManager;
+import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.hardware.display.DisplayManager;
 import android.content.SharedPreferences;
@@ -224,6 +225,9 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                 if (!s.isEmpty()) nativeSendTextInput(s.getBytes(StandardCharsets.UTF_8));
             }
             @Override public void toggleKeyboard() { MainActivity.this.toggleKeyboard(); }
+            @Override public void openSettings() {
+                startActivity(new Intent(MainActivity.this, SettingsActivity.class));
+            }
         });
         extraKeysBar.setVisibility(View.GONE);
         root.addView(extraKeysBar, new FrameLayout.LayoutParams(
