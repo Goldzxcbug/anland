@@ -36,6 +36,7 @@ public class SettingsActivity extends Activity {
     private static final String KEY_MIC_LATENCY_MS = "mic_latency_ms";
     private static final String KEY_ACCESSIBILITY_ENABLED = "accessibility_key_intercept";
     private static final String KEY_EXTRA_KEYS_ENABLED = "extra_keys_bar";
+    private static final String KEY_AUTO_SHOW_EXTRA_KEYS = "auto_show_extra_keys";
     private static final String DEFAULT_SOCKET_PATH = "/data/local/tmp/display_daemon.sock";
     private static final int UNBOUND = -1;
 
@@ -156,6 +157,26 @@ public class SettingsActivity extends Activity {
         extraKeysHint.setTextColor(Color.GRAY);
         extraKeysHint.setPadding(0, dp(4), 0, dp(8));
         root.addView(extraKeysHint);
+
+        // === Auto-show extra keys with keyboard ===
+        Switch autoShowSwitch = new Switch(this);
+        autoShowSwitch.setText("Auto-show extra keys with keyboard");
+        autoShowSwitch.setTextSize(14);
+        autoShowSwitch.setPadding(0, dp(16), 0, 0);
+        autoShowSwitch.setChecked(prefs.getBoolean(KEY_AUTO_SHOW_EXTRA_KEYS, true));
+        autoShowSwitch.setOnCheckedChangeListener((v, checked) ->
+            getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+                .putBoolean(KEY_AUTO_SHOW_EXTRA_KEYS, checked).apply());
+        root.addView(autoShowSwitch);
+
+        TextView autoShowHint = new TextView(this);
+        autoShowHint.setText("When ON, extra keys bar appears automatically with the soft "
+        + "keyboard and hides when it closes. When OFF, bar stays visible until "
+        + "manually toggled via settings.");
+        autoShowHint.setTextSize(12);
+        autoShowHint.setTextColor(Color.GRAY);
+        autoShowHint.setPadding(0, dp(4), 0, dp(8));
+        root.addView(autoShowHint);
 
         addConnectionSection(root);
 
