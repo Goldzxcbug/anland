@@ -3,6 +3,7 @@ package com.anland.consumer;
 import android.app.Activity;
 import android.content.SharedPreferences;
 import android.graphics.Color;
+import android.graphics.Insets;
 import android.graphics.Typeface;
 import android.os.Bundle;
 import android.os.CountDownTimer;
@@ -14,6 +15,7 @@ import android.util.SparseArray;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.View;
+import android.view.WindowInsets;
 import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
@@ -77,9 +79,8 @@ public class SettingsActivity extends Activity {
         ScrollView scroll = new ScrollView(this);
         scroll.setBackgroundColor(Color.WHITE);
         
-        LinearLayout root = new LinearLayout(this);
+        final LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(dp(24), dp(24), dp(24), dp(24));
 
         // Title
         TextView title = new TextView(this);
@@ -184,6 +185,22 @@ public class SettingsActivity extends Activity {
 
         scroll.addView(root);
         setContentView(scroll);
+
+        // Edge-to-edge is enforced on Android 15+ (targetSdk 36): the system no
+        // longer auto-resizes the window for the IME, so a manifest "adjustResize"
+        // is ignored and the soft keyboard overlaps the bottom EditTexts. Take over
+        // inset handling and pad the scrollable content by the system-bar + IME
+        // insets ourselves, so the ScrollView can scroll the focused field above
+        // the keyboard. Base padding (dp(24)) is preserved on all edges.
+        getWindow().setDecorFitsSystemWindows(false);
+        final int base = dp(24);
+        root.setOnApplyWindowInsetsListener((v, insets) -> {
+            Insets in = insets.getInsets(
+                WindowInsets.Type.systemBars() | WindowInsets.Type.ime());
+            v.setPadding(base + in.left, base + in.top,
+                         base + in.right, base + in.bottom);
+            return insets;
+        });
 
         updateStatus();
     }
