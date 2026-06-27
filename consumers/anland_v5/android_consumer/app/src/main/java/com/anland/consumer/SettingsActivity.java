@@ -32,6 +32,7 @@ public class SettingsActivity extends Activity {
     private static final String KEY_SPEAKER_LATENCY_MS = "speaker_latency_ms";
     private static final String KEY_MIC_LATENCY_MS = "mic_latency_ms";
     private static final String KEY_ACCESSIBILITY_ENABLED = "accessibility_key_intercept";
+    private static final String KEY_EXTRA_KEYS_ENABLED = "extra_keys_bar";
     private static final String DEFAULT_SOCKET_PATH = "/data/local/tmp/display_daemon.sock";
     private static final int UNBOUND = -1;
 
@@ -129,6 +130,27 @@ public class SettingsActivity extends Activity {
         accessibilityHint.setTextColor(Color.GRAY);
         accessibilityHint.setPadding(0, dp(4), 0, dp(8));
         root.addView(accessibilityHint);
+
+        // === Extra-keys bar switch ===
+        Switch extraKeysSwitch = new Switch(this);
+        extraKeysSwitch.setText("Extra Keys Bar (special keys)");
+        extraKeysSwitch.setTextSize(14);
+        extraKeysSwitch.setPadding(0, dp(16), 0, 0);
+        extraKeysSwitch.setChecked(prefs.getBoolean(KEY_EXTRA_KEYS_ENABLED, false));
+        extraKeysSwitch.setOnCheckedChangeListener((v, checked) ->
+            getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+                .putBoolean(KEY_EXTRA_KEYS_ENABLED, checked).apply());
+        root.addView(extraKeysSwitch);
+
+        TextView extraKeysHint = new TextView(this);
+        extraKeysHint.setText("Show a Termux-style bottom bar with ESC/TAB/CTRL/ALT/"
+            + "arrows/PgUp etc. The display area shrinks to make room; the bar rises "
+            + "together with the soft keyboard. Takes effect on next return to the "
+            + "desktop view.");
+        extraKeysHint.setTextSize(12);
+        extraKeysHint.setTextColor(Color.GRAY);
+        extraKeysHint.setPadding(0, dp(4), 0, dp(8));
+        root.addView(extraKeysHint);
 
         addConnectionSection(root);
 
