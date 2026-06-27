@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.content.SharedPreferences;
 import android.graphics.Color;
 import android.graphics.Insets;
+import android.graphics.Rect;
 import android.graphics.Typeface;
 import android.os.Bundle;
 import android.os.CountDownTimer;
@@ -16,6 +17,7 @@ import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.WindowInsets;
+import android.view.WindowManager;
 import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
@@ -47,6 +49,18 @@ public class SettingsActivity extends Activity {
     private static final String[] LATENCY_LABELS = {
         "Auto (engine default)", "Ultra Low (~1 ms)", "Low (~3 ms)",
         "Balanced (~5 ms)", "Safe (~10 ms)", "Relaxed (~20 ms)"
+    };
+
+    // Resolution presets. Index 0 is a no-op placeholder; fixed presets carry
+    // explicit dimensions, "Screen ×f" entries are computed from the panel size
+    // at selection time (see resolvePreset / scaleScreen).
+    private static final String[] RES_PRESET_LABELS = {
+        "Preset…",
+        "Auto (0×0, native)",
+        "4K (3840×2160)", "2K (2560×1440)", "1080p (1920×1080)",
+        "720p (1280×720)", "480p (854×480)",
+        "Screen × 1.0", "Screen × 0.8", "Screen × 0.75",
+        "Screen × 0.5", "Screen × 0.25"
     };
 
     private Button bindButton;
@@ -316,8 +330,10 @@ public class SettingsActivity extends Activity {
     header.setPadding(0, dp(32), 0, dp(8));
     root.addView(header);
     
-    // Ширина
-    EditText widthInput = new EditText(this);
+    // Width / height fields. Created first (but added below the preset picker) so
+    // the picker can populate them; their TextWatchers are the single source of
+    // truth that persists custom_width/custom_height.
+    final EditText widthInput = new EditText(this);
     widthInput.setSingleLine(true);
     widthInput.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
     widthInput.setHint("Width (e.g. 1920)");
@@ -332,10 +348,8 @@ public class SettingsActivity extends Activity {
             } catch (NumberFormatException e) {}
         }
     });
-    root.addView(widthInput);
-    
-    // Высота
-    EditText heightInput = new EditText(this);
+
+    final EditText heightInput = new EditText(this);
     heightInput.setSingleLine(true);
     heightInput.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
     heightInput.setHint("Height (e.g. 1080)");
@@ -350,16 +364,70 @@ public class SettingsActivity extends Activity {
             } catch (NumberFormatException e) {}
         }
     });
+
+    // Preset picker: fills width/height (which persist via their watchers). Index
+    // 0 is a no-op placeholder so the Spinner's initial auto-selection and manual
+    // edits leave the fields untouched.
+    Spinner presetSpinner = new Spinner(this);
+    presetSpinner.setAdapter(new ArrayAdapter<>(this,
+        android.R.layout.simple_spinner_dropdown_item, RES_PRESET_LABELS));
+    presetSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+        @Override
+        public void onItemSelected(AdapterView<?> parent, View v, int pos, long id) {
+            int[] wh = resolvePreset(pos);
+            if (wh == null) return;
+            widthInput.setText(String.valueOf(wh[0]));
+            heightInput.setText(String.valueOf(wh[1]));
+        }
+        @Override
+        public void onNothingSelected(AdapterView<?> parent) {}
+    });
+    root.addView(presetSpinner);
+
+    root.addView(widthInput);
     root.addView(heightInput);
     
     TextView hint = new TextView(this);
-    hint.setText("Leave 0 for native resolution. Takes effect on next connect.");
+    hint.setText("Pick a preset or enter values manually. Leave 0 for native "
+        + "resolution. \"Screen ×\" scales this device's panel (landscape). "
+        + "Takes effect on next connect.");
     hint.setTextSize(12);
     hint.setTextColor(Color.GRAY);
     hint.setPadding(0, dp(4), 0, 0);
     root.addView(hint);
     }
-    
+
+    // Maps a RES_PRESET_LABELS index to {width, height}, or null for the index-0
+    // placeholder. "Screen ×" presets are derived from the live panel size.
+    private int[] resolvePreset(int pos) {
+        switch (pos) {
+            case 1: return new int[]{0, 0};
+            case 2: return new int[]{3840, 2160};
+            case 3: return new int[]{2560, 1440};
+            case 4: return new int[]{1920, 1080};
+            case 5: return new int[]{1280, 720};
+            case 6: return new int[]{854, 480};
+            case 7: return scaleScreen(1.0f);
+            case 8: return scaleScreen(0.8f);
+            case 9: return scaleScreen(0.75f);
+            case 10: return scaleScreen(0.5f);
+            case 11: return scaleScreen(0.25f);
+            default: return null;
+        }
+    }
+
+    // Scales the device panel by `f`, normalised to landscape (long side = width)
+    // and rounded down to even dimensions, which compositors/encoders expect.
+    private int[] scaleScreen(float f) {
+        WindowManager wm = (WindowManager) getSystemService(WINDOW_SERVICE);
+        Rect b = wm.getMaximumWindowMetrics().getBounds();
+        int longSide = Math.max(b.width(), b.height());
+        int shortSide = Math.min(b.width(), b.height());
+        int w = Math.round(longSide * f) & ~1;
+        int h = Math.round(shortSide * f) & ~1;
+        return new int[]{w, h};
+    }
+
     /* A labelled latency picker that persists the selected preset (ms) under `key`. */
     private View makeLatencySpinner(String label, final String key, SharedPreferences prefs) {
         LinearLayout box = new LinearLayout(this);
