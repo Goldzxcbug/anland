@@ -282,15 +282,18 @@ public class ExtraKeysBar extends GridLayout {
                 return new Key(label, TYPE_TEXT, 0, o.optString(J_TEXT, label), false, popup);
             }
             case "modifier":
-                return new Key(label, TYPE_MODIFIER, o.optInt(J_CODE, 0), null, false, null);
+                Key popup = o.has(J_POPUP) ? parseKey(o.getJSONObject(J_POPUP)) : null;
+                return new Key(label, TYPE_MODIFIER, o.optInt(J_CODE, 0), null, false, popup);
             case "keyboard": {
                 Key popup = o.has(J_POPUP) ? parseKey(o.getJSONObject(J_POPUP)) : null;
                 return new Key(label, TYPE_KEYBOARD, 0, null, false, popup);
             }
             case "vkeyboard":
-                return new Key(label, TYPE_VKEYBOARD, 0, null, false, null);
+                Key popup = o.has(J_POPUP) ? parseKey(o.getJSONObject(J_POPUP)) : null;
+                return new Key(label, TYPE_VKEYBOARD, 0, null, false, popup);
             case "settings":
-                return new Key(label, TYPE_SETTINGS, 0, null, false, null);
+                Key popup = o.has(J_POPUP) ? parseKey(o.getJSONObject(J_POPUP)) : null;
+                return new Key(label, TYPE_SETTINGS, 0, null, false, popup);
             case "key":
             default: {
                 Key popup = o.has(J_POPUP) ? parseKey(o.getJSONObject(J_POPUP)) : null;
