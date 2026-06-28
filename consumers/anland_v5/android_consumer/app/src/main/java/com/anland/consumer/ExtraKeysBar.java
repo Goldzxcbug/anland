@@ -1,6 +1,7 @@
 package com.anland.consumer;
 
 import android.content.Context;
+import android.content.SharedPreferences;
 import android.graphics.Color;
 import android.os.Handler;
 import android.os.Looper;
@@ -12,6 +13,10 @@ import android.widget.Button;
 import android.widget.GridLayout;
 import android.widget.PopupWindow;
 import android.widget.TextView;
+
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -65,6 +70,48 @@ public class ExtraKeysBar extends GridLayout {
     private static final int ROWS = 2;
     private static final int COLS = 8;
 
+    // Settings storage for the user-customizable layout. Shared with
+    // SettingsActivity / MainActivity (same SharedPreferences file).
+    private static final String PREFS_NAME = "anland_settings";
+    private static final String KEY_EXTRA_KEYS_LAYOUT = "extra_keys_layout";
+
+    // JSON key/value names for the serialized layout (see DEFAULT_LAYOUT_JSON).
+    private static final String J_ROWS = "rows";
+    private static final String J_LABEL = "label";
+    private static final String J_TYPE = "type";
+    private static final String J_CODE = "code";
+    private static final String J_TEXT = "text";
+    private static final String J_REPEAT = "repeat";
+    private static final String J_POPUP = "popup";
+
+    // Editable template shown in Settings and the source for the default layout.
+    // Mirrors the built-in layout() exactly.
+    private static final String DEFAULT_LAYOUT_JSON =
+        "{\n" +
+        "  \"rows\": [\n" +
+        "    [\n" +
+        "      {\"label\":\"ESC\",  \"type\":\"key\",      \"code\":1},\n" +
+        "      {\"label\":\"/\",    \"type\":\"text\",     \"text\":\"/\"},\n" +
+        "      {\"label\":\"-\",    \"type\":\"text\",     \"text\":\"-\", \"popup\":{\"label\":\"|\",\"type\":\"text\",\"text\":\"|\"}},\n" +
+        "      {\"label\":\"HOME\", \"type\":\"key\",      \"code\":102, \"repeat\":true},\n" +
+        "      {\"label\":\"↑\",    \"type\":\"key\",      \"code\":103, \"repeat\":true},\n" +
+        "      {\"label\":\"END\",  \"type\":\"key\",      \"code\":107, \"repeat\":true},\n" +
+        "      {\"label\":\"PGUP\", \"type\":\"key\",      \"code\":104, \"repeat\":true},\n" +
+        "      {\"label\":\"⚙\",    \"type\":\"settings\"}\n" +
+        "    ],\n" +
+        "    [\n" +
+        "      {\"label\":\"TAB\",  \"type\":\"key\",      \"code\":15},\n" +
+        "      {\"label\":\"CTRL\", \"type\":\"modifier\", \"code\":29},\n" +
+        "      {\"label\":\"ALT\",  \"type\":\"modifier\", \"code\":56},\n" +
+        "      {\"label\":\"←\",    \"type\":\"key\",      \"code\":105, \"repeat\":true},\n" +
+        "      {\"label\":\"↓\",    \"type\":\"key\",      \"code\":108, \"repeat\":true},\n" +
+        "      {\"label\":\"→\",    \"type\":\"key\",      \"code\":106, \"repeat\":true},\n" +
+        "      {\"label\":\"PGDN\", \"type\":\"key\",      \"code\":109, \"repeat\":true},\n" +
+        "      {\"label\":\"⌨\",    \"type\":\"keyboard\"}\n" +
+        "    ]\n" +
+        "  ]\n" +
+        "}\n";
+
     /** A single key definition. */
     private static final class Key {
         final String display;
@@ -96,6 +143,7 @@ public class ExtraKeysBar extends GridLayout {
     private static final class ModState {
         boolean active;
         boolean locked;
+        int evdev;      // scancode emitted while this modifier is held
         final List<Button> buttons = new ArrayList<>();
     }
 
@@ -108,17 +156,65 @@ public class ExtraKeysBar extends GridLayout {
 
     private PopupWindow mPopupWindow;
 
+    // Active grid, resolved from the user's JSON layout (or the built-in default).
+    private final Key[][] mLayout;
+    private final int mRows;
+    private final int mCols;
+
     public ExtraKeysBar(Context context, Sender sender) {
         super(context);
         mSender = sender;
-        setColumnCount(COLS);
-        setRowCount(ROWS);
+
+        // Build from the user's saved JSON layout; fall back to the hardcoded
+        // default if it's absent or malformed.
+        SharedPreferences prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+        String json = prefs.getString(KEY_EXTRA_KEYS_LAYOUT, null);
+        Key[][] parsed = null;
+        if (json != null && !json.trim().isEmpty()) {
+            try {
+                parsed = parseLayout(json);
+            } catch (JSONException e) {
+                parsed = null;  // fall through to the built-in default
+            }
+        }
+        mLayout = (parsed != null) ? parsed : layout();
+
+        int cols = 0;
+        for (Key[] row : mLayout) cols = Math.max(cols, row.length);
+        mRows = mLayout.length;
+        mCols = Math.max(1, cols);
+
+        setColumnCount(mCols);
+        setRowCount(mRows);
         setBackgroundColor(0xCC000000);
         buildKeys();
     }
 
-    /** Number of rows, used by the host to compute the bar height. */
-    public static int rowCount() { return ROWS; }
+    /** Number of rows in the active layout, used by the host to size the bar. */
+    public int getRowCount() { return mRows; }
+
+    /** The editable default layout template (also used by SettingsActivity). */
+    public static String defaultLayoutJson() { return DEFAULT_LAYOUT_JSON; }
+
+    /**
+     * Validate a serialized layout. Returns null if it parses cleanly, otherwise
+     * a short human-readable error message. Used by SettingsActivity to give the
+     * user inline feedback without building a view.
+     */
+    public static String validateLayout(String json) {
+        if (json == null || json.trim().isEmpty())
+            return "Empty (the built-in default will be used)";
+        try {
+            Key[][] rows = parseLayout(json);
+            int cols = 0;
+            for (Key[] r : rows) cols = Math.max(cols, r.length);
+            if (rows.length == 0) return "No rows defined";
+            return null;
+        } catch (JSONException e) {
+            String msg = e.getMessage();
+            return "Invalid: " + (msg != null ? msg : "JSON parse error");
+        }
+    }
 
     private Key[][] layout() {
         return new Key[][] {
@@ -145,8 +241,46 @@ public class ExtraKeysBar extends GridLayout {
         };
     }
 
+    // Parse a serialized layout into a Key grid. Throws JSONException on any
+    // structural problem; callers fall back to the built-in default.
+    private static Key[][] parseLayout(String json) throws JSONException {
+        JSONArray rows = new JSONObject(json).getJSONArray(J_ROWS);
+        Key[][] out = new Key[rows.length()][];
+        for (int r = 0; r < rows.length(); r++) {
+            JSONArray row = rows.getJSONArray(r);
+            Key[] keys = new Key[row.length()];
+            for (int c = 0; c < row.length(); c++)
+                keys[c] = parseKey(row.getJSONObject(c));
+            out[r] = keys;
+        }
+        return out;
+    }
+
+    private static Key parseKey(JSONObject o) throws JSONException {
+        String label = o.optString(J_LABEL, "");
+        String type = o.optString(J_TYPE, "key");
+        switch (type) {
+            case "text": {
+                Key popup = o.has(J_POPUP) ? parseKey(o.getJSONObject(J_POPUP)) : null;
+                return new Key(label, TYPE_TEXT, 0, o.optString(J_TEXT, label), false, popup);
+            }
+            case "modifier":
+                return new Key(label, TYPE_MODIFIER, o.optInt(J_CODE, 0), null, false, null);
+            case "keyboard":
+                return new Key(label, TYPE_KEYBOARD, 0, null, false, null);
+            case "settings":
+                return new Key(label, TYPE_SETTINGS, 0, null, false, null);
+            case "key":
+            default: {
+                Key popup = o.has(J_POPUP) ? parseKey(o.getJSONObject(J_POPUP)) : null;
+                return new Key(label, TYPE_KEY, o.optInt(J_CODE, 0), null,
+                               o.optBoolean(J_REPEAT, false), popup);
+            }
+        }
+    }
+
     private void buildKeys() {
-        Key[][] rows = layout();
+        Key[][] rows = mLayout;
         for (int r = 0; r < rows.length; r++) {
             for (int c = 0; c < rows[r].length; c++) {
                 Key key = rows[r][c];
@@ -161,6 +295,7 @@ public class ExtraKeysBar extends GridLayout {
                     ModState state = mModifiers.get(key.display);
                     if (state == null) {
                         state = new ModState();
+                        state.evdev = key.evdev;
                         mModifiers.put(key.display, state);
                     }
                     state.buttons.add(button);
@@ -270,18 +405,7 @@ public class ExtraKeysBar extends GridLayout {
     }
 
     private int modEvdev(ModState state) {
-        for (Map.Entry<String, ModState> e : mModifiers.entrySet())
-            if (e.getValue() == state) return evdevForModifier(e.getKey());
-        return 0;
-    }
-
-    private static int evdevForModifier(String name) {
-        switch (name) {
-            case "CTRL": return EV_LEFTCTRL;
-            case "ALT": return EV_LEFTALT;
-            case "SHIFT": return EV_LEFTSHIFT;
-            default: return 0;
-        }
+        return state.evdev;
     }
 
     private void toggleModifier(String name) {

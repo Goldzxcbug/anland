@@ -65,11 +65,17 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private static final String KEY_ACCESSIBILITY_ENABLED = "accessibility_key_intercept";
     private static final String KEY_EXTRA_KEYS_ENABLED = "extra_keys_bar";
     private static final String KEY_AUTO_SHOW_EXTRA_KEYS = "auto_show_extra_keys";
+    private static final String KEY_BACK_OPENS_EXTRA_KEYS = "back_opens_extra_keys";
+    private static final String KEY_EXTRA_KEYS_LAYOUT = "extra_keys_layout";
     private EditText hiddenInput;
     private InputMethodManager imm;
     private int mImeBottom = 0;   // last IME bottom inset
     private int mBarHeight = 0;   // extra-keys bar height in px
     private ExtraKeysBar extraKeysBar;
+    private FrameLayout mRoot;    // content root, host of the extra-keys bar
+    private float mDensity = 1f;
+    // Layout JSON the current bar was built from; used to detect edits on resume.
+    private String mAppliedLayoutJson = "";
 
     public static MainActivity sInstance;
 
@@ -286,22 +292,11 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         root.addView(hiddenInput, new FrameLayout.LayoutParams(1, 1));
 
         // Bottom extra-keys bar (Termux-style). Hidden by default; toggled by the
-        // settings switch and synced in onResume. Height mirrors Termux: 37.5dp/row.
-        float density = getResources().getDisplayMetrics().density;
-        mBarHeight = Math.round(37.5f * density * ExtraKeysBar.rowCount());
-        extraKeysBar = new ExtraKeysBar(this, new ExtraKeysBar.Sender() {
-            @Override public void key(int action, int evdev) { nativeSendKey(action, evdev); }
-            @Override public void text(String s) {
-                if (!s.isEmpty()) nativeSendTextInput(s.getBytes(StandardCharsets.UTF_8));
-            }
-            @Override public void toggleKeyboard() { MainActivity.this.toggleKeyboard(); }
-            @Override public void openSettings() {
-                startActivity(new Intent(MainActivity.this, SettingsActivity.class));
-            }
-        });
-        extraKeysBar.setVisibility(View.GONE);
-        root.addView(extraKeysBar, new FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.MATCH_PARENT, mBarHeight, Gravity.BOTTOM));
+        // settings switch and synced in onResume. The layout (and thus the row
+        // count / height) comes from the user's JSON config; see buildExtraKeysBar.
+        mRoot = root;
+        mDensity = getResources().getDisplayMetrics().density;
+        buildExtraKeysBar();
 
         setContentView(root);
         surfaceView.getHolder().addCallback(this);
@@ -351,6 +346,13 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
 
         // Re-check accessibility service state on resume
         KeyInterceptor.recheck();
+
+        // If the user edited the layout JSON in Settings, rebuild the bar so the
+        // change takes effect on return to the desktop.
+        String layoutJson = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            .getString(KEY_EXTRA_KEYS_LAYOUT, "");
+        if (!layoutJson.equals(mAppliedLayoutJson))
+            rebuildExtraKeysBar();
 
         // Sync extra-keys bar visibility with the settings switches. With auto-show
         // ON the bar tracks the keyboard (hidden now if the IME isn't up); with it
@@ -774,6 +776,50 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         relayout();
     }
 
+    // Construct the extra-keys bar from the user's saved JSON layout and add it to
+    // the content root (hidden). The bar height mirrors Termux at 37.5dp/row and
+    // scales with the parsed row count. Records the layout JSON it was built from.
+    private void buildExtraKeysBar() {
+        extraKeysBar = new ExtraKeysBar(this, new ExtraKeysBar.Sender() {
+            @Override public void key(int action, int evdev) { nativeSendKey(action, evdev); }
+            @Override public void text(String s) {
+                if (!s.isEmpty()) nativeSendTextInput(s.getBytes(StandardCharsets.UTF_8));
+            }
+            @Override public void toggleKeyboard() { MainActivity.this.toggleKeyboard(); }
+            @Override public void openSettings() {
+                startActivity(new Intent(MainActivity.this, SettingsActivity.class));
+            }
+        });
+        mBarHeight = Math.round(37.5f * mDensity * extraKeysBar.getRowCount());
+        extraKeysBar.setVisibility(View.GONE);
+        mRoot.addView(extraKeysBar, new FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT, mBarHeight, Gravity.BOTTOM));
+        mAppliedLayoutJson = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            .getString(KEY_EXTRA_KEYS_LAYOUT, "");
+    }
+
+    // Replace the bar with a freshly-parsed one after the user edits the layout in
+    // Settings. Called from onResume when the saved JSON no longer matches what the
+    // current bar was built from.
+    private void rebuildExtraKeysBar() {
+        if (mRoot == null) return;
+        if (extraKeysBar != null) {
+            extraKeysBar.reset();
+            mRoot.removeView(extraKeysBar);
+        }
+        buildExtraKeysBar();
+        setExtraKeysBarVisible(shouldShowBar(isImeVisible()));
+        relayout();
+    }
+
+    // Toggle the extra-keys bar on its own (e.g. from the Back key), independent of
+    // the soft keyboard. Showing it just compresses the display area above the bar.
+    private void toggleExtraKeysBar() {
+        boolean visible = extraKeysBar != null
+            && extraKeysBar.getVisibility() == View.VISIBLE;
+        setExtraKeysBarVisible(!visible);
+    }
+
     private boolean isImeVisible() {
         WindowInsets insets = getWindow().getDecorView().getRootWindowInsets();
         return insets != null && insets.isVisible(WindowInsets.Type.ime());
@@ -862,6 +908,14 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         int boundKeycode = prefs.getInt(KEY_BOUND_KEYCODE, -1);
         if (boundKeycode != -1 && keyCode == boundKeycode) {
             toggleKeyboard();
+            return true;
+        }
+
+        // Back key toggles the extra-keys bar (without opening the soft keyboard)
+        // when enabled in settings. Leaves the default swallow behaviour otherwise.
+        if (keyCode == KeyEvent.KEYCODE_BACK
+                && prefs.getBoolean(KEY_BACK_OPENS_EXTRA_KEYS, false)) {
+            toggleExtraKeysBar();
             return true;
         }
 
