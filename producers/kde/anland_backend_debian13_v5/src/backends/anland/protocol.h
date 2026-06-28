@@ -14,6 +14,7 @@
 #define DATA_MSG_REFRESH_DONE    101
 #define DATA_MSG_INPUT_EVENT     102
 #define DATA_MSG_OUTPUT_EVENT    103
+#define DATA_MSG_INPUT_EXTEND_FDS 104
 #define DATA_MSG_BUFS_READY      200
 
 #define MAX_BUFS 8
@@ -60,6 +61,14 @@ struct buf_info {
 #define INPUT_TYPE_DISPLAY_REFRESH 7
 #define INPUT_TYPE_CLIPBOARD      8
 #define INPUT_TYPE_TEXT_INPUT     9
+#define INPUT_TYPE_ACTION         10
+/* Consumer -> producer: hands back the fds for a requested service (e.g. camera).
+ * The InputEvent carries { service type, fdnum }; the fdnum fds follow as a
+ * separate DATA_MSG_INPUT_EXTEND_FDS message (SCM_RIGHTS). */
+#define INPUT_TYPE_RESOURCE       11
+
+/* Service identifiers used by OUTPUT_TYPE_RESOURCES_REQUEST / INPUT_TYPE_RESOURCE. */
+#define SERVICE_TYPE_CAMERA 1
 
 #define INPUT_ACTION_DOWN    0
 #define INPUT_ACTION_UP      1
@@ -103,6 +112,14 @@ struct InputEvent {
             uint32_t size; // notification header; raw UTF-8 text bytes follow
         } text_input;
         struct {
+            uint32_t action;
+            int32_t value;
+        } input_action;
+        struct {
+            uint32_t type;
+            uint32_t fdnum; // number of fds following in DATA_MSG_INPUT_EXTEND_FDS
+        } resource;
+        struct {
             uint32_t padding[4];
         };
     };
@@ -115,12 +132,17 @@ struct OutputEvent {
             uint32_t size; // notification header; raw clipboard bytes follow
         } clipboard;
         struct {
+            uint32_t type;
+            uint32_t args[3]; // support 3 args
+        } resources_request;
+        struct {
             uint32_t padding[4];
         };
     };
 } __attribute__((packed));
 
 #define OUTPUT_TYPE_CLIPBOARD 1
+#define OUTPUT_TYPE_RESOURCES_REQUEST 2
 
 /*
  * Audio runs on its own dedicated bidirectional socketpair (hello fd slot 4),
@@ -143,6 +165,8 @@ struct OutputEvent {
  */
 #define AUDIO_MSG_FORMAT 1
 #define AUDIO_MSG_PCM    2
+#define AUDIO_MSG_SHM    3 /* request shared-memory ring-buffer transport */
+#define AUDIO_MSG_SHM_FD 4 /* producer -> consumer: shared-memory fd */
 
 /* PCM sample format codes for struct audio_format.format. */
 #define AUDIO_FORMAT_S16LE 0
