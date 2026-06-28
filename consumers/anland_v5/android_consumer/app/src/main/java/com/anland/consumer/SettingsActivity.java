@@ -24,6 +24,7 @@ import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.SeekBar; // ===== 新增导入
 import android.widget.Spinner;
 import android.widget.Switch;
 import android.widget.TextView;
@@ -44,6 +45,10 @@ public class SettingsActivity extends Activity {
     private static final String KEY_AUTO_SHOW_EXTRA_KEYS = "auto_show_extra_keys";
     private static final String DEFAULT_SOCKET_PATH = "/data/local/tmp/display_daemon.sock";
     private static final int UNBOUND = -1;
+
+    // ===== 新增：触摸板 Key =====
+    private static final String KEY_TOUCHPAD_MODE = "touchpad_mode";
+    private static final String KEY_MOUSE_ACCEL = "mouse_speed";
 
     // Latency presets: label shown in the spinner -> target buffer in ms (0 = auto).
     private static final int[] LATENCY_MS = {0, 1, 3, 5, 10, 20};
@@ -193,6 +198,69 @@ public class SettingsActivity extends Activity {
         autoShowHint.setTextColor(Color.GRAY);
         autoShowHint.setPadding(0, dp(4), 0, dp(8));
         root.addView(autoShowHint);
+
+        // ============================================================
+        // ===== 新增：触摸板设置区域 =====
+        // ============================================================
+        TextView touchpadHeader = new TextView(this);
+        touchpadHeader.setText("Touchpad Settings");
+        touchpadHeader.setTextSize(16);
+        touchpadHeader.setTypeface(null, Typeface.BOLD);
+        touchpadHeader.setPadding(0, dp(32), 0, dp(8));
+        root.addView(touchpadHeader);
+
+        // 触摸板模式开关
+        Switch touchpadModeSwitch = new Switch(this);
+        touchpadModeSwitch.setText("Touchpad Mode (relative movement)");
+        touchpadModeSwitch.setTextSize(14);
+        touchpadModeSwitch.setPadding(0, dp(8), 0, 0);
+        touchpadModeSwitch.setChecked(prefs.getBoolean(KEY_TOUCHPAD_MODE, true));
+        touchpadModeSwitch.setOnCheckedChangeListener((v, checked) ->
+                getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+                        .putBoolean(KEY_TOUCHPAD_MODE, checked).apply());
+        root.addView(touchpadModeSwitch);
+
+        TextView touchpadHint = new TextView(this);
+        touchpadHint.setText("ON: finger slides move mouse cursor (relative). OFF: touch maps directly to screen (absolute).");
+        touchpadHint.setTextSize(12);
+        touchpadHint.setTextColor(Color.GRAY);
+        touchpadHint.setPadding(0, dp(4), 0, dp(12));
+        root.addView(touchpadHint);
+
+        // 鼠标加速度（灵敏度）—— 范围扩大到 0.5 ~ 10.0
+        LinearLayout accelLayout = new LinearLayout(this);
+        accelLayout.setOrientation(LinearLayout.VERTICAL);
+        accelLayout.setPadding(0, dp(8), 0, dp(16));
+
+        TextView accelLabel = new TextView(this);
+        accelLabel.setText("Mouse Sensitivity (Acceleration)");
+        accelLabel.setTextSize(14);
+        accelLayout.addView(accelLabel);
+
+        final TextView accelValue = new TextView(this);
+        accelValue.setTextSize(14);
+        accelValue.setTextColor(Color.BLUE);
+        accelLayout.addView(accelValue);
+
+        SeekBar accelSeek = new SeekBar(this);
+        accelSeek.setMax(190); // 0.5 ~ 10.0 step 0.05
+        float curAccel = prefs.getFloat(KEY_MOUSE_ACCEL, 1.0f);
+        curAccel = Math.max(0.5f, Math.min(10.0f, curAccel));
+        accelSeek.setProgress((int)((curAccel - 0.5f) / 0.05f));
+        accelValue.setText(String.format("%.1fx", curAccel));
+        accelSeek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                float val = 0.5f + progress * 0.05f;
+                accelValue.setText(String.format("%.1fx", val));
+                getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+                        .putFloat(KEY_MOUSE_ACCEL, val).apply();
+            }
+            @Override public void onStartTrackingTouch(SeekBar seekBar) {}
+            @Override public void onStopTrackingTouch(SeekBar seekBar) {}
+        });
+        accelLayout.addView(accelSeek);
+        root.addView(accelLayout);
 
         addConnectionSection(root);
 
