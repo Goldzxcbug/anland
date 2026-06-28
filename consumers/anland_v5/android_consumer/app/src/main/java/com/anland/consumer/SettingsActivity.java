@@ -43,6 +43,8 @@ public class SettingsActivity extends Activity {
     private static final String KEY_ACCESSIBILITY_ENABLED = "accessibility_key_intercept";
     private static final String KEY_EXTRA_KEYS_ENABLED = "extra_keys_bar";
     private static final String KEY_AUTO_SHOW_EXTRA_KEYS = "auto_show_extra_keys";
+    private static final String KEY_BACK_OPENS_EXTRA_KEYS = "back_opens_extra_keys";
+    private static final String KEY_EXTRA_KEYS_LAYOUT = "extra_keys_layout";
     private static final String DEFAULT_SOCKET_PATH = "/data/local/tmp/display_daemon.sock";
     private static final int UNBOUND = -1;
 
@@ -198,6 +200,82 @@ public class SettingsActivity extends Activity {
         autoShowHint.setTextColor(Color.GRAY);
         autoShowHint.setPadding(0, dp(4), 0, dp(8));
         root.addView(autoShowHint);
+
+        // === Back key opens extra keys bar ===
+        Switch backOpensExtraKeysSwitch = new Switch(this);
+        backOpensExtraKeysSwitch.setText("Back key opens extra keys bar");
+        backOpensExtraKeysSwitch.setTextSize(14);
+        backOpensExtraKeysSwitch.setPadding(0, dp(16), 0, 0);
+        backOpensExtraKeysSwitch.setChecked(prefs.getBoolean(KEY_BACK_OPENS_EXTRA_KEYS, false));
+        backOpensExtraKeysSwitch.setOnCheckedChangeListener((v, checked) ->
+            getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+                .putBoolean(KEY_BACK_OPENS_EXTRA_KEYS, checked).apply());
+        root.addView(backOpensExtraKeysSwitch);
+
+        TextView backOpensExtraKeysHint = new TextView(this);
+        backOpensExtraKeysHint.setText("When ON, pressing Back while the extra keys bar "
+            + "is hidden shows it; pressing Back again hides it. Use this to reach the "
+            + "extra keys without first opening the soft keyboard.");
+        backOpensExtraKeysHint.setTextSize(12);
+        backOpensExtraKeysHint.setTextColor(Color.GRAY);
+        backOpensExtraKeysHint.setPadding(0, dp(4), 0, dp(8));
+        root.addView(backOpensExtraKeysHint);
+
+        // === Custom extra-keys layout (JSON) ===
+        TextView layoutHeader = new TextView(this);
+        layoutHeader.setText("Custom Extra Keys Layout");
+        layoutHeader.setTextSize(16);
+        layoutHeader.setTypeface(null, Typeface.BOLD);
+        layoutHeader.setPadding(0, dp(24), 0, dp(8));
+        root.addView(layoutHeader);
+
+        final EditText layoutInput = new EditText(this);
+        layoutInput.setTypeface(Typeface.MONOSPACE);
+        layoutInput.setTextSize(12);
+        layoutInput.setGravity(Gravity.TOP | Gravity.START);
+        layoutInput.setInputType(InputType.TYPE_CLASS_TEXT
+            | InputType.TYPE_TEXT_FLAG_MULTI_LINE
+            | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        layoutInput.setHorizontallyScrolling(false);
+        layoutInput.setMinLines(6);
+        String savedLayout = prefs.getString(KEY_EXTRA_KEYS_LAYOUT, "");
+        if (savedLayout.isEmpty()) savedLayout = ExtraKeysBar.defaultLayoutJson();
+        layoutInput.setText(savedLayout);
+        root.addView(layoutInput);
+
+        final TextView layoutStatus = new TextView(this);
+        layoutStatus.setTextSize(12);
+        layoutStatus.setPadding(0, dp(4), 0, dp(4));
+        root.addView(layoutStatus);
+        updateLayoutStatus(layoutStatus, layoutInput.getText().toString());
+
+        layoutInput.addTextChangedListener(new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int a, int b, int c) {}
+            @Override public void onTextChanged(CharSequence s, int a, int b, int c) {}
+            @Override public void afterTextChanged(Editable s) {
+                getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+                    .putString(KEY_EXTRA_KEYS_LAYOUT, s.toString()).apply();
+                updateLayoutStatus(layoutStatus, s.toString());
+            }
+        });
+
+        Button loadDefaultBtn = new Button(this);
+        loadDefaultBtn.setText("Load default template");
+        loadDefaultBtn.setOnClickListener(v ->
+            layoutInput.setText(ExtraKeysBar.defaultLayoutJson()));
+        root.addView(loadDefaultBtn);
+
+        TextView layoutHint = new TextView(this);
+        layoutHint.setText("Define the extra-keys bar as JSON: \"rows\" is an array of "
+            + "rows, each an array of keys. A key has a \"label\" and a \"type\" "
+            + "(key/text/modifier/keyboard/settings). \"key\"/\"modifier\" take an evdev "
+            + "\"code\"; \"text\" takes \"text\"; any key may add \"repeat\":true or a "
+            + "nested \"popup\". Invalid JSON falls back to the default. Takes effect on "
+            + "next return to the desktop.");
+        layoutHint.setTextSize(12);
+        layoutHint.setTextColor(Color.GRAY);
+        layoutHint.setPadding(0, dp(4), 0, dp(8));
+        root.addView(layoutHint);
 
         // ============================================================
         // ===== 新增：触摸板设置区域 =====
@@ -607,6 +685,23 @@ public class SettingsActivity extends Activity {
         finishListening(keyCode);
         Log.i(TAG, "Bound keycode: " + keyCode);
         return true;
+    }
+
+    // Reflect the validity of the custom layout JSON inline under the editor.
+    private void updateLayoutStatus(TextView status, String json) {
+        if (json == null || json.trim().isEmpty()) {
+            status.setText("Using built-in default layout");
+            status.setTextColor(Color.GRAY);
+            return;
+        }
+        String err = ExtraKeysBar.validateLayout(json);
+        if (err == null) {
+            status.setText("✓ Valid layout");
+            status.setTextColor(0xFF2E7D32);  // green
+        } else {
+            status.setText("✗ " + err);
+            status.setTextColor(0xFFC62828);  // red
+        }
     }
 
     private int dp(int dp) {
