@@ -40,6 +40,21 @@ int  trigger_refresh(display_ctx *ctx);
 int  poll_input_event(display_ctx *ctx, struct InputEvent *event, int timeout_ms);
 int  poll_input_event_extend_data(display_ctx *ctx, void *payload, size_t size, int timeout_ms);
 
+/* Receive the fds that follow an INPUT_TYPE_RESOURCE event (a DATA_MSG_INPUT_EXTEND_FDS
+ * message carrying the service's fds as SCM_RIGHTS). Call this right after
+ * poll_input_event() returns an INPUT_TYPE_RESOURCE event, using event.resource.fdnum
+ * as the expected count. Writes up to max_fds received fds into fds[] and the actual
+ * count into *fd_count. Returns 1 on success, 0 if nothing was pending, -1 on error
+ * (consumer loss). The caller owns the received fds and must close them. */
+int  poll_input_event_extend_fds(display_ctx *ctx, int *fds, int max_fds,
+                                 int *fd_count, int timeout_ms);
+
+/* Ask the consumer for a service's resources (e.g. SERVICE_TYPE_CAMERA). Sends an
+ * OUTPUT_TYPE_RESOURCES_REQUEST; the consumer replies asynchronously with an
+ * INPUT_TYPE_RESOURCE event + fds on the data channel. args may be NULL (treated as
+ * three zeros). No-op (returns 0) in fallback. */
+int  push_resources_request(display_ctx *ctx, uint32_t service_type, const uint32_t *args);
+
 int  push_output_event(display_ctx *ctx, const struct OutputEvent *event);
 int  push_output_event_with_length(display_ctx *ctx, const struct OutputEvent *event, void *payload, size_t size);
 
