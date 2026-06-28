@@ -295,6 +295,28 @@ static void *io_thread_func(void *arg)
     return NULL;
 }
 
+/* --- JNI: camera service lifecycle (called from CameraServices, main thread) --- */
+
+/* Create the camera service's persistent fds and control thread. Idempotent.
+ * Gated by the settings toggle on the Java side; once ready, do_connect()
+ * registers SERVICE_TYPE_CAMERA so the producer can request it. The Activity is
+ * passed through as the Context for CameraServices.init(). */
+JNIEXPORT void JNICALL
+Java_com_anland_consumer_CameraServices_nativeInitCameraService(
+    JNIEnv *env, jclass clazz, jobject activity)
+{
+    (void)clazz;
+    camera_service_init(env, activity);
+}
+
+JNIEXPORT void JNICALL
+Java_com_anland_consumer_CameraServices_nativeDestroyCameraService(
+    JNIEnv *env, jclass clazz)
+{
+    (void)clazz;
+    camera_service_destroy(env);
+}
+
 /* --- JNI: Java capture loop <-> shared memory slots --- */
 
 JNIEXPORT jobject JNICALL

@@ -1,5 +1,6 @@
 package com.anland.consumer;
 
+import android.app.Activity;
 import android.content.Context;
 import android.graphics.ImageFormat;
 import android.hardware.camera2.CameraCharacteristics;
@@ -44,6 +45,14 @@ public class CameraServices implements LifecycleOwner {
 
     /* Must match camera_service.h: CAMERA_SLOTS. */
     private static final int SLOTS = 2;
+
+    /* Camera service lifecycle, implemented in camera_service.c. nativeInitCameraService
+     * creates the persistent fds/control thread (idempotent) and constructs the singleton
+     * CameraServices the producer drives, using the given Activity as its Context;
+     * nativeDestroyCameraService tears it all down on app shutdown. The native library is
+     * loaded by MainActivity's static initializer, which runs before any camera path. */
+    static native void nativeInitCameraService(Activity activity);
+    static native void nativeDestroyCameraService();
 
     /* Implemented in camera_service.c (same .so, loaded by MainActivity). nativePackFrame
      * copies the camera's planes straight into the shared-memory slot in their native

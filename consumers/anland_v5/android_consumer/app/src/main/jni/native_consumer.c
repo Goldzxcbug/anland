@@ -895,20 +895,3 @@ Java_com_anland_consumer_MainActivity_nativeSetAudioLatency(
 {
     audio_set_latency(speakerMs, micMs);
 }
-
-/* Create the camera service's persistent fds and control thread. Idempotent.
- * Gated by the settings toggle on the Java side; once ready, do_connect()
- * registers SERVICE_TYPE_CAMERA so the producer can request it. */
-JNIEXPORT void JNICALL
-Java_com_anland_consumer_MainActivity_nativeInitCameraService(
-    JNIEnv *env, jobject thiz)
-{
-    camera_service_init(env, thiz);
-}
-
-JNIEXPORT void JNICALL
-Java_com_anland_consumer_MainActivity_nativeDestroyCameraService(
-    JNIEnv *env, jobject thiz)
-{
-    camera_service_destroy(env);
-}

@@ -1,7 +1,9 @@
 package com.anland.consumer;
 
 import android.app.Activity;
+import android.content.Intent;
 import android.content.SharedPreferences;
+import android.net.Uri;
 import android.graphics.Color;
 import android.graphics.Insets;
 import android.graphics.Rect;
@@ -28,6 +30,11 @@ import android.widget.SeekBar; // ===== 新增导入
 import android.widget.Spinner;
 import android.widget.Switch;
 import android.widget.TextView;
+import android.widget.Toast;
+
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 
 
 public class SettingsActivity extends Activity {
@@ -75,6 +82,10 @@ public class SettingsActivity extends Activity {
     private TextView statusText;
     private CountDownTimer listenTimer;
     private boolean isListening = false;
+
+    // Custom extra-keys layout editor (JSON), and the SAF file-picker request code.
+    private EditText layoutInput;
+    private static final int REQ_PICK_LAYOUT = 2001;
 
     // Android keycode → human-readable name
     private static final SparseArray<String> KEY_NAMES = new SparseArray<>();
@@ -229,7 +240,7 @@ public class SettingsActivity extends Activity {
         layoutHeader.setPadding(0, dp(24), 0, dp(8));
         root.addView(layoutHeader);
 
-        final EditText layoutInput = new EditText(this);
+        layoutInput = new EditText(this);
         layoutInput.setTypeface(Typeface.MONOSPACE);
         layoutInput.setTextSize(12);
         layoutInput.setGravity(Gravity.TOP | Gravity.START);
@@ -259,11 +270,21 @@ public class SettingsActivity extends Activity {
             }
         });
 
+        LinearLayout layoutButtons = new LinearLayout(this);
+        layoutButtons.setOrientation(LinearLayout.HORIZONTAL);
+
         Button loadDefaultBtn = new Button(this);
         loadDefaultBtn.setText("Load default template");
         loadDefaultBtn.setOnClickListener(v ->
             layoutInput.setText(ExtraKeysBar.defaultLayoutJson()));
-        root.addView(loadDefaultBtn);
+        layoutButtons.addView(loadDefaultBtn);
+
+        Button loadFileBtn = new Button(this);
+        loadFileBtn.setText("Load from file…");
+        loadFileBtn.setOnClickListener(v -> pickLayoutFile());
+        layoutButtons.addView(loadFileBtn);
+
+        root.addView(layoutButtons);
 
         TextView layoutHint = new TextView(this);
         layoutHint.setText("Define the extra-keys bar as JSON: \"rows\" is an array of "
@@ -685,6 +706,51 @@ public class SettingsActivity extends Activity {
         finishListening(keyCode);
         Log.i(TAG, "Bound keycode: " + keyCode);
         return true;
+    }
+
+    // Launch the system document picker to load a layout JSON from any provider
+    // (Downloads, Drive, etc.). Uses SAF, so no storage permission is required.
+    private void pickLayoutFile() {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("*/*");
+        intent.putExtra(Intent.EXTRA_MIME_TYPES,
+            new String[]{"application/json", "text/plain"});
+        try {
+            startActivityForResult(intent, REQ_PICK_LAYOUT);
+        } catch (android.content.ActivityNotFoundException e) {
+            Toast.makeText(this, "No file picker available", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != REQ_PICK_LAYOUT || resultCode != RESULT_OK || data == null)
+            return;
+        Uri uri = data.getData();
+        if (uri == null) return;
+        String text = readTextFromUri(uri);
+        if (text == null) {
+            Toast.makeText(this, "Could not read file", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        // setText flows through the editor's TextWatcher, which persists + validates.
+        if (layoutInput != null) layoutInput.setText(text);
+    }
+
+    private String readTextFromUri(Uri uri) {
+        try (InputStream in = getContentResolver().openInputStream(uri);
+             ByteArrayOutputStream bos = new ByteArrayOutputStream()) {
+            if (in == null) return null;
+            byte[] buf = new byte[4096];
+            int n;
+            while ((n = in.read(buf)) != -1) bos.write(buf, 0, n);
+            return new String(bos.toByteArray(), StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            Log.w(TAG, "readTextFromUri failed", e);
+            return null;
+        }
     }
 
     // Reflect the validity of the custom layout JSON inline under the editor.

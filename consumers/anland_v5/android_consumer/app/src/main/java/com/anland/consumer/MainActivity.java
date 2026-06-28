@@ -160,8 +160,6 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private native void nativeSendTextInput(byte[] data);
     private native void nativeSetMicEnabled(boolean enabled);
     private native void nativeSetAudioLatency(int speakerMs, int micMs);
-    private native void nativeInitCameraService();
-    private native void nativeDestroyCameraService();
     // Called from native event thread to set clipboard text on Android
     public void nativeSetClipboardText(String text) {
         ClipboardManager cm = getSystemService(ClipboardManager.class);
@@ -397,7 +395,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     protected void onDestroy() {
         super.onDestroy();
         if (cameraInited) {
-            nativeDestroyCameraService();
+            CameraServices.nativeDestroyCameraService();
             cameraInited = false;
         }
     }
@@ -417,7 +415,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             return;
         if (checkSelfPermission(Manifest.permission.CAMERA)
                 == PackageManager.PERMISSION_GRANTED) {
-            nativeInitCameraService();
+            CameraServices.nativeInitCameraService(this);
             cameraInited = true;
         } else {
             requestPermissions(new String[]{Manifest.permission.CAMERA}, REQ_CAMERA);
@@ -466,8 +464,9 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         } else if (requestCode == REQ_CAMERA) {
             boolean granted = grantResults.length > 0
                     && grantResults[0] == PackageManager.PERMISSION_GRANTED;
-            if (granted && !cameraInited) {
-                nativeInitCameraService();
+            if (granted && !cameraInited && getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                    .getBoolean(KEY_CAMERA_ENABLED, false)) {
+                CameraServices.nativeInitCameraService(this);
                 cameraInited = true;
             }
         }

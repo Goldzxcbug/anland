@@ -173,6 +173,7 @@ public class ExtraKeysBar extends GridLayout {
         if (json != null && !json.trim().isEmpty()) {
             try {
                 parsed = parseLayout(json);
+                if (parsed.length == 0) parsed = null;  // empty layout: use default
             } catch (JSONException e) {
                 parsed = null;  // fall through to the built-in default
             }
@@ -206,8 +207,6 @@ public class ExtraKeysBar extends GridLayout {
             return "Empty (the built-in default will be used)";
         try {
             Key[][] rows = parseLayout(json);
-            int cols = 0;
-            for (Key[] r : rows) cols = Math.max(cols, r.length);
             if (rows.length == 0) return "No rows defined";
             return null;
         } catch (JSONException e) {
