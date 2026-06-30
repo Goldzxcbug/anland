@@ -41,6 +41,10 @@ void allocate_services(struct display_ctx *ctx, struct service_info *services, i
     ctx->services = services;
     ctx->num_services = num_services;
     ctx->resources = (struct resources*)malloc(sizeof(struct resources) * num_services);
+    if (!ctx->resources) {
+        ctx->num_services = 0;
+        return;
+    }
     for(int i=0;i<num_services;i++){
         ctx->resources[i].service_type = services[i].type;
         ctx->resources[i].type = -1;//unallocated
@@ -296,6 +300,7 @@ int set_screen_info(display_ctx *ctx, uint32_t width, uint32_t height, uint32_t 
 
 int push_dmabufs(display_ctx *ctx, const int *fds, const struct buf_info *infos, int count)
 {
+    if (count > MAX_BUFS) count = MAX_BUFS;
     memcpy(ctx->stored_fds, fds, count * sizeof(int));
     memcpy(ctx->stored_infos, infos, count * sizeof(struct buf_info));
     ctx->stored_count = count;

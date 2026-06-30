@@ -206,6 +206,10 @@ static void handle_new_connection(int listen_fd)
     }
 
     struct client *c = calloc(1, sizeof(*c));
+    if (!c) {
+        close(client_fd);
+        return;
+    }
     c->ctrl_fd = client_fd;
 
     if (hdr.type == CTRL_MSG_CONSUMER_HELLO) {
