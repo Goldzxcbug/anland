@@ -500,7 +500,7 @@ static void ctrl_handle_msg(const struct camera_ctrl_msg *hdr, const uint8_t *pa
 {
     switch (hdr->type) {
     case CAMERA_CTRL_GET_INFO: {
-        uint8_t reply[sizeof(struct camera_ctrl_msg) + 1 + MAX_CAMERAS * 4];
+        _Alignas(uint16_t) uint8_t reply[sizeof(struct camera_ctrl_msg) + 1 + MAX_CAMERAS * 4];
         struct camera_ctrl_msg *rh = (struct camera_ctrl_msg *)reply;
         rh->type = CAMERA_CTRL_INFO_REPLY;
         rh->reserved = 0;
