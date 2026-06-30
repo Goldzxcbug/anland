@@ -41,6 +41,10 @@ void allocate_services(struct display_ctx *ctx, struct service_info *services, i
     ctx->services = services;
     ctx->num_services = num_services;
     ctx->resources = (struct resources*)malloc(sizeof(struct resources) * num_services);
+    if (!ctx->resources) {
+        ctx->num_services = 0;
+        return;
+    }
     for(int i=0;i<num_services;i++){
         ctx->resources[i].service_type = services[i].type;
         ctx->resources[i].type = -1;//unallocated
