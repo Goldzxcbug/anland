@@ -67,6 +67,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private static final String KEY_EXTRA_KEYS_ENABLED = "extra_keys_bar";
     private static final String KEY_AUTO_SHOW_EXTRA_KEYS = "auto_show_extra_keys";
     private static final String KEY_BACK_OPENS_EXTRA_KEYS = "back_opens_extra_keys";
+    private static final String KEY_BACK_PREVENT_EXIT = "back_prevent_exit";
     private static final String KEY_EXTRA_KEYS_LAYOUT = "extra_keys_layout";
     // When on, the IME and extra-keys bar float over the display instead of
     // shrinking it: the bar rides up with the keyboard but the surface keeps
@@ -1026,12 +1027,12 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     // Some OEM ROMs (notably Xiaomi/HyperOS) dispatch Back via onBackPressed()
     // instead of onKeyDown().  Without this override the default Activity
     // onBackPressed() calls finish() — the app just exits.
+    // When back_prevent_exit is ON, keep this empty (same approach as Termux-X11)
+    // so the system cannot finish the activity via gesture navigation.
     @Override
     public void onBackPressed() {
         SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
-        if (prefs.getBoolean(KEY_BACK_OPENS_EXTRA_KEYS, true)) {
-            toggleExtraKeysBar();
-        } else {
+        if (!prefs.getBoolean(KEY_BACK_PREVENT_EXIT, false)) {
             super.onBackPressed();
         }
     }
