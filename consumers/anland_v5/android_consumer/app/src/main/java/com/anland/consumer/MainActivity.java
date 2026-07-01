@@ -626,13 +626,6 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     }
 
     private void tapKey(int evdevCode) {
-        // Keep the mirror in step with what the tap does to the remote text. A
-        // backspace pops the trailing code point; forward-delete removes text after
-        // the cursor, of which there is none (cursor sits at the tail), so it is a
-        // no-op here. Other keys don't touch the mirror.
-        if (evdevCode == EVDEV_BACKSPACE && mMirror.length() > 0) {
-            mMirror.setLength(mMirror.offsetByCodePoints(mMirror.length(), -1));
-        }
         nativeSendKey(0, evdevCode);
         nativeSendKey(1, evdevCode);
     }
@@ -751,6 +744,9 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         @Override
         public boolean deleteSurroundingText(int beforeLength, int afterLength) {
             for (int i = 0; i < beforeLength; i++) {
+                if (mMirror.length() > 0) {
+                    mMirror.setLength(mMirror.offsetByCodePoints(mMirror.length(), -1));
+                }
                 tapKey(EVDEV_BACKSPACE);
             }
             for (int i = 0; i < afterLength; i++) {
@@ -762,6 +758,9 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         @Override
         public boolean deleteSurroundingTextInCodePoints(int beforeLength, int afterLength) {
             for (int i = 0; i < beforeLength; i++) {
+                if (mMirror.length() > 0) {
+                    mMirror.setLength(mMirror.offsetByCodePoints(mMirror.length(), -1));
+                }
                 tapKey(EVDEV_BACKSPACE);
             }
             for (int i = 0; i < afterLength; i++) {
@@ -830,6 +829,9 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             }
             final int erase = prev.codePointCount(prefix, prev.length());
             for (int i = 0; i < erase; i++) {
+                if (mMirror.length() > 0) {
+                    mMirror.setLength(mMirror.offsetByCodePoints(mMirror.length(), -1));
+                }
                 tapKey(EVDEV_BACKSPACE);
             }
             if (prefix < next.length()) {
@@ -842,6 +844,9 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         private void eraseComposing() {
             final int erase = composing.codePointCount(0, composing.length());
             for (int i = 0; i < erase; i++) {
+                if (mMirror.length() > 0) {
+                    mMirror.setLength(mMirror.offsetByCodePoints(mMirror.length(), -1));
+                }
                 tapKey(EVDEV_BACKSPACE);
             }
             composing.setLength(0);
