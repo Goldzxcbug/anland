@@ -8,6 +8,7 @@
 
     <!-- Capture the device camera(s) to forward to the Linux producer (Camera2 NDK). -->
     <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-feature android:name="android.hardware.camera.any" android:required="false" />
 
     <application
@@ -33,6 +34,7 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:enableOnBackInvokedCallback="false"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"
             android:launchMode="singleTask">
             <property
@@ -49,6 +51,7 @@
         <activity
             android:name=".SettingsActivity"
             android:exported="true"
+            android:enableOnBackInvokedCallback="false"
             android:theme="@android:style/Theme.DeviceDefault.Light.NoActionBar">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>

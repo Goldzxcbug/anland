@@ -2,6 +2,10 @@ package com.anland.consumer;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Intent;
@@ -9,6 +13,7 @@ import android.content.pm.PackageManager;
 import android.hardware.display.DisplayManager;
 import android.content.SharedPreferences;
 import android.graphics.Color;
+import android.os.Build;
 import android.os.Bundle;
 import android.util.Log;
 import android.view.Display;
@@ -357,6 +362,36 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         mouseY = screenHeight / 2f;
     }
 
+    private static final String NOTIFICATION_CHANNEL = "anland_channel";
+    private static final int NOTIFICATION_ID = 1;
+
+    private void showSettingsNotification() {
+        NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+        if (nm == null) return;
+
+        NotificationChannel channel = new NotificationChannel(
+                NOTIFICATION_CHANNEL, "Anland", NotificationManager.IMPORTANCE_LOW);
+        channel.setDescription("Anland quick access");
+        channel.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
+        nm.createNotificationChannel(channel);
+
+        Intent intent = new Intent(this, SettingsActivity.class);
+        intent.setAction(Intent.ACTION_MAIN);
+        PendingIntent pi = PendingIntent.getActivity(this, 0, intent,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+
+        Notification notification = new Notification.Builder(this, NOTIFICATION_CHANNEL)
+                .setContentTitle("Anland")
+                .setContentText("点击进入设置")
+                .setSmallIcon(R.mipmap.ic_launcher)
+                .setContentIntent(pi)
+                .setOngoing(true)
+                .setShowWhen(false)
+                .build();
+
+        nm.notify(NOTIFICATION_ID, notification);
+    }
+
     // ADDED: Helper to position virtual keyboard at bottom-center
     private void positionVirtualKeyboard() {
         if (virtualKeyboardView == null) return;
@@ -401,6 +436,15 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     @Override
     protected void onResume() {
         super.onResume();
+
+        // Show settings notification while in foreground
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+                && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                        != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 1003);
+        } else {
+            showSettingsNotification();
+        }
 
         // Re-check accessibility service state on resume
         KeyInterceptor.recheck();
@@ -453,6 +497,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     @Override
     protected void onPause() {
         super.onPause();
+        NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+        if (nm != null) nm.cancel(NOTIFICATION_ID);
         DisplayManager dm = getSystemService(DisplayManager.class);
         if (dm != null)
             dm.unregisterDisplayListener(displayListener);
@@ -461,11 +507,13 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
 
     @Override
     protected void onDestroy() {
-        super.onDestroy();
+        NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+        if (nm != null) nm.cancel(NOTIFICATION_ID);
         if (cameraInited) {
             CameraServices.nativeDestroyCameraService();
             cameraInited = false;
         }
+        super.onDestroy();
     }
 
     /*
@@ -537,6 +585,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                 CameraServices.nativeInitCameraService(this);
                 cameraInited = true;
             }
+        } else if (requestCode == 1003) {
+            showSettingsNotification();
         }
     }
 
@@ -1091,6 +1141,16 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             return true;
         }
         return true;
+    }
+
+    // Some OEM ROMs (notably Xiaomi/HyperOS) dispatch Back via onBackPressed()
+    // instead of onKeyDown().  Without this override the default Activity
+    // onBackPressed() calls finish() — the app just exits.
+    // Keep this empty (same approach as Termux-X11): the actual Back key
+    // handling lives in onKeyDown(); this override simply prevents the
+    // system from finishing the activity via gesture navigation.
+    @Override
+    public void onBackPressed() {
     }
 
     // Called from KeyInterceptor (accessibility service) to handle keys that
