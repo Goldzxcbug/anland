@@ -155,6 +155,16 @@ public class SettingsActivity extends Activity {
         addCategoryRow(root, R.string.section_resolution,
             R.string.cat_resolution_subtitle, this::showResolutionPage);
 
+        // Build version, injected from git at build time (see app/build.gradle).
+        TextView version = new TextView(this);
+        version.setText(BuildConfig.VERSION_NAME
+            + " (" + BuildConfig.VERSION_CODE + ")");
+        version.setTextSize(12);
+        version.setGravity(Gravity.START);
+        version.setPadding(0, dp(24), 0, 0);
+        version.setAlpha(0.5f);
+        root.addView(version);
+
         setContent(root);
     }
 

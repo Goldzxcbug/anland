@@ -2,16 +2,45 @@ plugins {
     id 'com.android.application'
 }
 
+// Run a git command at configuration time, returning its trimmed stdout or a
+// fallback when git isn't available (e.g. building from an exported tarball).
+def gitOutput = { List<String> cmd, String fallback ->
+    try {
+        def stdout = new ByteArrayOutputStream()
+        def result = exec {
+            commandLine cmd
+            standardOutput = stdout
+            ignoreExitValue = true
+        }
+        if (result.exitValue != 0) return fallback
+        def out = stdout.toString().trim()
+        return out.isEmpty() ? fallback : out
+    } catch (Exception ignored) {
+        return fallback
+    }
+}
+
+// Short commit id of the source tree the APK was built from.
+def gitCommitId = gitOutput(['git', 'rev-parse', '--short', 'HEAD'], "unknown")
+// Number of commits reachable from HEAD, used as a monotonic versionCode.
+def gitCommitCount = gitOutput(['git', 'rev-list', '--count', 'HEAD'], "1") as Integer
+// "-dirty" when the working tree has uncommitted changes at build time.
+def gitDirty = gitOutput(['git', 'status', '--porcelain'], "").isEmpty() ? "" : "-dirty"
+
 android {
     namespace 'com.anland.consumer'
     compileSdk 36
+
+    buildFeatures {
+        buildConfig true
+    }
 
     defaultConfig {
         applicationId "com.anland.consumer"
         minSdk 30
         targetSdk 36
-        versionCode 1
-        versionName "1.0"
+        versionCode gitCommitCount
+        versionName "5.11-${gitCommitId}${gitDirty}"
 
         ndk {
             abiFilters 'arm64-v8a'
