@@ -565,7 +565,7 @@ public class SettingsActivity extends Activity {
         rootSwitch.setText(R.string.root_switch);
         rootSwitch.setTextSize(14);
         rootSwitch.setPadding(0, dp(16), 0, 0);
-        rootSwitch.setChecked(prefs.getBoolean(KEY_USE_ROOT, false));
+        rootSwitch.setChecked(prefs.getBoolean(KEY_USE_ROOT, true));
         rootSwitch.setOnCheckedChangeListener((v, checked) ->
             getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
                 .putBoolean(KEY_USE_ROOT, checked).apply());

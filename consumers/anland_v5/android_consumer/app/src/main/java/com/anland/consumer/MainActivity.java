@@ -262,7 +262,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         String sock = prefs.getString(KEY_SOCKET_PATH, DEFAULT_SOCKET_PATH);
         if (sock == null || sock.trim().isEmpty())
             sock = DEFAULT_SOCKET_PATH;
-        boolean useRoot = prefs.getBoolean(KEY_USE_ROOT, false);
+        boolean useRoot = prefs.getBoolean(KEY_USE_ROOT, true);
         String helperPath = getApplicationInfo().nativeLibraryDir + "/libfdhelper.so";
         String bridgePath = getCacheDir().getAbsolutePath() + "/anland_fdbridge.sock";
         nativeConfigure(sock.trim(), useRoot, helperPath, bridgePath);
