@@ -394,13 +394,6 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         nm.notify(NOTIFICATION_ID, notification);
     }
 
-    @Override
-    protected void onDestroy() {
-        NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
-        if (nm != null) nm.cancel(NOTIFICATION_ID);
-        super.onDestroy();
-    }
-
     // ADDED: Helper to position virtual keyboard at bottom-center
     private void positionVirtualKeyboard() {
         if (virtualKeyboardView == null) return;
@@ -505,11 +498,13 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
 
     @Override
     protected void onDestroy() {
-        super.onDestroy();
+        NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+        if (nm != null) nm.cancel(NOTIFICATION_ID);
         if (cameraInited) {
             CameraServices.nativeDestroyCameraService();
             cameraInited = false;
         }
+        super.onDestroy();
     }
 
     /*
