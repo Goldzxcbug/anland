@@ -1023,6 +1023,19 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         return true;
     }
 
+    // Some OEM ROMs (notably Xiaomi/HyperOS) dispatch Back via onBackPressed()
+    // instead of onKeyDown().  Without this override the default Activity
+    // onBackPressed() calls finish() — the app just exits.
+    @Override
+    public void onBackPressed() {
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        if (prefs.getBoolean(KEY_BACK_OPENS_EXTRA_KEYS, true)) {
+            toggleExtraKeysBar();
+        } else {
+            super.onBackPressed();
+        }
+    }
+
     // Called from KeyInterceptor (accessibility service) to handle keys that
     // the normal onKeyDown/onKeyUp might miss (e.g. Fn combos).
     public boolean handleAccessibilityKey(KeyEvent event) {
