@@ -267,6 +267,9 @@ public class SettingsActivity extends Activity {
 
     @Override
     public void onBackPressed() {
+        // While listening for a key binding, let onKeyDown capture the Back key
+        // instead of navigating back.
+        if (isListening) return;
         if (currentPage != Page.HOME) {
             showHome();
         } else {
