@@ -13,6 +13,7 @@ import android.content.pm.PackageManager;
 import android.hardware.display.DisplayManager;
 import android.content.SharedPreferences;
 import android.graphics.Color;
+import android.os.Build;
 import android.os.Bundle;
 import android.util.Log;
 import android.view.Display;
@@ -360,8 +361,14 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         mouseX = screenWidth / 2f;
         mouseY = screenHeight / 2f;
 
-        // Show persistent notification — click opens Settings
-        showSettingsNotification();
+        // Request notification permission on Android 13+, then show notification
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+                && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                        != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 1003);
+        } else {
+            showSettingsNotification();
+        }
     }
 
     private static final String NOTIFICATION_CHANNEL = "anland_channel";
@@ -576,6 +583,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                 CameraServices.nativeInitCameraService(this);
                 cameraInited = true;
             }
+        } else if (requestCode == 1003) {
+            showSettingsNotification();
         }
     }
 
