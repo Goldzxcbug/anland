@@ -348,7 +348,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
 
         // ===== 新增：加载触摸板设置 =====
         SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
-        isTouchpadMode = prefs.getBoolean(KEY_TOUCHPAD_MODE, true);
+        isTouchpadMode = prefs.getBoolean(KEY_TOUCHPAD_MODE, false);
         mouseAccelStrength = prefs.getFloat(KEY_MOUSE_ACCEL, 1.0f);
         mouseAccelStrength = Math.max(0.5f, Math.min(10.0f, mouseAccelStrength)); // 范围扩大到 10.0
         touchSlop = ViewConfiguration.get(this).getScaledTouchSlop();
