@@ -1093,12 +1093,20 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         if (isImeVisible()) {
             imm.hideSoftInputFromWindow(hiddenInput.getWindowToken(), 0);
             releaseHiddenInput();
+            // In freeform mode the inset callback may not fire; hide the bar
+            // explicitly so it tracks the IME state in all modes.
+            setExtraKeysBarVisible(shouldShowBar(false));
         } else {
             hiddenInput.setEnabled(true);
             hiddenInput.setFocusable(true);
             hiddenInput.setFocusableInTouchMode(true);
             hiddenInput.requestFocus();
             imm.showSoftInput(hiddenInput, InputMethodManager.SHOW_IMPLICIT);
+            // In freeform / small-window mode the IME appears as a floating
+            // window that does NOT trigger window insets, so applyImeInset()
+            // is never called and the extra-keys bar stays hidden.  Show it
+            // explicitly here so the bar appears alongside the IME in all modes.
+            setExtraKeysBarVisible(shouldShowBar(true));
         }
     }
 
