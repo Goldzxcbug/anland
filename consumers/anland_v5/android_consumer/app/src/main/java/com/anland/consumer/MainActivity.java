@@ -1097,6 +1097,11 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         if (imm == null) imm = getSystemService(InputMethodManager.class);
         if (imm == null) return;
         if (isImeVisible()) {
+            // In freeform mode hideSoftInputFromWindow may not work for the
+            // floating IME.  Force-hide by also setting the window soft input
+            // mode and clearing focus from the hidden input.
+            getWindow().setSoftInputMode(
+                    WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);
             imm.hideSoftInputFromWindow(hiddenInput.getWindowToken(), 0);
             releaseHiddenInput();
             imeRequested = false;
