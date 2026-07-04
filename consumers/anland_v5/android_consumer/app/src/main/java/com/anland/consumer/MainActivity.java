@@ -341,6 +341,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             int newH = bottom - top;
             int oldW = oldRight - oldLeft;
             int oldH = oldBottom - oldTop;
+            Log.d("VirtualKeyboard", "root layout changed: " + newW + "x" + newH
+                    + " (was " + oldW + "x" + oldH + ")");
             if (newW != oldW || newH != oldH) {
                 if (virtualKeyboardView != null
                         && virtualKeyboardView.getVisibility() == View.VISIBLE) {
@@ -430,14 +432,21 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         int parentW = mRoot.getWidth();
         int parentH = mRoot.getHeight();
         if (parentW <= 0 || parentH <= 0) {
-            DisplayMetrics dm = getResources().getDisplayMetrics();
-            parentW = dm.widthPixels;
-            parentH = dm.heightPixels;
+            // Root not laid out yet — retry next frame.
+            if (virtualKeyboardView.getVisibility() == View.VISIBLE) {
+                virtualKeyboardView.post(this::positionVirtualKeyboard);
+            }
+            return;
         }
         float x = (parentW - w) / 2f;
-        float y = parentH - h - dpToPx(50); // 50dp margin from bottom
+        float y = parentH - h - dpToPx(50);
+        // Clamp to visible area.
+        x = Math.max(0, Math.min(x, parentW - w));
+        y = Math.max(0, Math.min(y, parentH - h));
         virtualKeyboardView.setX(x);
         virtualKeyboardView.setY(y);
+        Log.d("VirtualKeyboard", "positionVirtualKeyboard: x=" + x + ", y=" + y
+                + " parent=" + parentW + "x" + parentH + " view=" + w + "x" + h);
     }
 
     private int dpToPx(int dp) {
@@ -1016,6 +1025,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                 if (virtualKeyboardView.getVisibility() == View.VISIBLE) {
                     virtualKeyboardView.setVisibility(View.GONE);
                 } else {
+                    Log.d("VirtualKeyboard", "toggle: showing keyboard, mRoot="
+                            + mRoot.getWidth() + "x" + mRoot.getHeight());
                     virtualKeyboardView.setVisibility(View.VISIBLE);
                     virtualKeyboardView.bringToFront();
                     // Re-position it (in case screen size changed)

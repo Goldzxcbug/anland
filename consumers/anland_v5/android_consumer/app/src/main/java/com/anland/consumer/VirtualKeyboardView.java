@@ -457,26 +457,42 @@ package com.anland.consumer;
          Log.d(TAG, "layoutKeys done, keyHeight=" + keyHeight); 
      } 
   
-     public void setInitialPosition() { 
-         try { 
-             if (getWidth() == 0 || getHeight() == 0) { 
-                 post(this::setInitialPosition); 
-                 return; 
-             } 
-             int w = getWidth(); 
-             int h = getHeight(); 
-             if (w > 0 && h > 0 && screenWidth > 0 && screenHeight > 0) { 
-                 float x = (screenWidth - w) / 2f; 
-                 float y = screenHeight - h - dpToPx(50); 
-                 setTranslationX(x); 
-                 setTranslationY(y); 
-                 bringToFront(); 
-                 Log.d(TAG, "setInitialPosition: x=" + x + ", y=" + y); 
-             } 
-         } catch (Exception e) { 
-             Log.e(TAG, "setInitialPosition error", e); 
-         } 
-     } 
+     public void setInitialPosition() {
+        try {
+            if (getWidth() == 0 || getHeight() == 0) {
+                post(this::setInitialPosition);
+                return;
+            }
+            int w = getWidth();
+            int h = getHeight();
+            // Use parent view dimensions — correct in freeform / small-window mode.
+            int pw = 0, ph = 0;
+            ViewParent pp = getParent();
+            if (pp instanceof View) {
+                pw = ((View) pp).getWidth();
+                ph = ((View) pp).getHeight();
+            }
+            if (pw <= 0 || ph <= 0) {
+                // Parent not laid out yet — retry next frame.
+                post(this::setInitialPosition);
+                return;
+            }
+            if (w > 0 && h > 0) {
+                float x = (pw - w) / 2f;
+                float y = ph - h - dpToPx(50);
+                // Clamp to visible area.
+                x = Math.max(0, Math.min(x, pw - w));
+                y = Math.max(0, Math.min(y, ph - h));
+                setTranslationX(x);
+                setTranslationY(y);
+                bringToFront();
+                Log.d(TAG, "setInitialPosition: x=" + x + ", y=" + y
+                        + " parent=" + pw + "x" + ph + " view=" + w + "x" + h);
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "setInitialPosition error", e);
+        }
+    } 
   
      // ========== 核心状态管理 ========== 
      private void updateSymbolLayer() { 
@@ -663,8 +679,8 @@ package com.anland.consumer;
   
              if (action == MotionEvent.ACTION_DOWN && y < dragHandleHeight) { 
                  isDragging = true; 
-                 lastRawX = event.getRawX(); 
-                 lastRawY = event.getRawY(); 
+                 lastRawX = x; 
+                 lastRawY = y; 
                  bringToFront(); 
                  return true; 
              } 
@@ -672,14 +688,17 @@ package com.anland.consumer;
              if (isDragging) { 
                  switch (action) { 
                      case MotionEvent.ACTION_MOVE: 
-                         float dx = event.getRawX() - lastRawX; 
-                         float dy = event.getRawY() - lastRawY; 
+                         // Use view-relative getX()/getY() instead of getRawX()/getRawY()
+                         // so that dragging works correctly in freeform / small-window mode
+                         // where the window has a screen offset.
+                         float dx = event.getX() - lastRawX; 
+                         float dy = event.getY() - lastRawY; 
                          float newX = getTranslationX() + dx; 
                          float newY = getTranslationY() + dy; 
                          setTranslationX(newX);
                          setTranslationY(newY);
-                         lastRawX = event.getRawX();
-                         lastRawY = event.getRawY(); 
+                         lastRawX = event.getX();
+                         lastRawY = event.getY(); 
                          return true; 
                      case MotionEvent.ACTION_UP: 
                      case MotionEvent.ACTION_CANCEL: 
