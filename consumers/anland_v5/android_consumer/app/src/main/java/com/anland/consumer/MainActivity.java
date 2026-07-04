@@ -333,6 +333,21 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             FrameLayout.LayoutParams.WRAP_CONTENT,
             Gravity.NO_GRAVITY
         ));
+        // Reposition the virtual keyboard when the root layout size changes
+        // (e.g. freeform / small-window mode resize).
+        root.addOnLayoutChangeListener((v, left, top, right, bottom,
+                oldLeft, oldTop, oldRight, oldBottom) -> {
+            int newW = right - left;
+            int newH = bottom - top;
+            int oldW = oldRight - oldLeft;
+            int oldH = oldBottom - oldTop;
+            if (newW != oldW || newH != oldH) {
+                if (virtualKeyboardView != null
+                        && virtualKeyboardView.getVisibility() == View.VISIBLE) {
+                    positionVirtualKeyboard();
+                }
+            }
+        });
         // Positioning happens lazily the first time the keyboard is shown
         // (see toggleVirtualKeyboard). Positioning it here would spin forever:
         // the view starts GONE and a GONE view is never measured.
@@ -410,9 +425,17 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             }
             return;
         }
-        DisplayMetrics dm = getResources().getDisplayMetrics();
-        float x = (dm.widthPixels - w) / 2f;
-        float y = dm.heightPixels - h - dpToPx(50); // 50dp margin from bottom
+        // Use the root layout's dimensions instead of DisplayMetrics so that
+        // positioning is correct in freeform / small-window mode.
+        int parentW = mRoot.getWidth();
+        int parentH = mRoot.getHeight();
+        if (parentW <= 0 || parentH <= 0) {
+            DisplayMetrics dm = getResources().getDisplayMetrics();
+            parentW = dm.widthPixels;
+            parentH = dm.heightPixels;
+        }
+        float x = (parentW - w) / 2f;
+        float y = parentH - h - dpToPx(50); // 50dp margin from bottom
         virtualKeyboardView.setX(x);
         virtualKeyboardView.setY(y);
     }

@@ -116,20 +116,32 @@ package com.anland.consumer;
          bringToFront(); 
      } 
   
-     private void updateScreenSize() { 
-         try { 
-             Resources res = getResources(); 
-             if (res != null) { 
-                 screenWidth = res.getDisplayMetrics().widthPixels; 
-                 screenHeight = res.getDisplayMetrics().heightPixels; 
-                 Log.d(TAG, "updateScreenSize: " + screenWidth + "x" + screenHeight); 
-             } 
-         } catch (Exception e) { 
-             Log.e(TAG, "updateScreenSize error", e); 
-             screenWidth = 1920; 
-             screenHeight = 1080; 
-         } 
-     } 
+     private void updateScreenSize() {
+        try {
+            // Prefer parent view dimensions (correct in freeform / small-window mode).
+            ViewParent pp = getParent();
+            if (pp instanceof View) {
+                int pw = ((View) pp).getWidth();
+                int ph = ((View) pp).getHeight();
+                if (pw > 0 && ph > 0) {
+                    screenWidth = pw;
+                    screenHeight = ph;
+                    Log.d(TAG, "updateScreenSize (parent): " + screenWidth + "x" + screenHeight);
+                    return;
+                }
+            }
+            Resources res = getResources();
+            if (res != null) {
+                screenWidth = res.getDisplayMetrics().widthPixels;
+                screenHeight = res.getDisplayMetrics().heightPixels;
+                Log.d(TAG, "updateScreenSize: " + screenWidth + "x" + screenHeight);
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "updateScreenSize error", e);
+            screenWidth = 1920;
+            screenHeight = 1080;
+        }
+    } 
   
      @Override 
      protected void onAttachedToWindow() { 
@@ -366,22 +378,27 @@ package com.anland.consumer;
      } 
   
      // ========== 测量与布局 ========== 
-     @Override 
-     protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) { 
-         try { 
-             int desiredWidth = (int) (screenWidth * 0.45f); 
-             if (desiredWidth < 400) desiredWidth = 400; 
-             int rowCount = keyboardRows.length; 
-             int keyH = dpToPx(32); 
-             int totalHeight = dragHandleHeight + padding + rowCount * (keyH + padding) + padding; 
-             if (totalHeight <= 0) totalHeight = 350; 
-             setMeasuredDimension(desiredWidth, totalHeight); 
-             Log.d(TAG, "onMeasure: " + desiredWidth + "x" + totalHeight); 
-         } catch (Exception e) { 
-             Log.e(TAG, "onMeasure error", e); 
-             setMeasuredDimension(600, 350); 
-         } 
-     } 
+     @Override
+    protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+        try {
+            // Refresh screen size so freeform / resize is picked up.
+            updateScreenSize();
+            int desiredWidth = (int) (screenWidth * 0.45f);
+            if (desiredWidth < 400) desiredWidth = 400;
+            // In freeform mode the keyboard must not exceed the parent width.
+            int maxWidth = MeasureSpec.getSize(widthMeasureSpec);
+            if (maxWidth > 0 && desiredWidth > maxWidth) desiredWidth = maxWidth;
+            int rowCount = keyboardRows.length;
+            int keyH = dpToPx(32);
+            int totalHeight = dragHandleHeight + padding + rowCount * (keyH + padding) + padding;
+            if (totalHeight <= 0) totalHeight = 350;
+            setMeasuredDimension(desiredWidth, totalHeight);
+            Log.d(TAG, "onMeasure: " + desiredWidth + "x" + totalHeight);
+        } catch (Exception e) {
+            Log.e(TAG, "onMeasure error", e);
+            setMeasuredDimension(600, 350);
+        }
+    } 
   
      @Override 
      protected void onSizeChanged(int w, int h, int oldw, int oldh) { 
