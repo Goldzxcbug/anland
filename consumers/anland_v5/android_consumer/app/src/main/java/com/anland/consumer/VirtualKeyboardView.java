@@ -116,20 +116,32 @@ package com.anland.consumer;
          bringToFront(); 
      } 
   
-     private void updateScreenSize() { 
-         try { 
-             Resources res = getResources(); 
-             if (res != null) { 
-                 screenWidth = res.getDisplayMetrics().widthPixels; 
-                 screenHeight = res.getDisplayMetrics().heightPixels; 
-                 Log.d(TAG, "updateScreenSize: " + screenWidth + "x" + screenHeight); 
-             } 
-         } catch (Exception e) { 
-             Log.e(TAG, "updateScreenSize error", e); 
-             screenWidth = 1920; 
-             screenHeight = 1080; 
-         } 
-     } 
+     private void updateScreenSize() {
+        try {
+            // Prefer parent view dimensions (correct in freeform / small-window mode).
+            ViewParent pp = getParent();
+            if (pp instanceof View) {
+                int pw = ((View) pp).getWidth();
+                int ph = ((View) pp).getHeight();
+                if (pw > 0 && ph > 0) {
+                    screenWidth = pw;
+                    screenHeight = ph;
+                    Log.d(TAG, "updateScreenSize (parent): " + screenWidth + "x" + screenHeight);
+                    return;
+                }
+            }
+            Resources res = getResources();
+            if (res != null) {
+                screenWidth = res.getDisplayMetrics().widthPixels;
+                screenHeight = res.getDisplayMetrics().heightPixels;
+                Log.d(TAG, "updateScreenSize: " + screenWidth + "x" + screenHeight);
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "updateScreenSize error", e);
+            screenWidth = 1920;
+            screenHeight = 1080;
+        }
+    } 
   
      @Override 
      protected void onAttachedToWindow() { 
@@ -366,22 +378,27 @@ package com.anland.consumer;
      } 
   
      // ========== 测量与布局 ========== 
-     @Override 
-     protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) { 
-         try { 
-             int desiredWidth = (int) (screenWidth * 0.45f); 
-             if (desiredWidth < 400) desiredWidth = 400; 
-             int rowCount = keyboardRows.length; 
-             int keyH = dpToPx(32); 
-             int totalHeight = dragHandleHeight + padding + rowCount * (keyH + padding) + padding; 
-             if (totalHeight <= 0) totalHeight = 350; 
-             setMeasuredDimension(desiredWidth, totalHeight); 
-             Log.d(TAG, "onMeasure: " + desiredWidth + "x" + totalHeight); 
-         } catch (Exception e) { 
-             Log.e(TAG, "onMeasure error", e); 
-             setMeasuredDimension(600, 350); 
-         } 
-     } 
+     @Override
+    protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+        try {
+            // Refresh screen size so freeform / resize is picked up.
+            updateScreenSize();
+            int desiredWidth = (int) (screenWidth * 0.45f);
+            if (desiredWidth < 400) desiredWidth = 400;
+            // In freeform mode the keyboard must not exceed the parent width.
+            int maxWidth = MeasureSpec.getSize(widthMeasureSpec);
+            if (maxWidth > 0 && desiredWidth > maxWidth) desiredWidth = maxWidth;
+            int rowCount = keyboardRows.length;
+            int keyH = dpToPx(32);
+            int totalHeight = dragHandleHeight + padding + rowCount * (keyH + padding) + padding;
+            if (totalHeight <= 0) totalHeight = 350;
+            setMeasuredDimension(desiredWidth, totalHeight);
+            Log.d(TAG, "onMeasure: " + desiredWidth + "x" + totalHeight);
+        } catch (Exception e) {
+            Log.e(TAG, "onMeasure error", e);
+            setMeasuredDimension(600, 350);
+        }
+    } 
   
      @Override 
      protected void onSizeChanged(int w, int h, int oldw, int oldh) { 
@@ -440,26 +457,42 @@ package com.anland.consumer;
          Log.d(TAG, "layoutKeys done, keyHeight=" + keyHeight); 
      } 
   
-     public void setInitialPosition() { 
-         try { 
-             if (getWidth() == 0 || getHeight() == 0) { 
-                 post(this::setInitialPosition); 
-                 return; 
-             } 
-             int w = getWidth(); 
-             int h = getHeight(); 
-             if (w > 0 && h > 0 && screenWidth > 0 && screenHeight > 0) { 
-                 float x = (screenWidth - w) / 2f; 
-                 float y = screenHeight - h - dpToPx(50); 
-                 setTranslationX(x); 
-                 setTranslationY(y); 
-                 bringToFront(); 
-                 Log.d(TAG, "setInitialPosition: x=" + x + ", y=" + y); 
-             } 
-         } catch (Exception e) { 
-             Log.e(TAG, "setInitialPosition error", e); 
-         } 
-     } 
+     public void setInitialPosition() {
+        try {
+            if (getWidth() == 0 || getHeight() == 0) {
+                post(this::setInitialPosition);
+                return;
+            }
+            int w = getWidth();
+            int h = getHeight();
+            // Use parent view dimensions — correct in freeform / small-window mode.
+            int pw = 0, ph = 0;
+            ViewParent pp = getParent();
+            if (pp instanceof View) {
+                pw = ((View) pp).getWidth();
+                ph = ((View) pp).getHeight();
+            }
+            if (pw <= 0 || ph <= 0) {
+                // Parent not laid out yet — retry next frame.
+                post(this::setInitialPosition);
+                return;
+            }
+            if (w > 0 && h > 0) {
+                float x = (pw - w) / 2f;
+                float y = ph - h - dpToPx(50);
+                // Clamp to visible area.
+                x = Math.max(0, Math.min(x, pw - w));
+                y = Math.max(0, Math.min(y, ph - h));
+                setTranslationX(x);
+                setTranslationY(y);
+                bringToFront();
+                Log.d(TAG, "setInitialPosition: x=" + x + ", y=" + y
+                        + " parent=" + pw + "x" + ph + " view=" + w + "x" + h);
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "setInitialPosition error", e);
+        }
+    } 
   
      // ========== 核心状态管理 ========== 
      private void updateSymbolLayer() { 
@@ -646,8 +679,8 @@ package com.anland.consumer;
   
              if (action == MotionEvent.ACTION_DOWN && y < dragHandleHeight) { 
                  isDragging = true; 
-                 lastRawX = event.getRawX(); 
-                 lastRawY = event.getRawY(); 
+                 lastRawX = x; 
+                 lastRawY = y; 
                  bringToFront(); 
                  return true; 
              } 
@@ -655,14 +688,17 @@ package com.anland.consumer;
              if (isDragging) { 
                  switch (action) { 
                      case MotionEvent.ACTION_MOVE: 
-                         float dx = event.getRawX() - lastRawX; 
-                         float dy = event.getRawY() - lastRawY; 
+                         // Use view-relative getX()/getY() instead of getRawX()/getRawY()
+                         // so that dragging works correctly in freeform / small-window mode
+                         // where the window has a screen offset.
+                         float dx = event.getX() - lastRawX; 
+                         float dy = event.getY() - lastRawY; 
                          float newX = getTranslationX() + dx; 
                          float newY = getTranslationY() + dy; 
                          setTranslationX(newX);
                          setTranslationY(newY);
-                         lastRawX = event.getRawX();
-                         lastRawY = event.getRawY(); 
+                         lastRawX = event.getX();
+                         lastRawY = event.getY(); 
                          return true; 
                      case MotionEvent.ACTION_UP: 
                      case MotionEvent.ACTION_CANCEL: 
