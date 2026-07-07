@@ -60,6 +60,9 @@
 
     <!-- Connection -->
     <string name="socket_path_label">守护进程套接字路径</string>
+    <string name="second_window_label">打开第二个窗口（独立守护进程与标题）</string>
+    <string name="second_window_name_hint">窗口名称（如 work）</string>
+    <string name="second_window_open">打开第二个窗口</string>
     <string name="root_switch">使用 root 连接（辅助程序）</string>
     <string name="root_hint">启动一个 root 辅助程序（su）连接到套接字，并将连接传回应用。下次连接时生效（请重新打开应用）。</string>
     <string name="mic_switch">将麦克风转发到桌面</string>

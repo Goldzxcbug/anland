@@ -34,13 +34,14 @@
  *
  * Frame transport (shared memory, zero socket copy):
  *   Each camera owns one ashmem region of CAMERA_SLOTS * slot_bytes, created once at
- *   init and sized for the camera's max resolution (slot_bytes = maxW*maxH*3/2). The
- *   AImageReader callback packs each frame as NV21 straight into a slot, then notifies
- *   the producer over stream_fd. The two ends ping-pong the two slots:
- *     0. consumer writes slot s, sends READY(s, w, h)
+ *   init and sized for the camera's max resolution (slot_bytes = maxW*maxH*3/2) and
+ *   SHARED by all recorders. The AImageReader callback packs each frame as NV21 straight
+ *   into a slot, then notifies every recorder over its stream_fd. The two ends ping-pong
+ *   the two slots:
+ *     0. consumer writes slot s, sends READY(s, w, h) to every recorder
  *     1. consumer advances to the other slot for the next frame
- *     2. producer copies slot s out, sends DONE(s)
- *     3. consumer waits for DONE before reusing slot s (1s timeout, then drops)
+ *     2. each producer copies slot s out, sends DONE(s)
+ *     3. consumer waits for DONE from ALL recorders before reusing slot s (1s timeout)
  */
 
 /* ---- control-channel protocol (over ctrl_fd) ---- */
@@ -81,10 +82,34 @@ struct cam_stream_msg {
 #define CAM_FMT_NV12 1  /* semi-planar:  Y plane, then interleaved U,V            */
 #define CAM_FMT_NV21 2  /* semi-planar:  Y plane, then interleaved V,U            */
 
-/* ---- service_info callbacks (wired into do_connect via allocate_services) ---- */
+/* ---- service_info callbacks (wired into do_connect via allocate_services) ----
+ *
+ * Multi-instance: one physical camera is captured once and its frames are fanned
+ * out to every connected window (a "camera client"). Each window is one-to-one with
+ * its producer and owns its own ctrl/stream channels; `userdata` is the instance token
+ * (consumer_state*) that tells clients apart. The FRAME BUFFER, however, is shared: all
+ * recorders of a camera map the one per-camera ashmem region and every recorder gets
+ * the real frame (there is no blank/focus fast-path).
+ *
+ * Because the buffer is shared, the reader packs each frame once and then blocks before
+ * overwriting a slot until every producer that received the previous frame in it has
+ * DONE'd (concurrent reads are safe, overwrites are not). The wait is bounded (1s) so a
+ * stuck producer can't freeze capture. */
 
-struct resources camera_allocate_resource(uint32_t *args);
-void             camera_free_resource(struct resources res);
+struct resources camera_allocate_resource(uint32_t *args, void *userdata);
+void             camera_free_resource(struct resources res, void *userdata);
+
+/* Retained no-op: focus no longer affects frame delivery (all recorders get the real
+ * frame from the shared buffer). Still called from JNI on window focus change. */
+void camera_set_focus(void *owner);
+
+/*
+ * Destroy the client owned by `owner` and close its fds. The client (and its fds) is
+ * bound to the WINDOW lifetime, not the connection: allocate/free only add or remove
+ * it from the cameras' recording lists. This is the only call that frees the
+ * channels -- invoke it when the instance is torn down (nativeDestroy). Clears focus
+ * if `owner` held it. No-op if it has no client. */
+void camera_release_client(void *owner);
 
 /* ---- lifecycle, driven from JNI (MainActivity) ---- */
 

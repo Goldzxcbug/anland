@@ -63,6 +63,7 @@ struct buf_info {
 #define INPUT_TYPE_TEXT_INPUT      9
 #define INPUT_TYPE_ACTION 10
 #define INPUT_TYPE_RESOURCE 11
+#define INPUT_TYPE_RESOURCE_INVALID 12
 
 #define SERVICE_TYPE_CAMERA 1
 

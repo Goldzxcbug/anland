@@ -60,6 +60,9 @@
 
     <!-- Connection -->
     <string name="socket_path_label">守護程序 socket 路徑</string>
+    <string name="second_window_label">開啟第二個視窗（獨立守護程序與標題）</string>
+    <string name="second_window_name_hint">視窗名稱（如 work）</string>
+    <string name="second_window_open">開啟第二個視窗</string>
     <string name="root_switch">使用 root 連線（輔助程式）</string>
     <string name="root_hint">啟動一個 root 輔助程式（su）連線到 socket，並將連線傳回應用程式。下次連線時生效（請重新開啟應用程式）。</string>
     <string name="mic_switch">將麥克風轉發到桌面</string>

@@ -614,6 +614,39 @@ public class SettingsActivity extends Activity {
         });
         root.addView(socketInput);
 
+        // Open a second window: an independent pipeline in the same process, targeting
+        // its own daemon socket and shown with its own title. Launched as a new task
+        // (freeform / split-screen) via SecondaryActivity.
+        TextView secLabel = new TextView(this);
+        secLabel.setText(R.string.second_window_label);
+        secLabel.setTextSize(14);
+        secLabel.setTextColor(Color.GRAY);
+        secLabel.setPadding(0, dp(16), 0, dp(4));
+        root.addView(secLabel);
+
+        EditText secName = new EditText(this);
+        secName.setSingleLine(true);
+        secName.setHint(R.string.second_window_name_hint);
+        root.addView(secName);
+
+        EditText secSocket = new EditText(this);
+        secSocket.setSingleLine(true);
+        secSocket.setHint(DEFAULT_SOCKET_PATH);
+        root.addView(secSocket);
+
+        Button secOpen = new Button(this);
+        secOpen.setText(R.string.second_window_open);
+        secOpen.setOnClickListener(v -> {
+            Intent i = new Intent(this, SecondaryActivity.class);
+            String sp = secSocket.getText().toString().trim();
+            String wn = secName.getText().toString().trim();
+            if (!sp.isEmpty()) i.putExtra(MainActivity.EXTRA_SOCKET_PATH, sp);
+            if (!wn.isEmpty()) i.putExtra(MainActivity.EXTRA_WINDOW_NAME, wn);
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_MULTIPLE_TASK);
+            startActivity(i);
+        });
+        root.addView(secOpen);
+
         // Connect with root
         Switch rootSwitch = new Switch(this);
         rootSwitch.setText(R.string.root_switch);

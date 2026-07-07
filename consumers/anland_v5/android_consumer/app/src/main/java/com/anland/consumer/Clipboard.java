@@ -17,12 +17,15 @@ import java.nio.charset.StandardCharsets;
  */
 public final class Clipboard {
     private final Context context;
+    // The owning window's native transport; clipboard pushes go through it.
+    private final Native mNative;
     // Last text we pushed either way; used to skip the clipListener echo.
     private String mLastSentClip = null;
     private boolean mClipListening = false;
 
-    Clipboard(Context context) {
+    Clipboard(Context context, Native n) {
         this.context = context;
+        this.mNative = n;
     }
 
     private final ClipboardManager.OnPrimaryClipChangedListener clipListener =
@@ -46,7 +49,7 @@ public final class Clipboard {
             CharSequence text = clip.getItemAt(0).getText();
             if (text != null) {
                 mLastSentClip = text.toString();
-                Native.nativeSendClipboard(text.toString().getBytes(StandardCharsets.UTF_8));
+                mNative.sendClipboard(text.toString().getBytes(StandardCharsets.UTF_8));
             }
         }
     }
@@ -77,7 +80,7 @@ public final class Clipboard {
                 String clipText = text.toString();
                 if (!clipText.equals(mLastSentClip)) {
                     mLastSentClip = clipText;
-                    Native.nativeSendClipboard(clipText.getBytes(StandardCharsets.UTF_8));
+                    mNative.sendClipboard(clipText.getBytes(StandardCharsets.UTF_8));
                 }
             }
         }

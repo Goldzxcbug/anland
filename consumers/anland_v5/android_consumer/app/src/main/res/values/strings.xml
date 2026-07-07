@@ -60,6 +60,9 @@
 
     <!-- Connection -->
     <string name="socket_path_label">Daemon socket path</string>
+    <string name="second_window_label">Open a second window (own daemon &amp; title)</string>
+    <string name="second_window_name_hint">Window name (e.g. work)</string>
+    <string name="second_window_open">Open second window</string>
     <string name="root_switch">Connect with root (helper)</string>
     <string name="root_hint">Launches a root helper (su) that connects to the socket and passes the connection back to the app. Takes effect on next connect (reopen the app).</string>
     <string name="mic_switch">Forward microphone to desktop</string>

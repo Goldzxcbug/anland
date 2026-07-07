@@ -30,13 +30,13 @@
 #define PIXEL_FORMAT_RGBA_8888 1
 #define MAX_COLLECT_BUFS 8
 
-static int cfg_custom_width = 0;
-static int cfg_custom_height = 0;
-
-/* Saved JVM / activity reference for event-thread JNI callbacks. */
+/* Saved JVM reference for event-thread JNI callbacks. Process-global (the JVM is);
+ * the per-thread env is attached as needed. The activity callback target is
+ * per-instance -> consumer_state.activity_obj. */
 static JavaVM *g_jvm = NULL;
-static jobject g_activity_obj = NULL;
 
+/* ANativeWindow hidden-API function pointers: loaded once, read-only afterwards, so
+ * safe to share across instances. */
 static struct anw_api api;
 static bool api_loaded = false;
 static void on_fallback(void *userdata);
@@ -68,23 +68,32 @@ struct consumer_state {
     // Event (output) thread
     pthread_t event_thread;
     volatile bool event_running;
+
+    /* Connection config, set from Java via nativeConfigure() and read on each
+     * (re)connect in do_connect(). Guarded by cfg_lock. Per-instance. */
+    pthread_mutex_t cfg_lock;
+    char cfg_socket_path[256];
+    bool cfg_use_root;
+    char cfg_helper_path[512];
+    char cfg_bridge_path[512];
+    int  cfg_custom_width;
+    int  cfg_custom_height;
+
+    /* Pointer-motion delta tracking (per-instance). */
+    bool  motion_has_last;
+    float motion_last_x, motion_last_y;
+
+    /* Clipboard callback target: the Java object whose nativeSetClipboardText /
+     * nativeClipListening / nativeClipboardSync the event thread calls (per-instance). */
+    jobject activity_obj;
+
+    /* Per-instance audio bridge (own AAudio streams, own producer). */
+    audio_bridge *audio;
+
+    /* Per-instance camera service registration; userdata points back at this state
+     * so the camera layer can tell instances apart (see camera_service.c). */
+    struct service_info camera_svc;
 };
-
-static struct consumer_state g_state = {
-    .lock = PTHREAD_MUTEX_INITIALIZER,
-};
-
-/* Connection config, set from Java via nativeConfigure() and read on each
- * (re)connect in do_connect(). Guarded by cfg_lock. */
-static pthread_mutex_t cfg_lock = PTHREAD_MUTEX_INITIALIZER;
-static char cfg_socket_path[256] = "/data/local/tmp/display_daemon.sock";
-static bool cfg_use_root = false;
-static char cfg_helper_path[512] = "";
-static char cfg_bridge_path[512] = "";
-
-static bool motion_has_last = false;
-static float motion_last_x = 0.0f;
-static float motion_last_y = 0.0f;
 
 static int collect_dmabufs(struct consumer_state *s)
 {
@@ -202,7 +211,7 @@ static void *event_thread_func(void *arg)
     }
 
     /* Find classes/methods once */
-    jclass ctxClass = (*env)->GetObjectClass(env, g_activity_obj);
+    jclass ctxClass = (*env)->GetObjectClass(env, s->activity_obj);
     jmethodID setClipMethod = (*env)->GetMethodID(env, ctxClass, "nativeSetClipboardText", "(Ljava/lang/String;)V");
     if (!setClipMethod) {
         LOGE("event thread: nativeSetClipboardText not found");
@@ -235,7 +244,7 @@ static void *event_thread_func(void *arg)
                 buf[ev.clipboard.size] = '\0';
                 jstring jstr = (*env)->NewStringUTF(env, buf);
                 if (jstr) {
-                    (*env)->CallVoidMethod(env, g_activity_obj, setClipMethod, jstr);
+                    (*env)->CallVoidMethod(env, s->activity_obj, setClipMethod, jstr);
                     (*env)->DeleteLocalRef(env, jstr);
                 }
             }
@@ -362,20 +371,20 @@ static int recv_fd_via_root_helper(const char *daemon_sock,
 static int do_connect(struct consumer_state *s)
 {
     /* Snapshot the connection config for this attempt. */
-    pthread_mutex_lock(&cfg_lock);
-    bool use_root = cfg_use_root;
-    char sock_path[sizeof(cfg_socket_path)];
-    char helper_path[sizeof(cfg_helper_path)];
-    char bridge_path[sizeof(cfg_bridge_path)];
-    memcpy(sock_path, cfg_socket_path, sizeof(sock_path));
-    memcpy(helper_path, cfg_helper_path, sizeof(helper_path));
-    memcpy(bridge_path, cfg_bridge_path, sizeof(bridge_path));
-    pthread_mutex_unlock(&cfg_lock);
+    pthread_mutex_lock(&s->cfg_lock);
+    bool use_root = s->cfg_use_root;
+    char sock_path[sizeof(s->cfg_socket_path)];
+    char helper_path[sizeof(s->cfg_helper_path)];
+    char bridge_path[sizeof(s->cfg_bridge_path)];
+    memcpy(sock_path, s->cfg_socket_path, sizeof(sock_path));
+    memcpy(helper_path, s->cfg_helper_path, sizeof(helper_path));
+    memcpy(bridge_path, s->cfg_bridge_path, sizeof(bridge_path));
+    pthread_mutex_unlock(&s->cfg_lock);
 
     const char *sock = sock_path;
 
     if (s->ctx) {
-        audio_set_ctx(NULL);   /* detach audio before the old ctx (and its fd) dies */
+        audio_set_ctx(s->audio, NULL);   /* detach audio before the old ctx (and its fd) dies */
         stop_event_thread(s);
         join_event_thread(s);
         disconnect(s->ctx);
@@ -384,10 +393,10 @@ static int do_connect(struct consumer_state *s)
     cleanup_dmabufs(s);
 
     ANativeWindow *win = s->window;
-    pthread_mutex_lock(&cfg_lock);
-    int cw = cfg_custom_width;
-    int ch = cfg_custom_height;
-    pthread_mutex_unlock(&cfg_lock);
+    pthread_mutex_lock(&s->cfg_lock);
+    int cw = s->cfg_custom_width;
+    int ch = s->cfg_custom_height;
+    pthread_mutex_unlock(&s->cfg_lock);
 
     if (cw > 0 && ch > 0) {
         s->screen_w = cw;
@@ -443,21 +452,22 @@ static int do_connect(struct consumer_state *s)
     push_dmabufs(s->ctx, s->dmabuf_fds, s->dmabuf_infos, s->buf_count);
 
     /* Register the camera service only when it was initialised (i.e. the user
-     * enabled it in settings and granted CAMERA). allocate_services() stores this
-     * pointer by reference, so it must outlive the ctx -> keep it static. The
-     * producer drives it via RESOURCES_REQUEST (handled on the event thread). */
+     * enabled it in settings and granted CAMERA). The service_info lives in this
+     * per-instance state (outlives the ctx) and carries userdata=s so the camera
+     * layer knows which instance's client to serve. The producer drives it via
+     * RESOURCES_REQUEST (handled on the event thread). */
     if (camera_service_is_ready()) {
-        static struct service_info camera_svc;
-        camera_svc.type = SERVICE_TYPE_CAMERA;
-        camera_svc.allocate_resource = camera_allocate_resource;
-        camera_svc.free_resource = camera_free_resource;
-        allocate_services(s->ctx, &camera_svc, 1);
+        s->camera_svc.type = SERVICE_TYPE_CAMERA;
+        s->camera_svc.allocate_resource = camera_allocate_resource;
+        s->camera_svc.free_resource = camera_free_resource;
+        s->camera_svc.userdata = s;
+        allocate_services(s->ctx, &s->camera_svc, 1);
     }
 
     set_fallback_callback(s->ctx, on_fallback, s);
     set_exit_fallback_callback(s->ctx, on_exit_fallback, s);
 
-    audio_set_ctx(s->ctx);   /* audio fd is now live; threads pick it up via get_audio_fd */
+    audio_set_ctx(s->audio, s->ctx);   /* audio fd is now live; threads pick it up via get_audio_fd */
 
     s->need_reconnect = false;
     LOGI("connected");
@@ -469,10 +479,10 @@ static void on_fallback(void *userdata)
     struct consumer_state *s = userdata;
     LOGI("fallback triggered");
 
-    audio_set_ctx(NULL);   /* the lib has closed the audio fd; stop touching it */
+    audio_set_ctx(s->audio, NULL);   /* the lib has closed the audio fd; stop touching it */
 
     // Disable clip listener on Java side before stopping event thread
-    if (g_jvm && g_activity_obj) {
+    if (g_jvm && s->activity_obj) {
         JNIEnv *env = NULL;
         bool attached = false;
         if ((*g_jvm)->GetEnv(g_jvm, (void **)&env, JNI_VERSION_1_6) == JNI_EDETACHED) {
@@ -480,10 +490,10 @@ static void on_fallback(void *userdata)
                 attached = true;
         }
         if (env) {
-            jclass cls = (*env)->GetObjectClass(env, g_activity_obj);
+            jclass cls = (*env)->GetObjectClass(env, s->activity_obj);
             jmethodID mid = (*env)->GetMethodID(env, cls, "nativeClipListening", "(Z)V");
             if (mid)
-                (*env)->CallVoidMethod(env, g_activity_obj, mid, JNI_FALSE);
+                (*env)->CallVoidMethod(env, s->activity_obj, mid, JNI_FALSE);
         }
         if (attached)
             (*g_jvm)->DetachCurrentThread(g_jvm);
@@ -497,8 +507,8 @@ static void on_exit_fallback(void *userdata)
     struct consumer_state *s = userdata;
     LOGI("exit fallback triggered");
 
-    send_refresh_rate(&g_state);
-    
+    send_refresh_rate(s);
+
     JNIEnv *env = NULL;
     if ((*g_jvm)->AttachCurrentThread(g_jvm, &env, NULL) != 0) {
         LOGE("on_exit_fallback: AttachCurrentThread failed");
@@ -506,17 +516,17 @@ static void on_exit_fallback(void *userdata)
     }
 
     // Enable clip listener on Java side
-    jclass cls = (*env)->GetObjectClass(env, g_activity_obj);
+    jclass cls = (*env)->GetObjectClass(env, s->activity_obj);
     jmethodID listenMid = (*env)->GetMethodID(env, cls, "nativeClipListening", "(Z)V");
     if (listenMid)
-        (*env)->CallVoidMethod(env, g_activity_obj, listenMid, JNI_TRUE);
+        (*env)->CallVoidMethod(env, s->activity_obj, listenMid, JNI_TRUE);
 
     start_event_thread(s);
 
     // Initial clipboard sync: read current system clipboard and send to producer
     jmethodID syncMethod = (*env)->GetMethodID(env, cls, "nativeClipboardSync", "()V");
     if (syncMethod)
-        (*env)->CallVoidMethod(env, g_activity_obj, syncMethod);
+        (*env)->CallVoidMethod(env, s->activity_obj, syncMethod);
 
     (*g_jvm)->DetachCurrentThread(g_jvm);
 }
@@ -600,40 +610,130 @@ static void copy_jstring(JNIEnv *env, jstring js, char *dst, size_t dstsz)
     }
 }
 
+/* Every JNI entry point below takes a jlong handle -- the consumer_state* returned
+ * by nativeCreate -- so multiple instances (windows) coexist in one process. */
+#define STATE(h) ((struct consumer_state *)(uintptr_t)(h))
+
+JNIEXPORT jlong JNICALL
+Java_com_anland_consumer_Native_nativeCreate(JNIEnv *env, jclass clazz)
+{
+    (void)env; (void)clazz;
+    struct consumer_state *s = calloc(1, sizeof(*s));
+    if (!s)
+        return 0;
+    pthread_mutex_init(&s->lock, NULL);
+    pthread_mutex_init(&s->cfg_lock, NULL);
+    strncpy(s->cfg_socket_path, "/data/local/tmp/display_daemon.sock",
+            sizeof(s->cfg_socket_path) - 1);
+    s->audio = audio_create();
+    LOGI("instance %p created", (void *)s);
+    return (jlong)(uintptr_t)s;
+}
+
+JNIEXPORT void JNICALL
+Java_com_anland_consumer_Native_nativeDestroy(JNIEnv *env, jclass clazz, jlong handle)
+{
+    struct consumer_state *s = STATE(handle);
+    if (!s)
+        return;
+
+    /* Stop the transport (mirrors nativeStop), release the camera client + audio
+     * bridge, then free. */
+    pthread_mutex_lock(&s->lock);
+    if (s->running) {
+        s->running = false;
+        pthread_mutex_unlock(&s->lock);
+        pthread_join(s->render_thread, NULL);
+        pthread_mutex_lock(&s->lock);
+    }
+    if (s->ctx) {
+        stop_event_thread(s);
+        disconnect(s->ctx);
+        s->ctx = NULL;
+    }
+    cleanup_dmabufs(s);
+    if (s->window) {
+        ANativeWindow_release(s->window);
+        s->window = NULL;
+    }
+    pthread_mutex_unlock(&s->lock);
+
+    audio_destroy(s->audio);
+    s->audio = NULL;
+    camera_release_client(s);   /* window gone: tear down its camera channels */
+
+    if (s->activity_obj && g_jvm) {
+        JNIEnv *e = NULL;
+        bool attached = false;
+        if ((*g_jvm)->GetEnv(g_jvm, (void **)&e, JNI_VERSION_1_6) == JNI_EDETACHED)
+            attached = ((*g_jvm)->AttachCurrentThread(g_jvm, &e, NULL) == 0);
+        if (e)
+            (*e)->DeleteGlobalRef(e, s->activity_obj);
+        if (attached)
+            (*g_jvm)->DetachCurrentThread(g_jvm);
+    }
+    pthread_mutex_destroy(&s->cfg_lock);
+    pthread_mutex_destroy(&s->lock);
+    LOGI("instance %p destroyed", (void *)s);
+    free(s);
+}
+
+/* Mark this instance focused (real camera frames go to the focused instance; others
+ * get blank frames). Called from Java on window focus gain. */
+JNIEXPORT void JNICALL
+Java_com_anland_consumer_Native_nativeSetFocused(
+    JNIEnv *env, jclass clazz, jlong handle, jboolean focused)
+{
+    (void)env; (void)clazz;
+    struct consumer_state *s = STATE(handle);
+    if (s && focused)
+        camera_set_focus(s);
+}
+
 JNIEXPORT void JNICALL
 Java_com_anland_consumer_Native_nativeConfigure(
-    JNIEnv *env, jclass clazz, jstring socketPath, jboolean useRoot,
+    JNIEnv *env, jclass clazz, jlong handle, jstring socketPath, jboolean useRoot,
     jstring helperPath, jstring bridgePath)
 {
-    pthread_mutex_lock(&cfg_lock);
-    char tmp[sizeof(cfg_socket_path)];
+    struct consumer_state *s = STATE(handle);
+    if (!s)
+        return;
+    pthread_mutex_lock(&s->cfg_lock);
+    char tmp[sizeof(s->cfg_socket_path)];
     copy_jstring(env, socketPath, tmp, sizeof(tmp));
     if (tmp[0] != '\0')
-        memcpy(cfg_socket_path, tmp, sizeof(cfg_socket_path));
-    cfg_use_root = (useRoot == JNI_TRUE);
-    copy_jstring(env, helperPath, cfg_helper_path, sizeof(cfg_helper_path));
-    copy_jstring(env, bridgePath, cfg_bridge_path, sizeof(cfg_bridge_path));
-    pthread_mutex_unlock(&cfg_lock);
+        memcpy(s->cfg_socket_path, tmp, sizeof(s->cfg_socket_path));
+    s->cfg_use_root = (useRoot == JNI_TRUE);
+    copy_jstring(env, helperPath, s->cfg_helper_path, sizeof(s->cfg_helper_path));
+    copy_jstring(env, bridgePath, s->cfg_bridge_path, sizeof(s->cfg_bridge_path));
+    pthread_mutex_unlock(&s->cfg_lock);
 
     LOGI("configured: socket=%s root=%d helper=%s bridge=%s",
-         cfg_socket_path, cfg_use_root, cfg_helper_path, cfg_bridge_path);
+         s->cfg_socket_path, s->cfg_use_root, s->cfg_helper_path, s->cfg_bridge_path);
 }
 
 JNIEXPORT void JNICALL
 Java_com_anland_consumer_Native_nativeSetCustomResolution(
-    JNIEnv* env, jclass clazz, jint width, jint height)
+    JNIEnv* env, jclass clazz, jlong handle, jint width, jint height)
 {
-    pthread_mutex_lock(&cfg_lock);
-    cfg_custom_width = width;
-    cfg_custom_height = height;
-    pthread_mutex_unlock(&cfg_lock);
+    struct consumer_state *s = STATE(handle);
+    if (!s)
+        return;
+    pthread_mutex_lock(&s->cfg_lock);
+    s->cfg_custom_width = width;
+    s->cfg_custom_height = height;
+    pthread_mutex_unlock(&s->cfg_lock);
     LOGI("custom resolution: %dx%d", width, height);
 }
 
 JNIEXPORT void JNICALL
 Java_com_anland_consumer_Native_nativeStart(
-    JNIEnv *env, jclass clazz, jobject surface, jobject callbackTarget)
+    JNIEnv *env, jclass clazz, jlong handle, jobject surface, jobject callbackTarget)
 {
+    struct consumer_state *s = STATE(handle);
+    if (!s)
+        return;
+
     if (!api_loaded) {
         if (anw_api_load(&api) < 0) {
             LOGE("failed to load ANativeWindow hidden API");
@@ -642,212 +742,223 @@ Java_com_anland_consumer_Native_nativeStart(
         api_loaded = true;
     }
 
-    pthread_mutex_lock(&g_state.lock);
+    pthread_mutex_lock(&s->lock);
 
-    if (g_state.running) {
-        g_state.running = false;
-        pthread_mutex_unlock(&g_state.lock);
-        pthread_join(g_state.render_thread, NULL);
-        pthread_mutex_lock(&g_state.lock);
+    if (s->running) {
+        s->running = false;
+        pthread_mutex_unlock(&s->lock);
+        pthread_join(s->render_thread, NULL);
+        pthread_mutex_lock(&s->lock);
     }
 
-    if (g_state.ctx) {
-        disconnect(g_state.ctx);
-        g_state.ctx = NULL;
+    if (s->ctx) {
+        disconnect(s->ctx);
+        s->ctx = NULL;
     }
-    motion_has_last = false;
-    motion_has_last = false;
-    cleanup_dmabufs(&g_state);
+    s->motion_has_last = false;
+    cleanup_dmabufs(s);
 
-    if (g_state.window) {
-        ANativeWindow_release(g_state.window);
-        g_state.window = NULL;
+    if (s->window) {
+        ANativeWindow_release(s->window);
+        s->window = NULL;
     }
 
-    g_state.window = ANativeWindow_fromSurface(env, surface);
-    if (!g_state.window) {
+    s->window = ANativeWindow_fromSurface(env, surface);
+    if (!s->window) {
         LOGE("ANativeWindow_fromSurface failed");
-        pthread_mutex_unlock(&g_state.lock);
+        pthread_mutex_unlock(&s->lock);
         return;
     }
 
-    /* Save JVM & activity refs for event-thread JNI callbacks. */
+    /* Save JVM (process-global) and this instance's clipboard callback target. */
     if (!g_jvm) {
         (*env)->GetJavaVM(env, &g_jvm);
     }
-    if (g_activity_obj) {
-        (*env)->DeleteGlobalRef(env, g_activity_obj);
+    if (s->activity_obj) {
+        (*env)->DeleteGlobalRef(env, s->activity_obj);
     }
     /* Static natives have no `thiz`; the Java layer passes the object whose
      * nativeSetClipboardText / nativeClipListening / nativeClipboardSync the
      * event thread calls back into (the Clipboard instance). */
-    g_activity_obj = (*env)->NewGlobalRef(env, callbackTarget);
+    s->activity_obj = (*env)->NewGlobalRef(env, callbackTarget);
 
-    g_state.running = true;
-    g_state.need_reconnect = true;
-    pthread_create(&g_state.render_thread, NULL, render_thread_func, &g_state);
+    s->running = true;
+    s->need_reconnect = true;
+    pthread_create(&s->render_thread, NULL, render_thread_func, s);
 
     /* Audio streams live independently of the connection; the render thread attaches
      * the fd via audio_set_ctx() once connected. */
-    audio_start();
+    audio_start(s->audio);
 
-    pthread_mutex_unlock(&g_state.lock);
+    pthread_mutex_unlock(&s->lock);
 }
 
 JNIEXPORT void JNICALL
 Java_com_anland_consumer_Native_nativeStop(
-    JNIEnv *env, jclass clazz)
+    JNIEnv *env, jclass clazz, jlong handle)
 {
-    pthread_mutex_lock(&g_state.lock);
+    struct consumer_state *s = STATE(handle);
+    if (!s)
+        return;
 
-    if (g_state.running) {
-        g_state.running = false;
-        pthread_mutex_unlock(&g_state.lock);
-        pthread_join(g_state.render_thread, NULL);
-        pthread_mutex_lock(&g_state.lock);
+    pthread_mutex_lock(&s->lock);
+
+    if (s->running) {
+        s->running = false;
+        pthread_mutex_unlock(&s->lock);
+        pthread_join(s->render_thread, NULL);
+        pthread_mutex_lock(&s->lock);
     }
 
     /* Stop audio before the ctx (and its fd) is torn down. */
-    audio_set_ctx(NULL);
-    audio_stop();
+    audio_set_ctx(s->audio, NULL);
+    audio_stop(s->audio);
 
-    if (g_state.ctx) {
-        stop_event_thread(&g_state);
-        disconnect(g_state.ctx);
-        g_state.ctx = NULL;
+    if (s->ctx) {
+        stop_event_thread(s);
+        disconnect(s->ctx);
+        s->ctx = NULL;
     }
 
     // Disable clip listener on Java side
-    if (g_jvm && g_activity_obj) {
-        JNIEnv *env = NULL;
+    if (g_jvm && s->activity_obj) {
+        JNIEnv *env2 = NULL;
         bool attached = false;
-        if ((*g_jvm)->GetEnv(g_jvm, (void **)&env, JNI_VERSION_1_6) == JNI_EDETACHED) {
-            if ((*g_jvm)->AttachCurrentThread(g_jvm, &env, NULL) == 0)
+        if ((*g_jvm)->GetEnv(g_jvm, (void **)&env2, JNI_VERSION_1_6) == JNI_EDETACHED) {
+            if ((*g_jvm)->AttachCurrentThread(g_jvm, &env2, NULL) == 0)
                 attached = true;
         }
-        if (env) {
-            jclass cls = (*env)->GetObjectClass(env, g_activity_obj);
-            jmethodID mid = (*env)->GetMethodID(env, cls, "nativeClipListening", "(Z)V");
+        if (env2) {
+            jclass cls = (*env2)->GetObjectClass(env2, s->activity_obj);
+            jmethodID mid = (*env2)->GetMethodID(env2, cls, "nativeClipListening", "(Z)V");
             if (mid)
-                (*env)->CallVoidMethod(env, g_activity_obj, mid, JNI_FALSE);
+                (*env2)->CallVoidMethod(env2, s->activity_obj, mid, JNI_FALSE);
         }
         if (attached)
             (*g_jvm)->DetachCurrentThread(g_jvm);
     }
 
-    cleanup_dmabufs(&g_state);
+    cleanup_dmabufs(s);
 
-    if (g_state.window) {
-        ANativeWindow_release(g_state.window);
-        g_state.window = NULL;
+    if (s->window) {
+        ANativeWindow_release(s->window);
+        s->window = NULL;
     }
 
-    pthread_mutex_unlock(&g_state.lock);
+    pthread_mutex_unlock(&s->lock);
 }
 
 JNIEXPORT void JNICALL
 Java_com_anland_consumer_Native_nativeSetRefreshRate(
-    JNIEnv *env, jclass clazz, jfloat hz)
+    JNIEnv *env, jclass clazz, jlong handle, jfloat hz)
 {
-    if (hz <= 0.0f)
+    struct consumer_state *s = STATE(handle);
+    if (!s || hz <= 0.0f)
         return;
-    g_state.refresh_mhz = (uint32_t)(hz * 1000.0f + 0.5f);
+    s->refresh_mhz = (uint32_t)(hz * 1000.0f + 0.5f);
     // Apply live if already connected; otherwise do_connect() seeds it.
-    send_refresh_rate(&g_state);
+    send_refresh_rate(s);
 }
 
 JNIEXPORT void JNICALL
 Java_com_anland_consumer_Native_nativeSendTouch(
-    JNIEnv *env, jclass clazz, jint action, jfloat x, jfloat y, jint pointer_id)
+    JNIEnv *env, jclass clazz, jlong handle, jint action, jfloat x, jfloat y, jint pointer_id)
 {
-    if (!g_state.ctx)
+    struct consumer_state *s = STATE(handle);
+    if (!s || !s->ctx)
         return;
     struct InputEvent ev = {
         .type = INPUT_TYPE_TOUCH,
         .touch = { .action = action, .x = x, .y = y, .pointer_id = pointer_id },
     };
-    push_input_event(g_state.ctx, &ev);
+    push_input_event(s->ctx, &ev);
 }
 
 JNIEXPORT void JNICALL
 Java_com_anland_consumer_Native_nativeSendTouchFrame(
-    JNIEnv *env, jclass clazz)
+    JNIEnv *env, jclass clazz, jlong handle)
 {
-    if (!g_state.ctx)
+    struct consumer_state *s = STATE(handle);
+    if (!s || !s->ctx)
         return;
     struct InputEvent ev = {
         .type = INPUT_TYPE_TOUCH_FRAME,
     };
-    push_input_event(g_state.ctx, &ev);
+    push_input_event(s->ctx, &ev);
 }
 
 JNIEXPORT void JNICALL
 Java_com_anland_consumer_Native_nativeSendKey(
-    JNIEnv *env, jclass clazz, jint action, jint keycode)
+    JNIEnv *env, jclass clazz, jlong handle, jint action, jint keycode)
 {
-    if (!g_state.ctx)
+    struct consumer_state *s = STATE(handle);
+    if (!s || !s->ctx)
         return;
     struct InputEvent ev = {
         .type = INPUT_TYPE_KEY,
         .key = { .action = action, .keycode = keycode },
     };
-    push_input_event(g_state.ctx, &ev);
+    push_input_event(s->ctx, &ev);
 }
 
 JNIEXPORT void JNICALL
 Java_com_anland_consumer_Native_nativeSendMouseMotion(
-    JNIEnv *env, jclass clazz, jfloat x, jfloat y, jfloat dx, jfloat dy)
+    JNIEnv *env, jclass clazz, jlong handle, jfloat x, jfloat y, jfloat dx, jfloat dy)
 {
-    if (!g_state.ctx)
+    struct consumer_state *s = STATE(handle);
+    if (!s || !s->ctx)
         return;
 
-    if (dx == 0.0f && dy == 0.0f && motion_has_last) {
-        dx = x - motion_last_x;
-        dy = y - motion_last_y;
+    if (dx == 0.0f && dy == 0.0f && s->motion_has_last) {
+        dx = x - s->motion_last_x;
+        dy = y - s->motion_last_y;
     }
 
-    motion_last_x = x;
-    motion_last_y = y;
-    motion_has_last = true;
+    s->motion_last_x = x;
+    s->motion_last_y = y;
+    s->motion_has_last = true;
 
     struct InputEvent ev = {
         .type = INPUT_TYPE_POINTER_MOTION,
         .pointer_motion = { .x = x, .y = y, .dx = dx, .dy = dy },
     };
-    push_input_event(g_state.ctx, &ev);
+    push_input_event(s->ctx, &ev);
 }
 
 JNIEXPORT void JNICALL
 Java_com_anland_consumer_Native_nativeSendMouseButton(
-    JNIEnv *env, jclass clazz, jint button, jboolean pressed)
+    JNIEnv *env, jclass clazz, jlong handle, jint button, jboolean pressed)
 {
-    if (!g_state.ctx)
+    struct consumer_state *s = STATE(handle);
+    if (!s || !s->ctx)
         return;
     struct InputEvent ev = {
         .type = INPUT_TYPE_POINTER_BUTTON,
         .pointer_button = { .button = button, .pressed = pressed ? 1 : 0 },
     };
-    push_input_event(g_state.ctx, &ev);
+    push_input_event(s->ctx, &ev);
 }
 
 JNIEXPORT void JNICALL
 Java_com_anland_consumer_Native_nativeSendMouseScroll(
-    JNIEnv *env, jclass clazz, jint axis, jfloat value)
+    JNIEnv *env, jclass clazz, jlong handle, jint axis, jfloat value)
 {
-    if (!g_state.ctx)
+    struct consumer_state *s = STATE(handle);
+    if (!s || !s->ctx)
         return;
     struct InputEvent ev = {
         .type = INPUT_TYPE_POINTER_AXIS,
         .pointer_axis = { .axis = axis, .value = value, .discrete = 0 },
     };
-    push_input_event(g_state.ctx, &ev);
+    push_input_event(s->ctx, &ev);
 }
 
 JNIEXPORT void JNICALL
 Java_com_anland_consumer_Native_nativeSendClipboard(
-    JNIEnv *env, jclass clazz, jbyteArray data)
+    JNIEnv *env, jclass clazz, jlong handle, jbyteArray data)
 {
-    if (!g_state.ctx)
+    struct consumer_state *s = STATE(handle);
+    if (!s || !s->ctx)
         return;
 
     jsize len = (*env)->GetArrayLength(env, data);
@@ -863,15 +974,16 @@ Java_com_anland_consumer_Native_nativeSendClipboard(
         .type = INPUT_TYPE_CLIPBOARD,
         .clipboard = { .size = (uint32_t)len },
     };
-    push_input_event_with_length(g_state.ctx, &ev, buf, len);
+    push_input_event_with_length(s->ctx, &ev, buf, len);
     free(buf);
 }
 
 JNIEXPORT void JNICALL
 Java_com_anland_consumer_Native_nativeSendTextInput(
-    JNIEnv *env, jclass clazz, jbyteArray data)
+    JNIEnv *env, jclass clazz, jlong handle, jbyteArray data)
 {
-    if (!g_state.ctx)
+    struct consumer_state *s = STATE(handle);
+    if (!s || !s->ctx)
         return;
 
     jsize len = (*env)->GetArrayLength(env, data);
@@ -887,20 +999,26 @@ Java_com_anland_consumer_Native_nativeSendTextInput(
         .type = INPUT_TYPE_TEXT_INPUT,
         .text_input = { .size = (uint32_t)len },
     };
-    push_input_event_with_length(g_state.ctx, &ev, buf, len);
+    push_input_event_with_length(s->ctx, &ev, buf, len);
     free(buf);
 }
 
 JNIEXPORT void JNICALL
 Java_com_anland_consumer_Native_nativeSetMicEnabled(
-    JNIEnv *env, jclass clazz, jboolean enabled)
+    JNIEnv *env, jclass clazz, jlong handle, jboolean enabled)
 {
-    audio_set_mic_enabled(enabled == JNI_TRUE);
+    struct consumer_state *s = STATE(handle);
+    if (!s)
+        return;
+    audio_set_mic_enabled(s->audio, enabled == JNI_TRUE);
 }
 
 JNIEXPORT void JNICALL
 Java_com_anland_consumer_Native_nativeSetAudioLatency(
-    JNIEnv *env, jclass clazz, jint speakerMs, jint micMs)
+    JNIEnv *env, jclass clazz, jlong handle, jint speakerMs, jint micMs)
 {
-    audio_set_latency(speakerMs, micMs);
+    struct consumer_state *s = STATE(handle);
+    if (!s)
+        return;
+    audio_set_latency(s->audio, speakerMs, micMs);
 }

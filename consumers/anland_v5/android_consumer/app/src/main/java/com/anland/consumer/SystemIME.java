@@ -47,12 +47,14 @@ public final class SystemIME {
 
     private final Activity activity;
     private final Host host;
+    private final Native mNative;
     private InputMethodManager imm;
     private EditText hiddenInput;
 
-    SystemIME(Activity activity, Host host) {
+    SystemIME(Activity activity, Host host, Native n) {
         this.activity = activity;
         this.host = host;
+        this.mNative = n;
         initHiddenInput();
     }
 
@@ -111,12 +113,12 @@ public final class SystemIME {
         if (mMirror.length() > MIRROR_CAP) {
             mMirror.delete(0, mMirror.length() - MIRROR_CAP);
         }
-        Native.nativeSendTextInput(text.getBytes(StandardCharsets.UTF_8));
+        mNative.sendTextInput(text.getBytes(StandardCharsets.UTF_8));
     }
 
     private void tapKey(int evdevCode) {
-        Native.nativeSendKey(0, evdevCode);
-        Native.nativeSendKey(1, evdevCode);
+        mNative.sendKey(0, evdevCode);
+        mNative.sendKey(1, evdevCode);
     }
 
     // Maps soft-keyboard characters to Android key codes so a bar modifier can be
@@ -287,9 +289,9 @@ public final class SystemIME {
                 return super.sendKeyEvent(event);
             }
             if (event.getAction() == KeyEvent.ACTION_DOWN) {
-                Native.nativeSendKey(0, evdev);
+                mNative.sendKey(0, evdev);
             } else if (event.getAction() == KeyEvent.ACTION_UP) {
-                Native.nativeSendKey(1, evdev);
+                mNative.sendKey(1, evdev);
                 // Keep the mirror consistent with a raw key edit. A backspace pops the
                 // tail; anything else (Enter, Tab, arrows, ...) moves the cursor or
                 // inserts content our tail-only model can't track, so drop the mirror
@@ -371,7 +373,27 @@ public final class SystemIME {
             hiddenInput.setFocusable(true);
             hiddenInput.setFocusableInTouchMode(true);
             hiddenInput.requestFocus();
-            imm.showSoftInput(hiddenInput, InputMethodManager.SHOW_IMPLICIT);
+            // A secondary window is a fresh freeform/multi-window task: the IMM
+            // registers hiddenInput as its served view asynchronously on the focus
+            // change, so an immediate showSoftInput() here races that and no-ops.
+            // Post the request so it runs after focus settles, and retry once if the
+            // IME wasn't actually shown — the system also drops some SHOW_IMPLICIT
+            // requests for windows that aren't the current full input target.
+            hiddenInput.post(() -> {
+                if (!hiddenInput.hasWindowFocus()) hiddenInput.requestFocus();
+                imm.showSoftInput(hiddenInput, InputMethodManager.SHOW_IMPLICIT,
+                    new android.os.ResultReceiver(hiddenInput.getHandler()) {
+                        @Override
+                        protected void onReceiveResult(int resultCode, android.os.Bundle data) {
+                            if (resultCode == InputMethodManager.RESULT_UNCHANGED_HIDDEN
+                                    || resultCode == InputMethodManager.RESULT_HIDDEN) {
+                                hiddenInput.postDelayed(() ->
+                                    imm.showSoftInput(hiddenInput,
+                                        InputMethodManager.SHOW_IMPLICIT), 50);
+                            }
+                        }
+                    });
+            });
             // In freeform / small-window mode the IME appears as a floating
             // window that does NOT trigger window insets, so applyImeInset()
             // is never called and the extra-keys bar stays hidden.  Show it

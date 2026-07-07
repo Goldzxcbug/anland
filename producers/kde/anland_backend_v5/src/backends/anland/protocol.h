@@ -66,6 +66,7 @@ struct buf_info {
  * The InputEvent carries { service type, fdnum }; the fdnum fds follow as a
  * separate DATA_MSG_INPUT_EXTEND_FDS message (SCM_RIGHTS). */
 #define INPUT_TYPE_RESOURCE       11
+#define INPUT_TYPE_RESOURCE_INVALID 12
 
 /* Service identifiers used by OUTPUT_TYPE_RESOURCES_REQUEST / INPUT_TYPE_RESOURCE. */
 #define SERVICE_TYPE_CAMERA 1

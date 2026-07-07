@@ -60,10 +60,10 @@ void handle_resource_request(struct display_ctx *ctx, struct OutputEvent *event)
     for(i=0;i<ctx->num_services;i++){
         if(ctx->services[i].type == service_type){
             //if failed fds=NULL, num=0
-            struct resources res = ctx->services[i].allocate_resource(event->resources_request.args);
+            struct resources res = ctx->services[i].allocate_resource(event->resources_request.args, ctx->services[i].userdata);
             if (ctx->resources[i].type != -1) {
                 // free previous resource if it was allocated
-                ctx->services[i].free_resource(ctx->resources[i]);
+                ctx->services[i].free_resource(ctx->resources[i], ctx->services[i].userdata);
             }
             ctx->resources[i] = res;
             found = 1;
@@ -82,7 +82,7 @@ void handle_resource_request(struct display_ctx *ctx, struct OutputEvent *event)
 void free_resources(struct display_ctx *ctx){//释放资源，保留服务信息
     for(int i=0;i<ctx->num_services;i++){
         if(ctx->resources[i].type != -1){
-            ctx->services[i].free_resource(ctx->resources[i]);
+            ctx->services[i].free_resource(ctx->resources[i], ctx->services[i].userdata);
             ctx->resources[i].type = -1;
             ctx->resources[i].num = 0;
             ctx->resources[i].fds = NULL;

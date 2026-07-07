@@ -64,9 +64,11 @@ public final class VirtualTouchpad {
     private boolean smoothInitialized = false;
 
     private final Context context;
+    private final Native mNative;
 
-    VirtualTouchpad(Context context) {
+    VirtualTouchpad(Context context, Native n) {
         this.context = context;
+        this.mNative = n;
         touchSlop = ViewConfiguration.get(context).getScaledTouchSlop();
         updateScreenSize();
         mouseX = screenWidth / 2f;
@@ -113,7 +115,7 @@ public final class VirtualTouchpad {
                 isSingleTapCandidate = false;
                 isLongPressPossible = false;
                 if (currentState == STATE_DRAGGING) {
-                    Native.nativeSendMouseButton(0x110, false);
+                    mNative.sendMouseButton(0x110, false);
                     isDraggingActive = false;
                 }
                 if (pointerCount == 2) {
@@ -144,10 +146,10 @@ public final class VirtualTouchpad {
                         hasLongPressed = true;
                         currentState = STATE_DRAGGING;
                         isDraggingActive = true;
-                        Native.nativeSendMouseButton(0x110, true);
+                        mNative.sendMouseButton(0x110, true);
                         mouseX = clamp(mouseX, 0, screenWidth);
                         mouseY = clamp(mouseY, 0, screenHeight);
-                        Native.nativeSendMouseMotion(mouseX, mouseY, 0f, 0f);
+                        mNative.sendMouseMotion(mouseX, mouseY, 0f, 0f);
                         resetSmoothing();
                         break;
                     }
@@ -171,7 +173,7 @@ public final class VirtualTouchpad {
                         float moveY = smoothDy * dynamicScale;
                         mouseX = clamp(mouseX + moveX, 0, screenWidth);
                         mouseY = clamp(mouseY + moveY, 0, screenHeight);
-                        Native.nativeSendMouseMotion(mouseX, mouseY, 0f, 0f);
+                        mNative.sendMouseMotion(mouseX, mouseY, 0f, 0f);
                     }
 
                     lastX1 = x;
@@ -189,10 +191,10 @@ public final class VirtualTouchpad {
                         if (Math.abs(avgDx) > 1 || Math.abs(avgDy) > 1) {
                             isTwoFingerTapCandidate = false;
                             if (Math.abs(avgDy) > Math.abs(avgDx) * 0.5) {
-                                Native.nativeSendMouseScroll(0, -avgDy * 0.5f);
+                                mNative.sendMouseScroll(0, -avgDy * 0.5f);
                             }
                             if (Math.abs(avgDx) > Math.abs(avgDy) * 0.5) {
-                                Native.nativeSendMouseScroll(1, avgDx * 0.5f);
+                                mNative.sendMouseScroll(1, avgDx * 0.5f);
                             }
                             lastX1 = x1;
                             lastY1 = y1;
@@ -226,7 +228,7 @@ public final class VirtualTouchpad {
                 boolean isQuickTap = duration < 300;
 
                 if (isDraggingActive) {
-                    Native.nativeSendMouseButton(0x110, false);
+                    mNative.sendMouseButton(0x110, false);
                     isDraggingActive = false;
                     resetTouchpadState();
                     resetSmoothing();
@@ -234,8 +236,8 @@ public final class VirtualTouchpad {
                 }
 
                 if (isTwoFingerTapCandidate && isQuickTap) {
-                    Native.nativeSendMouseButton(0x111, true);
-                    Native.nativeSendMouseButton(0x111, false);
+                    mNative.sendMouseButton(0x111, true);
+                    mNative.sendMouseButton(0x111, false);
                     resetTouchpadState();
                     resetSmoothing();
                     return true;
@@ -246,15 +248,15 @@ public final class VirtualTouchpad {
                     float dist = (float) Math.hypot(lastX1 - lastTapX, lastY1 - lastTapY);
                     if (gap < 300 && dist < touchSlop && !isDoubleTapPending) {
                         isDoubleTapPending = true;
-                        Native.nativeSendMouseButton(0x110, true);
-                        Native.nativeSendMouseButton(0x110, false);
-                        Native.nativeSendMouseButton(0x110, true);
-                        Native.nativeSendMouseButton(0x110, false);
+                        mNative.sendMouseButton(0x110, true);
+                        mNative.sendMouseButton(0x110, false);
+                        mNative.sendMouseButton(0x110, true);
+                        mNative.sendMouseButton(0x110, false);
                         isDoubleTapPending = false;
                         lastTapTime = 0;
                     } else {
-                        Native.nativeSendMouseButton(0x110, true);
-                        Native.nativeSendMouseButton(0x110, false);
+                        mNative.sendMouseButton(0x110, true);
+                        mNative.sendMouseButton(0x110, false);
                         lastTapTime = event.getEventTime();
                         lastTapX = lastX1;
                         lastTapY = lastY1;
@@ -270,7 +272,7 @@ public final class VirtualTouchpad {
             }
             case MotionEvent.ACTION_CANCEL: {
                 if (isDraggingActive) {
-                    Native.nativeSendMouseButton(0x110, false);
+                    mNative.sendMouseButton(0x110, false);
                     isDraggingActive = false;
                 }
                 resetTouchpadState();

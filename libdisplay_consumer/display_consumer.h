@@ -32,8 +32,10 @@ struct resources {
 struct service_info {
     uint32_t type;
     //资源分配函数指针
-    struct resources (*allocate_resource)(uint32_t* args);//only support 3 args
-    void (*free_resource)(struct resources res);
+    struct resources (*allocate_resource)(uint32_t* args, void* userdata);//only support 3 args
+    void (*free_resource)(struct resources res, void* userdata);
+    //透传给上面两个回调的实例上下文(多实例时用于区分是哪个连接;单实例可为 NULL)
+    void* userdata;
 };
 typedef struct service_info service_info;
 typedef struct resources resources;

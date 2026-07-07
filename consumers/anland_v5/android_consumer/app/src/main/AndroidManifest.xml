@@ -48,6 +48,22 @@
                 android:name="android.app.shortcuts"
                 android:resource="@xml/shortcuts" />
         </activity>
+        <!-- Secondary windows: each launch (with EXTRA_SOCKET_PATH / EXTRA_WINDOW_NAME)
+             opens a new task/window in the same process. documentLaunchMode="always"
+             makes every start a distinct task; empty taskAffinity keeps it out of
+             MainActivity's task. Deliberately not in the launcher. -->
+        <activity
+            android:name=".SecondaryActivity"
+            android:exported="true"
+            android:enableOnBackInvokedCallback="false"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"
+            android:launchMode="standard"
+            android:documentLaunchMode="always"
+            android:taskAffinity="">
+            <property
+                android:name="android.window.PROPERTY_COMPAT_ALLOW_RESTRICTED_RESIZABILITY"
+                android:value="true" />
+        </activity>
         <activity
             android:name=".SettingsActivity"
             android:exported="true"

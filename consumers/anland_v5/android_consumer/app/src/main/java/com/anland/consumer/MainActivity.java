@@ -2,6 +2,7 @@ package com.anland.consumer;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.ActivityManager;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
@@ -60,6 +61,17 @@ public class MainActivity extends Activity
     // this guards that one-time init (see applyCameraState).
     private boolean cameraInited = false;
     private static final String DEFAULT_SOCKET_PATH = "/data/local/tmp/display_daemon.sock";
+    // Multi-instance launch parameters. A secondary window is started with these
+    // Intent extras (see SecondaryActivity / SettingsActivity); the launcher icon
+    // starts MainActivity with none, i.e. the default socket and window name "anland".
+    static final String EXTRA_SOCKET_PATH = "socket_path";
+    static final String EXTRA_WINDOW_NAME = "window_name";
+    // This window's own native transport instance (its own consumer_state handle).
+    private Native mNative;
+    // Socket path from the launch Intent; overrides the saved pref when non-null.
+    private String mSocketOverride = null;
+    // Title shown in recents / freeform (setTaskDescription); default "anland".
+    private String mWindowName = "anland";
     private static final String KEY_ACCESSIBILITY_ENABLED = "accessibility_key_intercept";
     private static final String KEY_EXTRA_KEYS_ENABLED = "extra_keys_bar";
     private static final String KEY_AUTO_SHOW_EXTRA_KEYS = "auto_show_extra_keys";
@@ -117,6 +129,12 @@ public class MainActivity extends Activity
     @Override
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) {
+            // Become the accessibility-key target and the focused instance, so real
+            // camera frames route to this window (others get blank frames).
+            sInstance = this;
+            if (mNative != null) mNative.setFocused(true);
+        }
         if (hasFocus && clipboard != null) {
             clipboard.pushClipboard();
         }
@@ -125,7 +143,7 @@ public class MainActivity extends Activity
     private void pushRefreshRate() {
         Display d = getDisplay();
         if (d != null)
-            Native.nativeSetRefreshRate(d.getRefreshRate());
+            mNative.setRefreshRate(d.getRefreshRate());
     }
 
     // Push the current connection settings (socket path / root mode) to native
@@ -134,18 +152,21 @@ public class MainActivity extends Activity
     // the helper, launched via su, uses to hand back the daemon fd.
     private void applyConnectionConfig() {
         SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
-        String sock = prefs.getString(KEY_SOCKET_PATH, DEFAULT_SOCKET_PATH);
+        // A socket passed on the launch Intent (a secondary window) wins over the
+        // saved pref, so each window can target its own daemon.
+        String sock = (mSocketOverride != null) ? mSocketOverride
+                : prefs.getString(KEY_SOCKET_PATH, DEFAULT_SOCKET_PATH);
         if (sock == null || sock.trim().isEmpty())
             sock = DEFAULT_SOCKET_PATH;
         boolean useRoot = prefs.getBoolean(KEY_USE_ROOT, true);
         String helperPath = getApplicationInfo().nativeLibraryDir + "/libfdhelper.so";
         String bridgePath = getCacheDir().getAbsolutePath() + "/anland_fdbridge.sock";
-        Native.nativeConfigure(sock.trim(), useRoot, helperPath, bridgePath);
+        mNative.configure(sock.trim(), useRoot, helperPath, bridgePath);
         int customW = prefs.getInt("custom_width", 0);
         int customH = prefs.getInt("custom_height", 0);
         customScreenWidth = prefs.getInt("custom_width", 0);
         customScreenHeight = prefs.getInt("custom_height", 0);
-        Native.nativeSetCustomResolution(customW, customH);
+        mNative.setCustomResolution(customW, customH);
     }
 
     @Override
@@ -153,7 +174,22 @@ public class MainActivity extends Activity
         super.onCreate(savedInstanceState);
 
         sInstance = this;
-        clipboard = new Clipboard(this);
+
+        // Each window owns its own native pipeline. Apply the launch parameters:
+        // socket path (overrides the saved pref) and window name (task title).
+        mNative = new Native();
+        Intent launch = getIntent();
+        if (launch != null) {
+            String sock = launch.getStringExtra(EXTRA_SOCKET_PATH);
+            if (sock != null && !sock.trim().isEmpty())
+                mSocketOverride = sock.trim();
+            String name = launch.getStringExtra(EXTRA_WINDOW_NAME);
+            if (name != null && !name.trim().isEmpty())
+                mWindowName = name.trim();
+        }
+        setTaskDescription(new ActivityManager.TaskDescription(mWindowName));
+
+        clipboard = new Clipboard(this, mNative);
 
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);
@@ -163,7 +199,7 @@ public class MainActivity extends Activity
         getWindow().setDecorFitsSystemWindows(false);
 
         surfaceView = new SurfaceView(this);
-        systemIme = new SystemIME(this, this);
+        systemIme = new SystemIME(this, this, mNative);
 
         FrameLayout root = new FrameLayout(this);
         root.addView(surfaceView, new FrameLayout.LayoutParams(
@@ -187,11 +223,11 @@ public class MainActivity extends Activity
         virtualKeyboardView.setOnKeyEventListener(new VirtualKeyboardView.OnKeyEventListener() {
             @Override
             public void onKeyDown(int scanCode) {
-                Native.nativeSendKey(0, scanCode);
+                mNative.sendKey(0, scanCode);
             }
             @Override
             public void onKeyUp(int scanCode) {
-                Native.nativeSendKey(1, scanCode);
+                mNative.sendKey(1, scanCode);
             }
         });
         // Add to root with no gravity – we will position manually.
@@ -240,7 +276,7 @@ public class MainActivity extends Activity
         // ===== 加载触摸板设置 =====
         SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
         isTouchpadMode = prefs.getBoolean(KEY_TOUCHPAD_MODE, false);
-        virtualTouchpad = new VirtualTouchpad(this);
+        virtualTouchpad = new VirtualTouchpad(this, mNative);
         virtualTouchpad.setAccelStrength(prefs.getFloat(KEY_MOUSE_ACCEL, 1.0f));
     }
 
@@ -383,9 +419,9 @@ public class MainActivity extends Activity
         // later reconnect. Idempotent, so safe to call on every resume.
         applyCameraState();
         if (surfaceReady) {
-            Native.nativeStop();
+            mNative.stop();
             applyConnectionConfig();
-            Native.nativeStart(surfaceView.getHolder().getSurface(), clipboard);
+            mNative.start(surfaceView.getHolder().getSurface(), clipboard);
             pushRefreshRate();
             applyMicState();
             applyAudioLatency();
@@ -405,17 +441,22 @@ public class MainActivity extends Activity
         DisplayManager dm = getSystemService(DisplayManager.class);
         if (dm != null)
             dm.unregisterDisplayListener(displayListener);
-        Native.nativeStop();
+        mNative.stop();
     }
 
     @Override
     protected void onDestroy() {
         NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
         if (nm != null) nm.cancel(NOTIFICATION_ID);
-        if (cameraInited) {
-            CameraServices.nativeDestroyCameraService();
-            cameraInited = false;
+        // Release only THIS window's native pipeline (its consumer_state, audio bridge
+        // and camera client). The camera service itself is a process-global shared by
+        // every window, so it is intentionally not torn down here -- destroying it
+        // would cut the camera for the other open windows.
+        if (mNative != null) {
+            mNative.destroy();
+            mNative = null;
         }
+        cameraInited = false;
         super.onDestroy();
     }
 
@@ -453,19 +494,19 @@ public class MainActivity extends Activity
         SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
         int speakerMs = prefs.getInt(KEY_SPEAKER_LATENCY_MS, 0);
         int micMs = prefs.getInt(KEY_MIC_LATENCY_MS, 0);
-        Native.nativeSetAudioLatency(speakerMs, micMs);
+        mNative.setAudioLatency(speakerMs, micMs);
     }
 
     private void applyMicState() {
         SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
         boolean want = prefs.getBoolean(KEY_MIC_ENABLED, false);
         if (!want) {
-            Native.nativeSetMicEnabled(false);
+            mNative.setMicEnabled(false);
             return;
         }
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO)
                 == PackageManager.PERMISSION_GRANTED) {
-            Native.nativeSetMicEnabled(true);
+            mNative.setMicEnabled(true);
         } else {
             requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO},
                                REQ_RECORD_AUDIO);
@@ -479,7 +520,7 @@ public class MainActivity extends Activity
         if (requestCode == REQ_RECORD_AUDIO) {
             boolean granted = grantResults.length > 0
                     && grantResults[0] == PackageManager.PERMISSION_GRANTED;
-            Native.nativeSetMicEnabled(granted);
+            mNative.setMicEnabled(granted);
         } else if (requestCode == REQ_CAMERA) {
             boolean granted = grantResults.length > 0
                     && grantResults[0] == PackageManager.PERMISSION_GRANTED;
@@ -508,9 +549,9 @@ public class MainActivity extends Activity
         surfaceReady = true;
         // Same ordering guarantee as onResume: camera service settled before connect.
         applyCameraState();
-        Native.nativeStop();
+        mNative.stop();
         applyConnectionConfig();
-        Native.nativeStart(holder.getSurface(), clipboard);
+        mNative.start(holder.getSurface(), clipboard);
         pushRefreshRate();
         applyMicState();
         applyAudioLatency();
@@ -522,7 +563,7 @@ public class MainActivity extends Activity
     @Override
     public void surfaceDestroyed(SurfaceHolder holder) {
         surfaceReady = false;
-        Native.nativeStop();
+        mNative.stop();
     }
 
 
@@ -593,9 +634,9 @@ public class MainActivity extends Activity
     // scales with the parsed row count. Records the layout JSON it was built from.
     private void buildExtraKeysBar() {
         extraKeysBar = new ExtraKeysBar(this, new ExtraKeysBar.Sender() {
-            @Override public void key(int action, int evdev) { Native.nativeSendKey(action, evdev); }
+            @Override public void key(int action, int evdev) { mNative.sendKey(action, evdev); }
             @Override public void text(String s) {
-                if (!s.isEmpty()) Native.nativeSendTextInput(s.getBytes(StandardCharsets.UTF_8));
+                if (!s.isEmpty()) mNative.sendTextInput(s.getBytes(StandardCharsets.UTF_8));
             }
             // Tapping the ⌨ key keeps the original behaviour: toggle the system IME.
             @Override public void toggleKeyboard() { systemIme.toggleSystemKeyboard(); }
@@ -700,7 +741,7 @@ public class MainActivity extends Activity
                 float scaleY = (customScreenHeight > 0 && viewHeight > 0) ? 
                         (float)customScreenHeight / viewHeight : 1.0f;
         
-                Native.nativeSendMouseMotion(event.getX()*scaleX, event.getY()*scaleY,
+                mNative.sendMouseMotion(event.getX()*scaleX, event.getY()*scaleY,
                                       event.getAxisValue(MotionEvent.AXIS_RELATIVE_X),
                                       event.getAxisValue(MotionEvent.AXIS_RELATIVE_Y));
                 return true;
@@ -709,9 +750,9 @@ public class MainActivity extends Activity
                 float vScroll = event.getAxisValue(MotionEvent.AXIS_VSCROLL);
                 float hScroll = event.getAxisValue(MotionEvent.AXIS_HSCROLL);
                 if (vScroll != 0)
-                    Native.nativeSendMouseScroll(0, -vScroll * 10);
+                    mNative.sendMouseScroll(0, -vScroll * 10);
                 if (hScroll != 0)
-                    Native.nativeSendMouseScroll(1, hScroll * 10);
+                    mNative.sendMouseScroll(1, hScroll * 10);
                 return true;
             }
         }
@@ -740,14 +781,14 @@ public class MainActivity extends Activity
 
         int scanCode = event.getScanCode();
         if (scanCode != 0) {
-            Native.nativeSendKey(0, scanCode);
+            mNative.sendKey(0, scanCode);
             return true;
         }
 
         // fallback: when scancode is 0 (e.g. Fn key combos), map via KeyCodeMapper
         int evdev = KeyCodeMapper.getScanCode(keyCode);
         if (evdev != -1) {
-            Native.nativeSendKey(0, evdev);
+            mNative.sendKey(0, evdev);
             return true;
         }
         return true;
@@ -772,19 +813,19 @@ public class MainActivity extends Activity
         int scanCode = event.getScanCode();
         if (scanCode != 0 && event.getKeyCode() == KeyEvent.KEYCODE_UNKNOWN) {
             // Some Fn combos deliver KEYCODE_UNKNOWN with a valid scancode
-            Native.nativeSendKey(event.getAction() == KeyEvent.ACTION_DOWN ? 0 : 1, scanCode);
+            mNative.sendKey(event.getAction() == KeyEvent.ACTION_DOWN ? 0 : 1, scanCode);
             return true;
         }
 
         int evdev = KeyCodeMapper.getScanCode(event.getKeyCode());
         if (evdev != -1) {
-            Native.nativeSendKey(event.getAction() == KeyEvent.ACTION_DOWN ? 0 : 1, evdev);
+            mNative.sendKey(event.getAction() == KeyEvent.ACTION_DOWN ? 0 : 1, evdev);
             return true;
         }
 
         // If both keyCode and scancode are unknown, store/replay raw scancode anyway
         if (scanCode != 0) {
-            Native.nativeSendKey(event.getAction() == KeyEvent.ACTION_DOWN ? 0 : 1, scanCode);
+            mNative.sendKey(event.getAction() == KeyEvent.ACTION_DOWN ? 0 : 1, scanCode);
             return true;
         }
         return true;
@@ -799,14 +840,14 @@ public class MainActivity extends Activity
     public boolean onKeyUp(int keyCode, KeyEvent event) {
         int scanCode = event.getScanCode();
         if (scanCode != 0) {
-            Native.nativeSendKey(1, scanCode);
+            mNative.sendKey(1, scanCode);
             return true;
         }
 
         // fallback: when scancode is 0, map via KeyCodeMapper
         int evdev = KeyCodeMapper.getScanCode(keyCode);
         if (evdev != -1) {
-            Native.nativeSendKey(1, evdev);
+            mNative.sendKey(1, evdev);
             return true;
         }
         return true;
@@ -852,14 +893,14 @@ public class MainActivity extends Activity
             dx = (event.getX() - event.getHistoricalX(0, last))*scaleX;
             dy = (event.getY() - event.getHistoricalY(0, last))*scaleY;
         }
-        Native.nativeSendMouseMotion(event.getX() * scaleX, event.getY() * scaleY, dx, dy);
+        mNative.sendMouseMotion(event.getX() * scaleX, event.getY() * scaleY, dx, dy);
 
         int currentBS = event.getButtonState();
         for (int[] btn : BUTTON_MAP) {
             boolean wasDown = (savedBS & btn[0]) != 0;
             boolean isDown  = (currentBS & btn[0]) != 0;
             if (wasDown != isDown)
-                Native.nativeSendMouseButton(btn[1], isDown);
+                mNative.sendMouseButton(btn[1], isDown);
         }
         savedBS = currentBS;
         return true;
@@ -870,9 +911,9 @@ public class MainActivity extends Activity
             float scrollX = event.getAxisValue(MotionEvent.AXIS_GESTURE_SCROLL_X_DISTANCE);
             float scrollY = event.getAxisValue(MotionEvent.AXIS_GESTURE_SCROLL_Y_DISTANCE);
             if (scrollY != 0)
-                Native.nativeSendMouseScroll(0, scrollY);
+                mNative.sendMouseScroll(0, scrollY);
             if (scrollX != 0)
-                Native.nativeSendMouseScroll(1, -scrollX);
+                mNative.sendMouseScroll(1, -scrollX);
         }
         return true;
     }
@@ -892,40 +933,40 @@ public class MainActivity extends Activity
         switch (action) {
             case MotionEvent.ACTION_DOWN:
             case MotionEvent.ACTION_POINTER_DOWN:
-                Native.nativeSendTouch(0, 
+                mNative.sendTouch(0, 
                     event.getX(pointerIdx) * scaleX, 
                     event.getY(pointerIdx) * scaleY, 
                     pointerId);
-                Native.nativeSendTouchFrame();
+                mNative.sendTouchFrame();
                 return true;
             
             case MotionEvent.ACTION_UP:
             case MotionEvent.ACTION_POINTER_UP:
-                Native.nativeSendTouch(1, 
+                mNative.sendTouch(1, 
                     event.getX(pointerIdx) * scaleX, 
                     event.getY(pointerIdx) * scaleY, 
                     pointerId);
-                Native.nativeSendTouchFrame();
+                mNative.sendTouchFrame();
                 return true;
             
             case MotionEvent.ACTION_MOVE:
                 for (int i = 0; i < event.getPointerCount(); i++) {
-                    Native.nativeSendTouch(2, 
+                    mNative.sendTouch(2, 
                         event.getX(i) * scaleX, 
                         event.getY(i) * scaleY, 
                         event.getPointerId(i));
                 }
-                Native.nativeSendTouchFrame();
+                mNative.sendTouchFrame();
                 return true;
             
             case MotionEvent.ACTION_CANCEL:
                 for (int i = 0; i < event.getPointerCount(); i++) {
-                    Native.nativeSendTouch(1, 
+                    mNative.sendTouch(1, 
                         event.getX(i) * scaleX, 
                         event.getY(i) * scaleY, 
                         event.getPointerId(i));
                 }
-                Native.nativeSendTouchFrame();
+                mNative.sendTouchFrame();
                 return true;
         }
         return false;
