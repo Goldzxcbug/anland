@@ -281,14 +281,14 @@ QPointF AnlandBackend::mapInputToLogical(const QPointF &devicePoint) const
     return logical / output->scale();
 }
 
-// 修改 processInputEvent 函数（使用 if-else 链）
 void AnlandBackend::processInputEvent(const InputEvent &ev)
 {
     if (!m_inputDevice) {
         return;
     }
 
-    if (ev.type == INPUT_TYPE_POINTER_MOTION) {
+    switch (ev.type) {
+    case INPUT_TYPE_POINTER_MOTION: {
         // Both absolute position (x, y) and relative delta (dx, dy) come from the
         // consumer. Use the same mapInputToLogical for both so that dx/dy delivered
         // via wl_pointer.relative_motion match the cursor's position space, giving
@@ -296,20 +296,22 @@ void AnlandBackend::processInputEvent(const InputEvent &ev)
         const QPointF pos = mapInputToLogical(QPointF(ev.pointer_motion.x, ev.pointer_motion.y));
         const QPointF delta = mapInputToLogical(QPointF(ev.pointer_motion.dx, ev.pointer_motion.dy));
         m_inputDevice->pointerMotion(pos, delta, delta);
+        break;
     }
-    else if (ev.type == INPUT_TYPE_POINTER_BUTTON) {
+    case INPUT_TYPE_POINTER_BUTTON:
         m_inputDevice->pointerButton(ev.pointer_button.button, ev.pointer_button.pressed != 0);
-    }
-    else if (ev.type == INPUT_TYPE_POINTER_AXIS) {
+        break;
+    case INPUT_TYPE_POINTER_AXIS: {
         // protocol axis: 0 = vertical scroll, 1 = horizontal scroll (wayland order)
         const PointerAxis axis =
             ev.pointer_axis.axis == 0 ? PointerAxis::Vertical : PointerAxis::Horizontal;
         m_inputDevice->pointerAxis(axis, ev.pointer_axis.value, ev.pointer_axis.discrete * 120);
+        break;
     }
-    else if (ev.type == INPUT_TYPE_KEY) {
+    case INPUT_TYPE_KEY:
         m_inputDevice->keyboardKey(ev.key.keycode, ev.key.action == INPUT_ACTION_DOWN);
-    }
-    else if (ev.type == INPUT_TYPE_TOUCH) {
+        break;
+    case INPUT_TYPE_TOUCH: {
         const QPointF pos = mapInputToLogical(QPointF(ev.touch.x, ev.touch.y));
         switch (ev.touch.action) {
         case INPUT_ACTION_DOWN:
@@ -324,39 +326,42 @@ void AnlandBackend::processInputEvent(const InputEvent &ev)
         default:
             break;
         }
+        break;
     }
-    else if (ev.type == INPUT_TYPE_TOUCH_FRAME) {
+    case INPUT_TYPE_TOUCH_FRAME:
         m_inputDevice->touchFrame();
-    }
-    else if (ev.type == INPUT_TYPE_DISPLAY_REFRESH) {
+        break;
+    case INPUT_TYPE_DISPLAY_REFRESH:
         // Not an input event: the consumer reports its live display refresh rate
         // (mHz) so we can repace the RenderLoop. m_outputs[0] is valid here (used
         // for scale above).
         m_outputs[0]->setRefreshRate(static_cast<int>(ev.display.refresh_mhz));
-    }
-    else if (ev.type == INPUT_TYPE_CLIPBOARD) {
+        break;
+    case INPUT_TYPE_CLIPBOARD: {
         // The clipboard event carries the raw text data as inline payload after the
         // InputEvent header.  ev.clipboard.size tells us how many bytes follow.
         const uint32_t size = ev.clipboard.size;
         if (size == 0)
-            return;
+            break;
         QByteArray text(static_cast<int>(size), Qt::Uninitialized);
         if (poll_input_event_extend_data(m_display, text.data(), size, 5000) == 1) {
             sendClipboardToKWin(text);
         }
+        break;
     }
-    else if (ev.type == INPUT_TYPE_TEXT_INPUT) {
+    case INPUT_TYPE_TEXT_INPUT: {
         // The text input event carries the raw text data as inline payload after
         // the InputEvent header.  ev.text_input.size tells us how many bytes follow.
         const uint32_t size = ev.text_input.size;
         if (size == 0)
-            return;
+            break;
         QByteArray text(static_cast<int>(size), Qt::Uninitialized);
         if (poll_input_event_extend_data(m_display, text.data(), size, 5000) == 1) {
             sendTextInputToKWin(text);
         }
+        break;
     }
-    else if (ev.type == INPUT_TYPE_RESOURCE) {
+    case INPUT_TYPE_RESOURCE: {
         // The consumer is handing back the fds for a service we requested. The fdnum
         // fds follow as a separate DATA_MSG_INPUT_EXTEND_FDS message; receive them now
         // (synchronously, before the next poll_input_event) and route to the engine.
@@ -364,14 +369,14 @@ void AnlandBackend::processInputEvent(const InputEvent &ev)
         const uint32_t fdnum = ev.resource.fdnum;
         constexpr int kMaxFds = 1 + 8; // ctrl + up to MAX_CAMERAS streams
         if (fdnum == 0 || fdnum > kMaxFds)
-            return;
+            break;
         int fds[kMaxFds];
         int got = 0;
         if (poll_input_event_extend_fds(m_display, fds, static_cast<int>(fdnum), &got, 5000) != 1
             || got < static_cast<int>(fdnum)) {
             for (int i = 0; i < got; i++)
                 ::close(fds[i]);
-            return;
+            break;
         }
         if (service == SERVICE_TYPE_CAMERA) {
             // fds[0] = shared control socket, fds[1..] = per-camera stream sockets.
@@ -380,13 +385,18 @@ void AnlandBackend::processInputEvent(const InputEvent &ev)
             for (int i = 0; i < got; i++)
                 ::close(fds[i]);
         }
+        break;
     }
-    else if (ev.type == INPUT_TYPE_RESOURCE_INVALID) {
+    case INPUT_TYPE_RESOURCE_INVALID: {
         const uint32_t service = ev.resource.type;
         qCWarning(KWIN_ANLAND) << "consumer reported invalid resource for service" << service;
         if (service == SERVICE_TYPE_CAMERA) {
             anland_camera_clear();
         }
+        break;
+    }
+    default:
+        break;
     }
 }
 
