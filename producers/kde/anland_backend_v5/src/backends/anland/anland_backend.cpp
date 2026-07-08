@@ -387,13 +387,14 @@ void AnlandBackend::processInputEvent(const InputEvent &ev)
         }
         break;
     }
-    case INPUT_TYPE_RESOURCE_INVALID:
+    case INPUT_TYPE_RESOURCE_INVALID: {
         const uint32_t service = ev.resource.type;
         qCWarning(KWIN_ANLAND) << "consumer reported invalid resource for service" << service;
         if (service == SERVICE_TYPE_CAMERA) {
             anland_camera_clear();
         }
         break;
+    }
     default:
         break;
     }
