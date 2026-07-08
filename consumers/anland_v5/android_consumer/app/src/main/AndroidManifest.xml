@@ -9,6 +9,9 @@
     <!-- Capture the device camera(s) to forward to the Linux producer (Camera2 NDK). -->
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Bring an already-open window's task to the front instead of opening a
+         duplicate when a launch targets a socket that is already on screen. -->
+    <uses-permission android:name="android.permission.REORDER_TASKS" />
     <uses-feature android:name="android.hardware.camera.any" android:required="false" />
 
     <application
@@ -36,10 +39,8 @@
             android:exported="true"
             android:enableOnBackInvokedCallback="false"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"
-            android:launchMode="singleTask">
-            <property
-                android:name="android.window.PROPERTY_COMPAT_ALLOW_RESTRICTED_RESIZABILITY"
-                android:value="true" />
+            android:launchMode="singleTask"
+            android:resizeableActivity="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
@@ -59,11 +60,9 @@
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"
             android:launchMode="standard"
             android:documentLaunchMode="always"
-            android:taskAffinity="">
-            <property
-                android:name="android.window.PROPERTY_COMPAT_ALLOW_RESTRICTED_RESIZABILITY"
-                android:value="true" />
-        </activity>
+            android:resizeableActivity="true"
+            android:taskAffinity="" />
+
         <activity
             android:name=".SettingsActivity"
             android:exported="true"

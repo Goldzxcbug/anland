@@ -72,6 +72,16 @@ public class MainActivity extends Activity
     private String mSocketOverride = null;
     // Title shown in recents / freeform (setTaskDescription); default "anland".
     private String mWindowName = "anland";
+    // Live windows keyed by their resolved socket path, so a launch that targets a
+    // socket already on screen can focus that window instead of opening a duplicate.
+    // Only touched on the main thread (onCreate / onResume / onDestroy).
+    private static final java.util.Map<String, MainActivity> sWindowsBySocket =
+            new java.util.HashMap<>();
+    // The socket path this window is currently registered under in sWindowsBySocket.
+    private String mRegisteredSocket = null;
+    // Set when onCreate found the target socket missing and bounced to Settings
+    // (no pipeline was ever initialized). Makes onPause/onResume no-op-and-exit.
+    private boolean mForceSettings = false;
     private static final String KEY_ACCESSIBILITY_ENABLED = "accessibility_key_intercept";
     private static final String KEY_EXTRA_KEYS_ENABLED = "extra_keys_bar";
     private static final String KEY_AUTO_SHOW_EXTRA_KEYS = "auto_show_extra_keys";
@@ -152,16 +162,11 @@ public class MainActivity extends Activity
     // the helper, launched via su, uses to hand back the daemon fd.
     private void applyConnectionConfig() {
         SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
-        // A socket passed on the launch Intent (a secondary window) wins over the
-        // saved pref, so each window can target its own daemon.
-        String sock = (mSocketOverride != null) ? mSocketOverride
-                : prefs.getString(KEY_SOCKET_PATH, DEFAULT_SOCKET_PATH);
-        if (sock == null || sock.trim().isEmpty())
-            sock = DEFAULT_SOCKET_PATH;
+        String sock = resolveSocketPath();
         boolean useRoot = prefs.getBoolean(KEY_USE_ROOT, true);
         String helperPath = getApplicationInfo().nativeLibraryDir + "/libfdhelper.so";
         String bridgePath = getCacheDir().getAbsolutePath() + "/anland_fdbridge.sock";
-        mNative.configure(sock.trim(), useRoot, helperPath, bridgePath);
+        mNative.configure(sock, useRoot, helperPath, bridgePath);
         int customW = prefs.getInt("custom_width", 0);
         int customH = prefs.getInt("custom_height", 0);
         customScreenWidth = prefs.getInt("custom_width", 0);
@@ -169,15 +174,38 @@ public class MainActivity extends Activity
         mNative.setCustomResolution(customW, customH);
     }
 
+    // The daemon socket this window targets: the launch-Intent override if any,
+    // else the saved pref, else the built-in default. Never null/blank. This is
+    // both the native connection target and this window's dedup key.
+    private String resolveSocketPath() {
+        String sock = mSocketOverride;
+        if (sock == null || sock.trim().isEmpty())
+            sock = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                    .getString(KEY_SOCKET_PATH, DEFAULT_SOCKET_PATH);
+        if (sock == null || sock.trim().isEmpty())
+            sock = DEFAULT_SOCKET_PATH;
+        return sock.trim();
+    }
+
+    // (Re)register this window under its current socket in sWindowsBySocket. A
+    // window with no Intent override resolves its socket from the saved pref, which
+    // the user can change in Settings, so re-key whenever it may have moved.
+    private void registerWindow() {
+        String sock = resolveSocketPath();
+        if (sock.equals(mRegisteredSocket)) return;
+        if (mRegisteredSocket != null)
+            sWindowsBySocket.remove(mRegisteredSocket, this);
+        sWindowsBySocket.put(sock, this);
+        mRegisteredSocket = sock;
+    }
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        sInstance = this;
-
-        // Each window owns its own native pipeline. Apply the launch parameters:
-        // socket path (overrides the saved pref) and window name (task title).
-        mNative = new Native();
+        // Apply the launch parameters: socket path (overrides the saved pref) and
+        // window name (task title). Read them before anything else so the dedup
+        // check below sees this window's target socket.
         Intent launch = getIntent();
         if (launch != null) {
             String sock = launch.getStringExtra(EXTRA_SOCKET_PATH);
@@ -187,6 +215,36 @@ public class MainActivity extends Activity
             if (name != null && !name.trim().isEmpty())
                 mWindowName = name.trim();
         }
+
+        // Skip opening a duplicate: if another live window already targets this
+        // socket, bring it to the front and drop this (freshly spawned) task.
+        MainActivity existing = sWindowsBySocket.get(resolveSocketPath());
+        if (existing != null && existing != this && !existing.isFinishing()) {
+            ActivityManager am = getSystemService(ActivityManager.class);
+            if (am != null) am.moveTaskToFront(existing.getTaskId(), 0);
+            finishAndRemoveTask();
+            return;
+        }
+
+        // The target socket must exist before we bring up any pipeline. If it does
+        // not: a parameter launch has nowhere to fall back to (toast and quit); a
+        // plain launcher start bounces to Settings so the user can fix the path.
+        if (!new java.io.File(resolveSocketPath()).exists()) {
+            if (mSocketOverride != null) {
+                android.widget.Toast.makeText(this, "Socket Not Found",
+                        android.widget.Toast.LENGTH_SHORT).show();
+                finishAndRemoveTask();
+                return;
+            }
+            mForceSettings = true;
+            startActivity(new Intent(this, SettingsActivity.class));
+            return;
+        }
+
+        sInstance = this;
+
+        // Each window owns its own native pipeline.
+        mNative = new Native();
         setTaskDescription(new ActivityManager.TaskDescription(mWindowName));
 
         clipboard = new Clipboard(this, mNative);
@@ -278,6 +336,8 @@ public class MainActivity extends Activity
         isTouchpadMode = prefs.getBoolean(KEY_TOUCHPAD_MODE, false);
         virtualTouchpad = new VirtualTouchpad(this, mNative);
         virtualTouchpad.setAccelStrength(prefs.getFloat(KEY_MOUSE_ACCEL, 1.0f));
+
+        registerWindow();
     }
 
     private static final String NOTIFICATION_CHANNEL = "anland_channel";
@@ -371,6 +431,13 @@ public class MainActivity extends Activity
     protected void onResume() {
         super.onResume();
 
+        // Bounced to Settings from onCreate (socket missing): nothing was set up, so
+        // just exit this window instead of running the connect logic.
+        if (mForceSettings) {
+            finish();
+            return;
+        }
+
         // Show settings notification while in foreground, unless disabled in Settings.
         if (getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
                 .getBoolean(KEY_NOTIFICATION_ENABLED, true)) {
@@ -431,11 +498,17 @@ public class MainActivity extends Activity
         SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
         isTouchpadMode = prefs.getBoolean(KEY_TOUCHPAD_MODE, false);
         virtualTouchpad.setAccelStrength(prefs.getFloat(KEY_MOUSE_ACCEL, 1.0f));
+
+        // The socket pref may have been edited in Settings; keep our dedup key current.
+        registerWindow();
     }
 
     @Override
     protected void onPause() {
         super.onPause();
+        // Socket-missing bounce: no pipeline exists, so skip teardown (mNative is
+        // null) and don't let the jump to Settings trigger any of it.
+        if (mForceSettings) return;
         NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
         if (nm != null) nm.cancel(NOTIFICATION_ID);
         DisplayManager dm = getSystemService(DisplayManager.class);
@@ -446,6 +519,10 @@ public class MainActivity extends Activity
 
     @Override
     protected void onDestroy() {
+        if (mRegisteredSocket != null) {
+            sWindowsBySocket.remove(mRegisteredSocket, this);
+            mRegisteredSocket = null;
+        }
         NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
         if (nm != null) nm.cancel(NOTIFICATION_ID);
         // Release only THIS window's native pipeline (its consumer_state, audio bridge
