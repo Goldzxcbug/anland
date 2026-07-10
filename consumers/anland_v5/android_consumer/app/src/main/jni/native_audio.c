@@ -147,8 +147,19 @@ static void *play_thread_func(void *arg)
         }
 
         struct pollfd pfd = { .fd = fd, .events = POLLIN };
-        if (poll(&pfd, 1, 200) <= 0)
+        if (poll(&pfd, 1, 200) <= 0) {
+            if (b->play) {
+                int16_t silence[1024 * 2] = {0};
+                aaudio_result_t res = AAudioStream_write(b->play, silence, 1024, 0);
+                if (res < 0 && res != -896 /* AAUDIO_ERROR_TIMEOUT */) {
+                    LOGI("AAudio playback stream died during silence (error %d), recovering...", (int)res);
+                    AAudioStream_close(b->play);
+                    b->play = open_stream(AAUDIO_DIRECTION_OUTPUT, b->play_channels);
+                    if (b->play) AAudioStream_requestStart(b->play);
+                }
+            }
             continue;
+        }
         if (pfd.revents & (POLLHUP | POLLERR)) {
             usleep(20000);
             continue;
