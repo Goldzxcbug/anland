@@ -171,8 +171,14 @@ static void *play_thread_func(void *arg)
 
         /* Blocking write with a short timeout: on underrun/overrun AAudio paces us;
          * we never stall the loop longer than the timeout. */
-        AAudioStream_write(b->play, b->rx + sizeof(struct audio_msg), frames,
+        aaudio_result_t res = AAudioStream_write(b->play, b->rx + sizeof(struct audio_msg), frames,
                            20 * 1000 * 1000L);
+        if (res < 0 && res == AAUDIO_ERROR_DISCONNECTED) {
+            LOGI("AAudio playback disconnected, recovering...");
+            AAudioStream_close(b->play);
+            b->play = open_stream(AAUDIO_DIRECTION_OUTPUT, b->play_channels);
+            if (b->play) AAudioStream_requestStart(b->play);
+        }
     }
 
     LOGI("playback thread stopped");
@@ -218,7 +224,19 @@ static void *cap_thread_func(void *arg)
         }
 
         int32_t got = AAudioStream_read(b->rec, buf, mic_frames, 100 * 1000 * 1000L);
-        if (got <= 0)
+        if (got < 0) {
+            if (got == AAUDIO_ERROR_DISCONNECTED) {
+                LOGI("AAudio capture disconnected, recovering...");
+                AAudioStream_close(b->rec);
+                b->rec = open_stream(AAUDIO_DIRECTION_INPUT, b->cap_channels);
+                if (b->rec) {
+                    AAudioStream_requestStart(b->rec);
+                    started = true;
+                }
+            }
+            continue;
+        }
+        if (got == 0)
             continue;
 
         uint32_t bytes = (uint32_t)got * sizeof(int16_t) * b->cap_channels;
