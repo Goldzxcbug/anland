@@ -169,6 +169,7 @@ static void *play_thread_func(void *arg)
         if (frames <= 0)
             continue;
 
+        if (!b->play) continue;
         /* Blocking write with a short timeout: on underrun/overrun AAudio paces us;
          * we never stall the loop longer than the timeout. */
         aaudio_result_t res = AAudioStream_write(b->play, b->rx + sizeof(struct audio_msg), frames,
