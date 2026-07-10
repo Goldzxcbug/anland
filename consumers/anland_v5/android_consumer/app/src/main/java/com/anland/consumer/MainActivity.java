@@ -1025,11 +1025,7 @@ public class MainActivity extends Activity
         int source = event.getSource();
         if ((source & InputDevice.SOURCE_TOUCHSCREEN) == InputDevice.SOURCE_TOUCHSCREEN)
             return false;
-        if ((source & InputDevice.SOURCE_MOUSE) != InputDevice.SOURCE_MOUSE)
-            return false;
-        int toolType = event.getToolType(event.getActionIndex());
-        return toolType == MotionEvent.TOOL_TYPE_MOUSE
-            || toolType == MotionEvent.TOOL_TYPE_FINGER;
+        return (source & InputDevice.SOURCE_MOUSE) == InputDevice.SOURCE_MOUSE;
     }
 
     private boolean handleMouseEvent(MotionEvent event) {
