@@ -1022,14 +1022,13 @@ public class MainActivity extends Activity
     };
 
     private boolean isMouseEvent(MotionEvent event) {
-        int source = event.getSource();
-        if ((source & InputDevice.SOURCE_TOUCHSCREEN) == InputDevice.SOURCE_TOUCHSCREEN)
-            return false;
-        if ((source & InputDevice.SOURCE_MOUSE) != InputDevice.SOURCE_MOUSE)
-            return false;
         int toolType = event.getToolType(event.getActionIndex());
-        return toolType == MotionEvent.TOOL_TYPE_MOUSE
-            || toolType == MotionEvent.TOOL_TYPE_FINGER;
+        if (toolType == MotionEvent.TOOL_TYPE_MOUSE) return true;
+        
+        int source = event.getSource();
+        if ((source & InputDevice.SOURCE_MOUSE) == InputDevice.SOURCE_MOUSE) return true;
+        
+        return false;
     }
 
     private boolean handleMouseEvent(MotionEvent event) {
