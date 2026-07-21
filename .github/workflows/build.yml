@@ -10,6 +10,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          # Full history so `git rev-list --count HEAD` yields the real commit
+          # count for versionCode (shallow checkout would make it always 1).
+          fetch-depth: 0
 
       - name: Set up JDK 17
         uses: actions/setup-java@v5
@@ -34,19 +38,18 @@ jobs:
             -keyalg RSA -keysize 2048 -validity 10000 \
             -dname "CN=Android Debug, O=Android, C=US" -noprompt
 
-      - name: Inject debug signing for release
-        working-directory: consumers/anland_v5/android_consumer
-        run: |
-          echo "android.injected.signing.store.file=$HOME/.android/debug.keystore" >> gradle.properties
-          echo "android.injected.signing.store.password=android" >> gradle.properties
-          echo "android.injected.signing.key.alias=androiddebugkey" >> gradle.properties
-          echo "android.injected.signing.key.password=android" >> gradle.properties
-
       - name: Build APK
         working-directory: consumers/anland_v5/android_consumer
         run: |
           chmod +x gradlew
-          ./gradlew assembleRelease
+          # Pass debug signing as project properties on the command line instead of
+          # appending to the tracked gradle.properties, which would dirty the working
+          # tree and make the git-derived versionName ("...-dirty") wrong on CI.
+          ./gradlew assembleRelease \
+            -Pandroid.injected.signing.store.file="$HOME/.android/debug.keystore" \
+            -Pandroid.injected.signing.store.password=android \
+            -Pandroid.injected.signing.key.alias=androiddebugkey \
+            -Pandroid.injected.signing.key.password=android
           cp app/build/outputs/apk/release/app-release.apk app/build/outputs/apk/release/anland-v5.apk
 
       - name: Upload APK
