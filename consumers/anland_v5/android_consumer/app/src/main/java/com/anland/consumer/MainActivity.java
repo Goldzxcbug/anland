@@ -732,8 +732,12 @@ public class MainActivity extends Activity
     
         mImeBottom = newImeBottom;
     
-        if (imeVisible != wasImeVisible)
-            setExtraKeysBarVisible(shouldShowBar(imeVisible));
+        // Only "with_keyboard" mode tracks the IME; "always"/"never"
+        // let the user's manual toggle (back key) stay untouched.
+        String mode = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                .getString(KEY_EXTRA_KEYS_MODE, "always");
+        if (imeVisible != wasImeVisible && "with_keyboard".equals(mode))
+            setExtraKeysBarVisible(imeVisible);
 
         relayout();
     }
@@ -859,7 +863,10 @@ public class MainActivity extends Activity
     // callback may not fire, so sync the extra-keys bar explicitly here in all modes.
     @Override
     public void onImeVisibilityChanged(boolean visible) {
-        setExtraKeysBarVisible(shouldShowBar(visible));
+        String mode = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                .getString(KEY_EXTRA_KEYS_MODE, "always");
+        if ("with_keyboard".equals(mode))
+            setExtraKeysBarVisible(visible);
     }
 
     // ================================================================
