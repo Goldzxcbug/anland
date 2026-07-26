@@ -87,6 +87,8 @@ public class MainActivity extends Activity
     private static final String KEY_EXTRA_KEYS_MODE = "extra_keys_mode";
     private static final String KEY_BACK_OPENS_EXTRA_KEYS = "back_opens_extra_keys";
     private static final String KEY_EXTRA_KEYS_LAYOUT = "extra_keys_layout";
+    // Linux input-event-codes.h: KEY_BACK (the browser-back key).
+    private static final int EVDEV_BROWSER_BACK = 158;
     // When on, the IME and extra-keys bar float over the display instead of
     // shrinking it: the bar rides up with the keyboard but the surface keeps
     // its full size. See relayout() and buildExtraKeysBar().
@@ -981,17 +983,30 @@ public class MainActivity extends Activity
         if (event.getRepeatCount() > 0)
             return true;
 
-        return forwardKeyToLinux(event);
+        // Some tablet keyboard layouts expose their physical Esc key as
+        // Android Back (Linux KEY_BACK / Browser Back).  Convert it only on
+        // the accessibility-interception path so the normal Android Back and
+        // extra-keys-bar behaviour is unchanged when interception is off.
+        return forwardKeyToLinux(event, true);
     }
 
     private boolean forwardKeyToLinux(KeyEvent event) {
+        return forwardKeyToLinux(event, false);
+    }
+
+    private boolean forwardKeyToLinux(KeyEvent event, boolean convertBackToEscape) {
         int keyCode = event.getKeyCode();
         int action = event.getAction() == KeyEvent.ACTION_DOWN ? 0 : 1;
         int evdev = -1;
 
+        if (convertBackToEscape
+                && (keyCode == KeyEvent.KEYCODE_BACK
+                    || event.getScanCode() == EVDEV_BROWSER_BACK))
+            evdev = KeyCodeMapper.getScanCode(KeyEvent.KEYCODE_ESCAPE);
+
         // Reserved Android keys may carry vendor scan codes that Linux does not
         // recognize, so prefer their explicit evdev mapping.
-        if (shouldPreferMappedKey(keyCode))
+        if (evdev == -1 && shouldPreferMappedKey(keyCode))
             evdev = KeyCodeMapper.getScanCode(keyCode);
 
         if (evdev == -1 && event.getScanCode() != 0)

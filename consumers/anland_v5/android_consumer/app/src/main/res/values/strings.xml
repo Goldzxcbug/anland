@@ -41,7 +41,7 @@
 
     <!-- Accessibility -->
     <string name="accessibility_switch">Accessibility Key Interception</string>
-    <string name="accessibility_hint">Intercept function keys (Fn, F1-F12 etc.) via AccessibilityService. Enable this if external keyboard Fn combos don\'t reach the desktop. Requires Accessibility permission granted in system Settings &gt; Accessibility (one-time).</string>
+    <string name="accessibility_hint">Intercept function keys (Fn, F1-F12 etc.) via AccessibilityService and convert tablet-keyboard Back/Browser Back to ESC. Enable this if external keyboard Fn combos or ESC don\'t reach the desktop correctly. Requires Accessibility permission granted in system Settings &gt; Accessibility (one-time).</string>
 
     <!-- Extra keys bar -->
     <string name="extra_keys_mode_label">Extra keys bar mode</string>

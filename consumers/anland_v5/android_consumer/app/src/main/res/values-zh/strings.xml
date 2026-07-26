@@ -41,7 +41,7 @@
 
     <!-- Accessibility -->
     <string name="accessibility_switch">无障碍按键拦截</string>
-    <string name="accessibility_hint">通过无障碍服务拦截功能键（Fn、F1-F12 等）。如果外接键盘的 Fn 组合键无法传到桌面，请启用此项。需要在系统 设置 &gt; 无障碍 中授予无障碍权限（仅需一次）。</string>
+    <string name="accessibility_hint">通过无障碍服务拦截功能键（Fn、F1-F12 等），并将平板键盘上报的返回/浏览器后退键转换为 ESC。如果外接键盘的 Fn 组合键或 ESC 无法正确传到桌面，请启用此项。需要在系统 设置 &gt; 无障碍 中授予无障碍权限（仅需一次）。</string>
 
     <!-- Extra keys bar -->
     <string name="extra_keys_mode_label">扩展按键栏模式</string>
