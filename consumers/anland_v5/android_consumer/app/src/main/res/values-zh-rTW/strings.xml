@@ -67,9 +67,9 @@
     <!-- Touchpad -->
     <string name="touchpad_mode_switch">觸控板模式（相對移動）</string>
     <string name="touchpad_hint">開啟：手指滑動移動滑鼠游標（相對）。關閉：觸控直接對應到螢幕（絕對）。</string>
-    <string name="pointer_capture_switch">擷取外接滑鼠指標（遊戲模式）</string>
-    <string name="pointer_capture_hint">開啟後會將外接滑鼠鎖定在桌面畫面內並使用相對移動，移到螢幕頂部或底部不會呼出 Android 狀態列或導覽列。按 Android 返回鍵可暫時釋放，點擊桌面畫面重新擷取；觸控不受影響。</string>
-    <string name="pointer_capture_released">滑鼠已釋放。點擊桌面畫面即可重新擷取。</string>
+    <string name="pointer_capture_switch">擷取外接指標</string>
+    <string name="pointer_capture_hint">開啟後會將外接滑鼠或觸控板鎖定在桌面畫面內並使用相對移動，移到螢幕頂部或底部不會呼出 Android 狀態列或導覽列。按 Android 返回鍵可暫時釋放，點擊桌面畫面重新擷取；螢幕觸控不受影響。</string>
+    <string name="pointer_capture_released">外接指標已釋放。點擊桌面畫面即可重新擷取。</string>
     <string name="mouse_sensitivity_label">觸控板指標靈敏度（加速度）</string>
     <string name="mouse_accel_value">%1$.1f 倍</string>
 

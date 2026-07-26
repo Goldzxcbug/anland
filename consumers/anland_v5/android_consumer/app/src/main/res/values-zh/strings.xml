@@ -67,9 +67,9 @@
     <!-- Touchpad -->
     <string name="touchpad_mode_switch">触摸板模式（相对移动）</string>
     <string name="touchpad_hint">开启：手指滑动移动鼠标光标（相对）。关闭：触摸直接映射到屏幕（绝对）。</string>
-    <string name="pointer_capture_switch">捕获外接鼠标指针（游戏模式）</string>
-    <string name="pointer_capture_hint">开启后将外接鼠标锁定在桌面画面内并使用相对移动，移到屏幕顶部或底部不会呼出 Android 状态栏或导航栏。按 Android 返回键可暂时释放，点击桌面画面重新捕获；触摸不受影响。</string>
-    <string name="pointer_capture_released">鼠标已释放。点击桌面画面可重新捕获。</string>
+    <string name="pointer_capture_switch">捕获外接指针</string>
+    <string name="pointer_capture_hint">开启后将外接鼠标或触摸板锁定在桌面画面内并使用相对移动，移到屏幕顶部或底部不会呼出 Android 状态栏或导航栏。按 Android 返回键可暂时释放，点击桌面画面重新捕获；屏幕触摸不受影响。</string>
+    <string name="pointer_capture_released">外接指针已释放。点击桌面画面可重新捕获。</string>
     <string name="mouse_sensitivity_label">触摸板指针灵敏度（加速度）</string>
     <string name="mouse_accel_value">%1$.1f 倍</string>
 
