@@ -17,7 +17,7 @@
     <string name="cat_keyboard_title">Keyboard &amp; Keys</string>
     <string name="cat_keyboard_subtitle">Key binding, accessibility &amp; extra keys bar</string>
     <string name="cat_touchpad_title">Touchpad &amp; Mouse</string>
-    <string name="cat_touchpad_subtitle">Touchpad mode &amp; pointer sensitivity</string>
+    <string name="cat_touchpad_subtitle">Touchpad mode, pointer capture &amp; sensitivity</string>
     <string name="cat_connection_subtitle">Socket, root, mic, camera &amp; audio latency</string>
     <string name="cat_resolution_subtitle">Output resolution &amp; presets</string>
     <string name="cat_general_title">General</string>
@@ -67,7 +67,10 @@
     <!-- Touchpad -->
     <string name="touchpad_mode_switch">Touchpad Mode (relative movement)</string>
     <string name="touchpad_hint">ON: finger slides move mouse cursor (relative). OFF: touch maps directly to screen (absolute).</string>
-    <string name="mouse_sensitivity_label">Mouse Sensitivity (Acceleration)</string>
+    <string name="pointer_capture_switch">Capture external mouse pointer (game mode)</string>
+    <string name="pointer_capture_hint">Locks an external mouse to the desktop view and uses relative movement, so reaching the top or bottom edge will not reveal Android system bars. Use Android Back to release temporarily; click the desktop view to capture again. Touch input is unaffected.</string>
+    <string name="pointer_capture_released">Mouse released. Click the desktop view to capture it again.</string>
+    <string name="mouse_sensitivity_label">Touchpad Pointer Sensitivity (Acceleration)</string>
     <string name="mouse_accel_value">%1$.1fx</string>
 
     <!-- Connection -->

@@ -114,11 +114,32 @@ public class MainActivity extends Activity
     // ==================== 触摸板相关设置 ====================
     public static final String KEY_TOUCHPAD_MODE = "touchpad_mode";
     public static final String KEY_MOUSE_ACCEL = "mouse_speed"; // 名称仍为 speed，实际控制加速度强度
+    // Capture an external mouse as a relative pointer so it cannot reach the
+    // Android screen edges while playing.  This is deliberately opt-in: existing
+    // installations keep the old absolute-pointer behaviour until the user enables it.
+    public static final String KEY_POINTER_CAPTURE = "pointer_capture";
 
     // Routing gate: when on, non-mouse touches go to the virtual touchpad.
     private boolean isTouchpadMode = true;
     // Finger-gesture touchpad (relative motion, taps, drag, two-finger scroll).
     private VirtualTouchpad virtualTouchpad;
+
+    // Pointer-capture state.  Android delivers captured mouse events as
+    // SOURCE_MOUSE_RELATIVE directly to the view hierarchy, bypassing
+    // Activity.onGenericMotionEvent/onTouchEvent.  Keep a virtual absolute cursor
+    // for the compositor protocol, which requires both an absolute position and a
+    // relative delta for every motion event.
+    private boolean pointerCaptureEnabled = false;
+    private boolean pointerCaptureSuppressed = false;
+    // Tracks the Back key whose DOWN released pointer capture, so only its matching
+    // UP is swallowed. Device/downTime matching prevents a stale missing UP from
+    // consuming a later, unrelated Back press.
+    private boolean pointerCaptureBackUpPending = false;
+    private boolean pointerCaptureBackWildcard = false;
+    private int pointerCaptureBackDeviceId = 0;
+    private long pointerCaptureBackDownTime = 0L;
+    private float pointerX = Float.NaN;
+    private float pointerY = Float.NaN;
 
     static {
         // Loads the single shared .so backing MainActivity, Native and
@@ -169,6 +190,14 @@ public class MainActivity extends Activity
         }
         if (hasFocus && clipboard != null) {
             clipboard.pushClipboard();
+        }
+        if (mRoot != null) {
+            if (hasFocus)
+                mRoot.post(this::syncPointerCapture);
+            else {
+                clearPointerCaptureBackTracking();
+                releasePointerCapture(false);
+            }
         }
     }
 
@@ -338,9 +367,32 @@ public class MainActivity extends Activity
         getWindow().setDecorFitsSystemWindows(false);
 
         surfaceView = new SurfaceView(this);
+        // Give the content view an explicit focus target. Pointer-captured events
+        // are routed along the focused-view path; the root override below then
+        // intercepts them before the focused child handles them.
+        surfaceView.setFocusable(true);
+        surfaceView.setFocusableInTouchMode(true);
         systemIme = new SystemIME(this, this, mNative);
 
-        FrameLayout root = new FrameLayout(this);
+        // Pointer-captured mouse events are dispatched by ViewRootImpl to the
+        // focused view hierarchy, not to Activity.onGenericMotionEvent(). Intercept
+        // them at the root before they are routed to the hidden IME or any overlay;
+        // this keeps capture working even while the soft keyboard owns focus.
+        FrameLayout root = new FrameLayout(this) {
+            @Override
+            public boolean dispatchCapturedPointerEvent(MotionEvent event) {
+                if (handleCapturedPointerEvent(event))
+                    return true;
+                return super.dispatchCapturedPointerEvent(event);
+            }
+
+            @Override
+            public void dispatchPointerCaptureChanged(boolean hasCapture) {
+                super.dispatchPointerCaptureChanged(hasCapture);
+                if (!hasCapture)
+                    releaseAllMouseButtons();
+            }
+        };
         root.addView(surfaceView, new FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT,
             FrameLayout.LayoutParams.MATCH_PARENT));
@@ -397,14 +449,22 @@ public class MainActivity extends Activity
         // the view starts GONE and a GONE view is never measured.
 
         setContentView(root);
+        // Establish a focused descendant after attachment so the DecorView routes
+        // captured-pointer events through our content root even when the extra-keys
+        // bar is hidden.
+        surfaceView.requestFocus();
         surfaceView.getHolder().addCallback(this);
 
         root.setOnApplyWindowInsetsListener((v, insets) -> {
             // When the IME hides by any means (toggle, system back, or the IME's
             // own close button), release the hidden input so its focus state
             // stays in sync — otherwise reopening needs a second press.
-            if (!insets.isVisible(WindowInsets.Type.ime()))
+            if (!insets.isVisible(WindowInsets.Type.ime())) {
+                View focused = getCurrentFocus();
                 systemIme.releaseHiddenInput();
+                if (focused == systemIme.getInputView() || getCurrentFocus() == null)
+                    surfaceView.requestFocus();
+            }
             applyImeInset(insets);
             return v.onApplyWindowInsets(insets);
         });
@@ -417,6 +477,12 @@ public class MainActivity extends Activity
         isTouchpadMode = prefs.getBoolean(KEY_TOUCHPAD_MODE, false);
         virtualTouchpad = new VirtualTouchpad(this, mNative);
         virtualTouchpad.setAccelStrength(prefs.getFloat(KEY_MOUSE_ACCEL, 1.0f));
+        pointerCaptureEnabled = prefs.getBoolean(KEY_POINTER_CAPTURE, false);
+
+        // Requesting capture before the window is attached is a no-op. The post
+        // below covers the initial attach; onWindowFocusChanged() retries after a
+        // focus transition (including returning from Settings).
+        root.post(this::syncPointerCapture);
 
         registerWindow();
     }
@@ -508,6 +574,201 @@ public class MainActivity extends Activity
         surfaceView.setPointerIcon(PointerIcon.getSystemIcon(this, PointerIcon.TYPE_NULL));
     }
 
+    /** Keep the window's pointer-capture state in sync with the saved setting. */
+    private void syncPointerCapture() {
+        if (mRoot == null)
+            return;
+
+        boolean shouldCapture = pointerCaptureEnabled
+                && !pointerCaptureSuppressed
+                && mRoot.hasWindowFocus();
+        if (shouldCapture) {
+            if (!mRoot.hasPointerCapture()) {
+                // The request is window-wide.  Calling it on the root is safe even
+                // when the hidden IME currently owns focus; the root override above
+                // intercepts the resulting captured events first.
+                mRoot.requestPointerCapture();
+            }
+        } else if (mRoot.hasPointerCapture()) {
+            mRoot.releasePointerCapture();
+        }
+    }
+
+    /** Release capture, optionally keeping it off until the next mouse click. */
+    private void releasePointerCapture(boolean suppressUntilClick) {
+        if (suppressUntilClick)
+            pointerCaptureSuppressed = true;
+        releaseAllMouseButtons();
+        if (mRoot != null && mRoot.hasPointerCapture())
+            mRoot.releasePointerCapture();
+    }
+
+    private void clearPointerCaptureBackTracking() {
+        pointerCaptureBackUpPending = false;
+        pointerCaptureBackWildcard = false;
+        pointerCaptureBackDeviceId = 0;
+        pointerCaptureBackDownTime = 0L;
+    }
+
+    private void trackPointerCaptureBack(KeyEvent event) {
+        pointerCaptureBackUpPending = true;
+        pointerCaptureBackWildcard = event == null;
+        if (event != null) {
+            pointerCaptureBackDeviceId = event.getDeviceId();
+            pointerCaptureBackDownTime = event.getDownTime();
+        }
+    }
+
+    private boolean matchesTrackedPointerCaptureBack(KeyEvent event) {
+        return pointerCaptureBackUpPending
+                && (pointerCaptureBackWildcard
+                    || (pointerCaptureBackDeviceId == event.getDeviceId()
+                        && pointerCaptureBackDownTime == event.getDownTime()));
+    }
+
+    /**
+     * Release capture for a non-mouse Android Back key and consume exactly the
+     * matching DOWN/UP pair. Shared by the normal Activity and accessibility-key
+     * paths so the setting behaves identically with interception enabled.
+     */
+    private boolean handlePointerCaptureBackKey(KeyEvent event) {
+        if (event.getKeyCode() != KeyEvent.KEYCODE_BACK || isMouseKeyEvent(event))
+            return false;
+
+        if (event.getAction() == KeyEvent.ACTION_DOWN) {
+            if (event.getRepeatCount() > 0)
+                return matchesTrackedPointerCaptureBack(event);
+
+            // A fresh DOWN invalidates any pending state left by an OEM that did
+            // not deliver the previous UP.
+            clearPointerCaptureBackTracking();
+            if (mRoot != null && mRoot.hasPointerCapture()) {
+                releasePointerCapture(true);
+                trackPointerCaptureBack(event);
+                showPointerCaptureReleasedToast();
+                return true;
+            }
+            return false;
+        }
+
+        if (event.getAction() == KeyEvent.ACTION_UP
+                && matchesTrackedPointerCaptureBack(event)) {
+            clearPointerCaptureBackTracking();
+            return true;
+        }
+        return false;
+    }
+
+    private void showPointerCaptureReleasedToast() {
+        android.widget.Toast.makeText(this, R.string.pointer_capture_released,
+                android.widget.Toast.LENGTH_SHORT).show();
+    }
+
+    private void requestPointerCaptureAfterClick() {
+        if (!pointerCaptureEnabled || mRoot == null)
+            return;
+        pointerCaptureSuppressed = false;
+        mRoot.post(this::syncPointerCapture);
+    }
+
+    private int pointerViewWidth() {
+        if (viewWidth > 0)
+            return viewWidth;
+        if (surfaceView != null && surfaceView.getWidth() > 0)
+            return surfaceView.getWidth();
+        return mRoot != null ? mRoot.getWidth() : 0;
+    }
+
+    private int pointerViewHeight() {
+        if (viewHeight > 0)
+            return viewHeight;
+        if (surfaceView != null && surfaceView.getHeight() > 0)
+            return surfaceView.getHeight();
+        return mRoot != null ? mRoot.getHeight() : 0;
+    }
+
+    private void ensurePointerPosition() {
+        int width = pointerViewWidth();
+        int height = pointerViewHeight();
+        if (width <= 0 || height <= 0)
+            return;
+        if (!Float.isFinite(pointerX))
+            pointerX = width / 2f;
+        if (!Float.isFinite(pointerY))
+            pointerY = height / 2f;
+        pointerX = Math.max(0f, Math.min(pointerX, width));
+        pointerY = Math.max(0f, Math.min(pointerY, height));
+    }
+
+    private float pointerScaleX() {
+        return (customScreenWidth > 0 && pointerViewWidth() > 0)
+                ? (float) customScreenWidth / pointerViewWidth() : 1.0f;
+    }
+
+    private float pointerScaleY() {
+        return (customScreenHeight > 0 && pointerViewHeight() > 0)
+                ? (float) customScreenHeight / pointerViewHeight() : 1.0f;
+    }
+
+    /**
+     * Handle a mouse event delivered through View pointer capture.  Captured
+     * mouse coordinates are deltas (getX/getY), not screen coordinates.
+     */
+    private boolean handleCapturedPointerEvent(MotionEvent event) {
+        if (!event.isFromSource(InputDevice.SOURCE_MOUSE_RELATIVE))
+            return false;
+        if (mNative == null)
+            return true;
+
+        int action = event.getActionMasked();
+        if (action == MotionEvent.ACTION_MOVE || action == MotionEvent.ACTION_HOVER_MOVE) {
+            // Relative mouse samples can be batched.  Consume every historical
+            // sample so fast movements do not lose deltas between frames.
+            for (int i = 0; i < event.getHistorySize(); i++) {
+                sendCapturedMouseMotion(event.getHistoricalX(0, i),
+                        event.getHistoricalY(0, i));
+            }
+            sendCapturedMouseMotion(event.getX(), event.getY());
+        }
+
+        if (action == MotionEvent.ACTION_SCROLL) {
+            float vScroll = event.getAxisValue(MotionEvent.AXIS_VSCROLL);
+            float hScroll = event.getAxisValue(MotionEvent.AXIS_HSCROLL);
+            if (vScroll != 0f)
+                mNative.sendMouseScroll(0, -vScroll * 10f);
+            if (hScroll != 0f)
+                mNative.sendMouseScroll(1, hScroll * 10f);
+        }
+
+        // Button state is present on motion, button, and down/up events.  Keeping
+        // this diff in one place also handles mice that report button actions as
+        // ACTION_BUTTON_PRESS/RELEASE instead of ACTION_DOWN/UP.
+        updateMouseButtonState(event.getButtonState());
+        return true;
+    }
+
+    private void sendCapturedMouseMotion(float dx, float dy) {
+        if (!Float.isFinite(dx) || !Float.isFinite(dy)
+                || (dx == 0f && dy == 0f))
+            return;
+        ensurePointerPosition();
+        int width = pointerViewWidth();
+        int height = pointerViewHeight();
+        if (width <= 0 || height <= 0)
+            return;
+
+        pointerX = Math.max(0f, Math.min(pointerX + dx, width));
+        pointerY = Math.max(0f, Math.min(pointerY + dy, height));
+        float scaleX = pointerScaleX();
+        float scaleY = pointerScaleY();
+        // Keep the absolute position clamped, but preserve the raw relative delta
+        // (scaled into the output coordinate space).  This is important for games:
+        // movement continues to be reported even while the virtual cursor is at an
+        // output edge.
+        mNative.sendMouseMotion(pointerX * scaleX, pointerY * scaleY,
+                dx * scaleX, dy * scaleY);
+    }
+
     @Override
     protected void onResume() {
         super.onResume();
@@ -579,6 +840,12 @@ public class MainActivity extends Activity
         SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
         isTouchpadMode = prefs.getBoolean(KEY_TOUCHPAD_MODE, false);
         virtualTouchpad.setAccelStrength(prefs.getFloat(KEY_MOUSE_ACCEL, 1.0f));
+        pointerCaptureEnabled = prefs.getBoolean(KEY_POINTER_CAPTURE, false);
+        // A manual Back-key release lasts until the next click or lifecycle
+        // transition. Returning from Settings starts a fresh capture session.
+        pointerCaptureSuppressed = false;
+        if (mRoot != null)
+            mRoot.post(this::syncPointerCapture);
 
         // The socket pref may have been edited in Settings; keep our dedup key current.
         registerWindow();
@@ -590,6 +857,8 @@ public class MainActivity extends Activity
         // Socket-missing bounce: no pipeline exists, so skip teardown (mNative is
         // null) and don't let the jump to Settings trigger any of it.
         if (mForceSettings) return;
+        clearPointerCaptureBackTracking();
+        releasePointerCapture(false);
         NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
         if (nm != null) nm.cancel(NOTIFICATION_ID);
         DisplayManager dm = getSystemService(DisplayManager.class);
@@ -600,6 +869,7 @@ public class MainActivity extends Activity
 
     @Override
     protected void onDestroy() {
+        releasePointerCapture(false);
         if (mRegisteredSocket != null) {
             sWindowsBySocket.remove(mRegisteredSocket, this);
             mRegisteredSocket = null;
@@ -704,6 +974,7 @@ public class MainActivity extends Activity
         Log.i(TAG, "surfaceChanged: " + width + "x" + height);
         viewWidth = width;
         viewHeight = height;
+        ensurePointerPosition();
         surfaceReady = true;
         // Same ordering guarantee as onResume: camera service settled before connect.
         applyCameraState();
@@ -716,11 +987,14 @@ public class MainActivity extends Activity
 
         // ===== 更新屏幕尺寸并重置平滑状态 =====
         virtualTouchpad.onSurfaceChanged();
+        if (mRoot != null)
+            mRoot.post(this::syncPointerCapture);
     }
 
     @Override
     public void surfaceDestroyed(SurfaceHolder holder) {
         surfaceReady = false;
+        releasePointerCapture(false);
         mNative.stop();
     }
 
@@ -889,20 +1163,33 @@ public class MainActivity extends Activity
                 .getString(KEY_EXTRA_KEYS_MODE, "always");
         if ("with_keyboard".equals(mode))
             setExtraKeysBarVisible(visible);
+        if (!visible && surfaceView != null) {
+            surfaceView.requestFocus();
+            if (mRoot != null)
+                mRoot.post(this::syncPointerCapture);
+        }
     }
 
     // ================================================================
-    // 原有 onTouchEvent 仅在最前面插入了一个分支判断，其余原封不动
+    // Route touchscreen gestures and ordinary (non-captured) mouse events.
     // ================================================================
     @Override
     public boolean onTouchEvent(MotionEvent event) {
+        boolean mouseEvent = isMouseEvent(event);
+        if (mouseEvent && event.getActionMasked() == MotionEvent.ACTION_DOWN
+                && pointerCaptureEnabled && mRoot != null
+                && !mRoot.hasPointerCapture()) {
+            // A Back-key release leaves the pointer free long enough for the user
+            // to move/click normally; the next click starts a new capture session.
+            requestPointerCaptureAfterClick();
+        }
+
         // ===== 触摸板模式优先处理（仅针对非鼠标触摸事件） =====
-        if (isTouchpadMode && !isMouseEvent(event)) {
+        if (isTouchpadMode && !mouseEvent) {
             return virtualTouchpad.onTouch(event);
         }
 
-        // 以下为原有代码，一字未改
-        if (isMouseEvent(event)) {
+        if (mouseEvent) {
             int cls = event.getClassification();
             if (cls == CLASSIFICATION_TWO_FINGER_SWIPE)
                 return handleTouchpadScroll(event);
@@ -917,6 +1204,11 @@ public class MainActivity extends Activity
     public boolean onGenericMotionEvent(MotionEvent event) {
         if (isMouseEvent(event)) {
             int action = event.getActionMasked();
+            if (action == MotionEvent.ACTION_BUTTON_PRESS
+                    && pointerCaptureEnabled && mRoot != null
+                    && !mRoot.hasPointerCapture()) {
+                requestPointerCaptureAfterClick();
+            }
             if (action == MotionEvent.ACTION_HOVER_MOVE) {
                         
                 // Масштабирование
@@ -925,6 +1217,9 @@ public class MainActivity extends Activity
                 float scaleY = (customScreenHeight > 0 && viewHeight > 0) ? 
                         (float)customScreenHeight / viewHeight : 1.0f;
         
+                pointerX = event.getX();
+                pointerY = event.getY();
+                ensurePointerPosition();
                 mNative.sendMouseMotion(event.getX()*scaleX, event.getY()*scaleY,
                                       event.getAxisValue(MotionEvent.AXIS_RELATIVE_X),
                                       event.getAxisValue(MotionEvent.AXIS_RELATIVE_Y));
@@ -939,12 +1234,24 @@ public class MainActivity extends Activity
                     mNative.sendMouseScroll(1, hScroll * 10);
                 return true;
             }
+            if (action == MotionEvent.ACTION_BUTTON_PRESS
+                    || action == MotionEvent.ACTION_BUTTON_RELEASE) {
+                updateMouseButtonState(event.getButtonState());
+                return true;
+            }
         }
         return super.onGenericMotionEvent(event);
     }
 
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
+        if (handlePointerCaptureBackKey(event))
+            return true;
+        // Mouse Back is already forwarded as BTN_SIDE from the MotionEvent path.
+        // Swallow Android's duplicate KEYCODE_BACK so it neither releases capture
+        // nor toggles the extra-keys bar.
+        if (keyCode == KeyEvent.KEYCODE_BACK && isMouseKeyEvent(event))
+            return true;
         if (event.getRepeatCount() > 0)
             return true;
 
@@ -968,18 +1275,28 @@ public class MainActivity extends Activity
     }
 
     // Some OEM ROMs (notably Xiaomi/HyperOS) dispatch Back via onBackPressed()
-    // instead of onKeyDown().  Without this override the default Activity
-    // onBackPressed() calls finish() — the app just exits.
-    // Keep this empty (same approach as Termux-X11): the actual Back key
-    // handling lives in onKeyDown(); this override simply prevents the
-    // system from finishing the activity via gesture navigation.
+    // instead of onKeyDown(). Release an active pointer capture here; otherwise
+    // keep swallowing Back (same approach as Termux-X11) so the Activity does not
+    // unexpectedly finish via gesture navigation.
     @Override
     public void onBackPressed() {
+        if (mRoot != null && mRoot.hasPointerCapture()) {
+            releasePointerCapture(true);
+            // There is no KeyEvent on this OEM path. Use a wildcard so a trailing
+            // Back UP, if one still arrives, is consumed; a fresh DOWN clears it.
+            trackPointerCaptureBack(null);
+            showPointerCaptureReleasedToast();
+            return;
+        }
     }
 
     // Called from KeyInterceptor (accessibility service) to handle keys that
     // the normal onKeyDown/onKeyUp might miss (e.g. Fn combos).
     public boolean handleAccessibilityKey(KeyEvent event) {
+        if (handlePointerCaptureBackKey(event))
+            return true;
+        if (event.getKeyCode() == KeyEvent.KEYCODE_BACK && isMouseKeyEvent(event))
+            return true;
         if (event.getRepeatCount() > 0)
             return true;
 
@@ -1037,6 +1354,10 @@ public class MainActivity extends Activity
 
     @Override
     public boolean onKeyUp(int keyCode, KeyEvent event) {
+        if (handlePointerCaptureBackKey(event))
+            return true;
+        if (keyCode == KeyEvent.KEYCODE_BACK && isMouseKeyEvent(event))
+            return true;
         forwardKeyToLinux(event);
         return true;
     }
@@ -1055,6 +1376,26 @@ public class MainActivity extends Activity
         {MotionEvent.BUTTON_FORWARD,   0x114}, // BTN_EXTRA
     };
 
+    private void updateMouseButtonState(int currentBS) {
+        for (int[] btn : BUTTON_MAP) {
+            boolean wasDown = (savedBS & btn[0]) != 0;
+            boolean isDown  = (currentBS & btn[0]) != 0;
+            if (wasDown != isDown && mNative != null)
+                mNative.sendMouseButton(btn[1], isDown);
+        }
+        savedBS = currentBS;
+    }
+
+    private void releaseAllMouseButtons() {
+        if (savedBS == 0)
+            return;
+        for (int[] btn : BUTTON_MAP) {
+            if ((savedBS & btn[0]) != 0 && mNative != null)
+                mNative.sendMouseButton(btn[1], false);
+        }
+        savedBS = 0;
+    }
+
     private boolean isMouseEvent(MotionEvent event) {
         int source = event.getSource();
         if ((source & InputDevice.SOURCE_TOUCHSCREEN) == InputDevice.SOURCE_TOUCHSCREEN)
@@ -1064,6 +1405,11 @@ public class MainActivity extends Activity
         int toolType = event.getToolType(event.getActionIndex());
         return toolType == MotionEvent.TOOL_TYPE_MOUSE
             || toolType == MotionEvent.TOOL_TYPE_FINGER;
+    }
+
+    private boolean isMouseKeyEvent(KeyEvent event) {
+        return event.isFromSource(InputDevice.SOURCE_MOUSE)
+                || event.isFromSource(InputDevice.SOURCE_MOUSE_RELATIVE);
     }
 
     private boolean handleMouseEvent(MotionEvent event) {
@@ -1081,16 +1427,14 @@ public class MainActivity extends Activity
             dx = (event.getX() - event.getHistoricalX(0, last))*scaleX;
             dy = (event.getY() - event.getHistoricalY(0, last))*scaleY;
         }
+        if (Float.isFinite(event.getX()) && Float.isFinite(event.getY())) {
+            pointerX = event.getX();
+            pointerY = event.getY();
+            ensurePointerPosition();
+        }
         mNative.sendMouseMotion(event.getX() * scaleX, event.getY() * scaleY, dx, dy);
 
-        int currentBS = event.getButtonState();
-        for (int[] btn : BUTTON_MAP) {
-            boolean wasDown = (savedBS & btn[0]) != 0;
-            boolean isDown  = (currentBS & btn[0]) != 0;
-            if (wasDown != isDown)
-                mNative.sendMouseButton(btn[1], isDown);
-        }
-        savedBS = currentBS;
+        updateMouseButtonState(event.getButtonState());
         return true;
     }
 
