@@ -67,6 +67,7 @@ public class SettingsActivity extends Activity {
     // ===== 新增：触摸板 Key =====
     private static final String KEY_TOUCHPAD_MODE = "touchpad_mode";
     private static final String KEY_MOUSE_ACCEL = "mouse_speed";
+    private static final String KEY_POINTER_CAPTURE = "pointer_capture";
 
     // Latency presets: target buffer in ms (0 = auto). The user-visible labels live
     // in the R.array.latency_labels string-array, parallel to this array.
@@ -595,6 +596,25 @@ public class SettingsActivity extends Activity {
         touchpadHint.setTextColor(Color.GRAY);
         touchpadHint.setPadding(0, dp(4), 0, dp(12));
         root.addView(touchpadHint);
+
+        // External mouse pointer capture.  This is opt-in because it changes
+        // Android's mouse event mode from absolute coordinates to relative motion.
+        Switch pointerCaptureSwitch = new Switch(this);
+        pointerCaptureSwitch.setText(R.string.pointer_capture_switch);
+        pointerCaptureSwitch.setTextSize(14);
+        pointerCaptureSwitch.setPadding(0, dp(8), 0, 0);
+        pointerCaptureSwitch.setChecked(prefs.getBoolean(KEY_POINTER_CAPTURE, false));
+        pointerCaptureSwitch.setOnCheckedChangeListener((v, checked) ->
+                getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+                        .putBoolean(KEY_POINTER_CAPTURE, checked).apply());
+        root.addView(pointerCaptureSwitch);
+
+        TextView pointerCaptureHint = new TextView(this);
+        pointerCaptureHint.setText(R.string.pointer_capture_hint);
+        pointerCaptureHint.setTextSize(12);
+        pointerCaptureHint.setTextColor(Color.GRAY);
+        pointerCaptureHint.setPadding(0, dp(4), 0, dp(12));
+        root.addView(pointerCaptureHint);
 
         // 鼠标加速度（灵敏度）—— 范围 0.5 ~ 10.0
         LinearLayout accelLayout = new LinearLayout(this);
