@@ -734,17 +734,30 @@ public class MainActivity extends Activity
         return mRoot != null ? mRoot.getHeight() : 0;
     }
 
+    // pointerX/pointerY live in root-view coordinates, the same space MotionEvent
+    // reports. With auto-stretch the surface fills the root, so that space starts at
+    // 0; letterboxed, it starts at the surface's centering offset.
+    private float pointerOriginX() {
+        return autoStretch ? 0f : surfaceOffsetX;
+    }
+
+    private float pointerOriginY() {
+        return autoStretch ? 0f : surfaceOffsetY;
+    }
+
     private void ensurePointerPosition() {
         int width = pointerViewWidth();
         int height = pointerViewHeight();
         if (width <= 0 || height <= 0)
             return;
+        float originX = pointerOriginX();
+        float originY = pointerOriginY();
         if (!Float.isFinite(pointerX))
-            pointerX = width / 2f;
+            pointerX = originX + width / 2f;
         if (!Float.isFinite(pointerY))
-            pointerY = height / 2f;
-        pointerX = Math.max(0f, Math.min(pointerX, width));
-        pointerY = Math.max(0f, Math.min(pointerY, height));
+            pointerY = originY + height / 2f;
+        pointerX = Math.max(originX, Math.min(pointerX, originX + width));
+        pointerY = Math.max(originY, Math.min(pointerY, originY + height));
     }
 
     private float pointerScaleX() {
@@ -1082,15 +1095,18 @@ public class MainActivity extends Activity
         if (width <= 0 || height <= 0)
             return;
 
-        pointerX = Math.max(0f, Math.min(pointerX + dx, width));
-        pointerY = Math.max(0f, Math.min(pointerY + dy, height));
+        float originX = pointerOriginX();
+        float originY = pointerOriginY();
+        pointerX = Math.max(originX, Math.min(pointerX + dx, originX + width));
+        pointerY = Math.max(originY, Math.min(pointerY + dy, originY + height));
         float scaleX = pointerScaleX();
         float scaleY = pointerScaleY();
         // Keep the absolute position clamped, but preserve the raw relative delta
         // (scaled into the output coordinate space).  This is important for games:
         // movement continues to be reported even while the virtual cursor is at an
         // output edge.
-        mNative.sendMouseMotion(pointerX * scaleX, pointerY * scaleY,
+        mNative.sendMouseMotion((pointerX - originX) * scaleX,
+                (pointerY - originY) * scaleY,
                 dx * scaleX, dy * scaleY);
     }
 
@@ -1173,7 +1189,6 @@ public class MainActivity extends Activity
         pointerCaptureSuppressed = false;
         if (mRoot != null)
             mRoot.post(this::syncPointerCapture);
-        virtualTouchpad.setAccelStrength(prefs.getFloat(KEY_MOUSE_ACCEL, 1.0f));
         autoStretch = prefs.getBoolean(KEY_AUTO_STRETCH, true);
         relayout();
 
@@ -1612,7 +1627,6 @@ public class MainActivity extends Activity
                 pointerX = event.getX();
                 pointerY = event.getY();
                 ensurePointerPosition();
-                mNative.sendMouseMotion(event.getX()*scaleX, event.getY()*scaleY,
                 mNative.sendMouseMotion(nativeX, nativeY,
                                       event.getAxisValue(MotionEvent.AXIS_RELATIVE_X),
                                       event.getAxisValue(MotionEvent.AXIS_RELATIVE_Y));
@@ -1848,7 +1862,6 @@ public class MainActivity extends Activity
             pointerY = event.getY();
             ensurePointerPosition();
         }
-        mNative.sendMouseMotion(event.getX() * scaleX, event.getY() * scaleY, dx, dy);
         mNative.sendMouseMotion(nativeX, nativeY, dx, dy);
 
         updateMouseButtonStateFromEvent(event);
