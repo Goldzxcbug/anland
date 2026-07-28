@@ -93,6 +93,8 @@
     <string name="width_hint">Width (e.g. 1920)</string>
     <string name="height_hint">Height (e.g. 1080)</string>
     <string name="resolution_hint">Pick a preset or enter values manually. Leave 0 for native resolution. \"Screen ×\" scales this device\'s panel (landscape). Takes effect on next connect.</string>
+    <string name="auto_stretch_switch">Auto-stretch display</string>
+    <string name="auto_stretch_hint">When ON, the display fills the screen (stretched if needed). When OFF, the display maintains the custom resolution aspect ratio with black bars (letterboxing). Input coordinates are automatically mapped.</string>
 
     <!-- Settings notification -->
     <string name="notification_switch">Show settings notification</string>

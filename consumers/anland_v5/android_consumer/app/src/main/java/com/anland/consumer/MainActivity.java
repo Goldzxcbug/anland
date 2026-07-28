@@ -97,6 +97,11 @@ public class MainActivity extends Activity
     private boolean mKeyboardFloating = false;
     // Persistent "tap to open Settings" notification, toggleable in Settings > General.
     private static final String KEY_NOTIFICATION_ENABLED = "settings_notification";
+    private static final String KEY_AUTO_STRETCH = "auto_stretch";
+    private boolean autoStretch = true;
+    private float surfaceOffsetX = 0f;
+    private float surfaceOffsetY = 0f;
+    private float surfaceScale = 1f;
     // System soft-keyboard bridge: hidden input, text forwarding and toggle.
     private SystemIME systemIme;
     private int mImeBottom = 0;   // last IME bottom inset
@@ -1168,6 +1173,9 @@ public class MainActivity extends Activity
         pointerCaptureSuppressed = false;
         if (mRoot != null)
             mRoot.post(this::syncPointerCapture);
+        virtualTouchpad.setAccelStrength(prefs.getFloat(KEY_MOUSE_ACCEL, 1.0f));
+        autoStretch = prefs.getBoolean(KEY_AUTO_STRETCH, true);
+        relayout();
 
         // The socket pref may have been edited in Settings; keep our dedup key current.
         registerWindow();
@@ -1370,12 +1378,68 @@ public class MainActivity extends Activity
 
         FrameLayout.LayoutParams lp =
             (FrameLayout.LayoutParams) surfaceView.getLayoutParams();
-        if (lp.bottomMargin != target) {       // skip redundant surface restart
+        
+        if (autoStretch) {
+            lp.width = FrameLayout.LayoutParams.MATCH_PARENT;
+            lp.height = FrameLayout.LayoutParams.MATCH_PARENT;
+            lp.gravity = Gravity.NO_GRAVITY;
+            lp.leftMargin = 0;
+            lp.topMargin = 0;
+            if (lp.bottomMargin != target) {
+                lp.bottomMargin = target;
+                surfaceView.setLayoutParams(lp);
+            }
+        } else {
             lp.bottomMargin = target;
-            surfaceView.setLayoutParams(lp);
+            adjustSurfaceViewLayout(lp);
         }
+        
         if (extraKeysBar != null)
             extraKeysBar.setTranslationY(-mImeBottom);
+    }
+    
+    private void adjustSurfaceViewLayout(FrameLayout.LayoutParams lp) {
+        if (customScreenWidth <= 0 || customScreenHeight <= 0 || mRoot == null) {
+            lp.width = FrameLayout.LayoutParams.MATCH_PARENT;
+            lp.height = FrameLayout.LayoutParams.MATCH_PARENT;
+            lp.gravity = Gravity.NO_GRAVITY;
+            lp.leftMargin = 0;
+            lp.topMargin = 0;
+            surfaceView.setLayoutParams(lp);
+            surfaceOffsetX = 0f;
+            surfaceOffsetY = 0f;
+            surfaceScale = 1f;
+            return;
+        }
+        
+        int parentW = mRoot.getWidth();
+        int parentH = mRoot.getHeight();
+        if (parentW <= 0 || parentH <= 0) {
+            return;
+        }
+        
+        float customRatio = (float) customScreenWidth / customScreenHeight;
+        float screenRatio = (float) parentW / parentH;
+        
+        int surfaceW, surfaceH;
+        if (customRatio > screenRatio) {
+            surfaceW = parentW;
+            surfaceH = (int) (parentW / customRatio);
+        } else {
+            surfaceH = parentH;
+            surfaceW = (int) (parentH * customRatio);
+        }
+        
+        lp.width = surfaceW;
+        lp.height = surfaceH;
+        lp.gravity = Gravity.CENTER;
+        lp.leftMargin = 0;
+        lp.topMargin = 0;
+        surfaceView.setLayoutParams(lp);
+        
+        surfaceOffsetX = (parentW - surfaceW) / 2f;
+        surfaceOffsetY = (parentH - surfaceH) / 2f;
+        surfaceScale = (float) surfaceW / customScreenWidth;
     }
 
     // Show/hide the extra-keys bar and re-apply the layout so the display area
@@ -1532,17 +1596,24 @@ public class MainActivity extends Activity
                 requestPointerCaptureAfterClick();
             }
             if (action == MotionEvent.ACTION_HOVER_MOVE) {
-                        
-                // Масштабирование
-                float scaleX = (customScreenWidth > 0 && viewWidth > 0) ? 
-                        (float)customScreenWidth / viewWidth : 1.0f;
-                float scaleY = (customScreenHeight > 0 && viewHeight > 0) ? 
-                        (float)customScreenHeight / viewHeight : 1.0f;
+                float nativeX, nativeY;
+                if (autoStretch) {
+                    float scaleX = (customScreenWidth > 0 && viewWidth > 0) ? 
+                            (float)customScreenWidth / viewWidth : 1.0f;
+                    float scaleY = (customScreenHeight > 0 && viewHeight > 0) ? 
+                            (float)customScreenHeight / viewHeight : 1.0f;
+                    nativeX = event.getX() * scaleX;
+                    nativeY = event.getY() * scaleY;
+                } else {
+                    nativeX = (event.getX() - surfaceOffsetX) / surfaceScale;
+                    nativeY = (event.getY() - surfaceOffsetY) / surfaceScale;
+                }
         
                 pointerX = event.getX();
                 pointerY = event.getY();
                 ensurePointerPosition();
                 mNative.sendMouseMotion(event.getX()*scaleX, event.getY()*scaleY,
+                mNative.sendMouseMotion(nativeX, nativeY,
                                       event.getAxisValue(MotionEvent.AXIS_RELATIVE_X),
                                       event.getAxisValue(MotionEvent.AXIS_RELATIVE_Y));
                 return true;
@@ -1750,16 +1821,27 @@ public class MainActivity extends Activity
         float dx = 0f;
         float dy = 0f;
         
-        // Масштабирование
-        float scaleX = (customScreenWidth > 0 && viewWidth > 0) ? 
-                   (float)customScreenWidth / viewWidth : 1.0f;
-        float scaleY = (customScreenHeight > 0 && viewHeight > 0) ? 
-                   (float)customScreenHeight / viewHeight : 1.0f;
-        
-        if (event.getHistorySize() > 0) {
-            int last = event.getHistorySize() - 1;
-            dx = (event.getX() - event.getHistoricalX(0, last))*scaleX;
-            dy = (event.getY() - event.getHistoricalY(0, last))*scaleY;
+        float nativeX, nativeY;
+        if (autoStretch) {
+            float scaleX = (customScreenWidth > 0 && viewWidth > 0) ? 
+                       (float)customScreenWidth / viewWidth : 1.0f;
+            float scaleY = (customScreenHeight > 0 && viewHeight > 0) ? 
+                       (float)customScreenHeight / viewHeight : 1.0f;
+            nativeX = event.getX() * scaleX;
+            nativeY = event.getY() * scaleY;
+            if (event.getHistorySize() > 0) {
+                int last = event.getHistorySize() - 1;
+                dx = (event.getX() - event.getHistoricalX(0, last))*scaleX;
+                dy = (event.getY() - event.getHistoricalY(0, last))*scaleY;
+            }
+        } else {
+            nativeX = (event.getX() - surfaceOffsetX) / surfaceScale;
+            nativeY = (event.getY() - surfaceOffsetY) / surfaceScale;
+            if (event.getHistorySize() > 0) {
+                int last = event.getHistorySize() - 1;
+                dx = (event.getX() - event.getHistoricalX(0, last)) / surfaceScale;
+                dy = (event.getY() - event.getHistoricalY(0, last)) / surfaceScale;
+            }
         }
         if (Float.isFinite(event.getX()) && Float.isFinite(event.getY())) {
             pointerX = event.getX();
@@ -1767,6 +1849,7 @@ public class MainActivity extends Activity
             ensurePointerPosition();
         }
         mNative.sendMouseMotion(event.getX() * scaleX, event.getY() * scaleY, dx, dy);
+        mNative.sendMouseMotion(nativeX, nativeY, dx, dy);
 
         updateMouseButtonStateFromEvent(event);
         return true;
@@ -1790,52 +1873,62 @@ public class MainActivity extends Activity
         int pointerIdx = event.getActionIndex();
         int pointerId = event.getPointerId(pointerIdx);
     
-        // Масштабирование
-        float scaleX = (customScreenWidth > 0 && viewWidth > 0) ? 
-                       (float)customScreenWidth / viewWidth : 1.0f;
-        float scaleY = (customScreenHeight > 0 && viewHeight > 0) ? 
-                       (float)customScreenHeight / viewHeight : 1.0f;
-    
         switch (action) {
             case MotionEvent.ACTION_DOWN:
             case MotionEvent.ACTION_POINTER_DOWN:
-                mNative.sendTouch(0, 
-                    event.getX(pointerIdx) * scaleX, 
-                    event.getY(pointerIdx) * scaleY, 
-                    pointerId);
+                float[] downCoords = convertToNativeCoords(event.getX(pointerIdx), event.getY(pointerIdx));
+                mNative.sendTouch(0, downCoords[0], downCoords[1], pointerId);
                 mNative.sendTouchFrame();
                 return true;
             
             case MotionEvent.ACTION_UP:
             case MotionEvent.ACTION_POINTER_UP:
-                mNative.sendTouch(1, 
-                    event.getX(pointerIdx) * scaleX, 
-                    event.getY(pointerIdx) * scaleY, 
-                    pointerId);
+                float[] upCoords = convertToNativeCoords(event.getX(pointerIdx), event.getY(pointerIdx));
+                mNative.sendTouch(1, upCoords[0], upCoords[1], pointerId);
                 mNative.sendTouchFrame();
                 return true;
             
             case MotionEvent.ACTION_MOVE:
                 for (int i = 0; i < event.getPointerCount(); i++) {
-                    mNative.sendTouch(2, 
-                        event.getX(i) * scaleX, 
-                        event.getY(i) * scaleY, 
-                        event.getPointerId(i));
+                    float[] moveCoords = convertToNativeCoords(event.getX(i), event.getY(i));
+                    mNative.sendTouch(2, moveCoords[0], moveCoords[1], event.getPointerId(i));
                 }
                 mNative.sendTouchFrame();
                 return true;
             
             case MotionEvent.ACTION_CANCEL:
                 for (int i = 0; i < event.getPointerCount(); i++) {
-                    mNative.sendTouch(1, 
-                        event.getX(i) * scaleX, 
-                        event.getY(i) * scaleY, 
-                        event.getPointerId(i));
+                    float[] cancelCoords = convertToNativeCoords(event.getX(i), event.getY(i));
+                    mNative.sendTouch(1, cancelCoords[0], cancelCoords[1], event.getPointerId(i));
                 }
                 mNative.sendTouchFrame();
                 return true;
         }
         return false;
+    }
+    
+    private float[] convertToNativeCoords(float x, float y) {
+        if (autoStretch) {
+            float scaleX = (customScreenWidth > 0 && viewWidth > 0) ? 
+                           (float)customScreenWidth / viewWidth : 1.0f;
+            float scaleY = (customScreenHeight > 0 && viewHeight > 0) ? 
+                           (float)customScreenHeight / viewHeight : 1.0f;
+            return new float[]{x * scaleX, y * scaleY};
+        } else {
+            return new float[]{(x - surfaceOffsetX) / surfaceScale, (y - surfaceOffsetY) / surfaceScale};
+        }
+    }
+    
+    private float[] convertMouseToNative(float x, float y) {
+        if (autoStretch) {
+            float scaleX = (customScreenWidth > 0 && viewWidth > 0) ? 
+                           (float)customScreenWidth / viewWidth : 1.0f;
+            float scaleY = (customScreenHeight > 0 && viewHeight > 0) ? 
+                           (float)customScreenHeight / viewHeight : 1.0f;
+            return new float[]{x * scaleX, y * scaleY};
+        } else {
+            return new float[]{x / surfaceScale, y / surfaceScale};
+        }
     }
 
 }

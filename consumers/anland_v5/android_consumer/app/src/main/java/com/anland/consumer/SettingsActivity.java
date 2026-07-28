@@ -862,6 +862,22 @@ public class SettingsActivity extends Activity {
     hint.setTextColor(Color.GRAY);
     hint.setPadding(0, dp(4), 0, 0);
     root.addView(hint);
+
+    Switch autoStretchSwitch = new Switch(this);
+    autoStretchSwitch.setText(R.string.auto_stretch_switch);
+    autoStretchSwitch.setTextSize(14);
+    autoStretchSwitch.setPadding(0, dp(16), 0, 0);
+    autoStretchSwitch.setChecked(prefs.getBoolean("auto_stretch", true));
+    autoStretchSwitch.setOnCheckedChangeListener((v, checked) ->
+        prefs.edit().putBoolean("auto_stretch", checked).apply());
+    root.addView(autoStretchSwitch);
+
+    TextView autoStretchHint = new TextView(this);
+    autoStretchHint.setText(R.string.auto_stretch_hint);
+    autoStretchHint.setTextSize(12);
+    autoStretchHint.setTextColor(Color.GRAY);
+    autoStretchHint.setPadding(0, dp(4), 0, 0);
+    root.addView(autoStretchHint);
     }
 
     // Maps a res_preset_labels index to {width, height}, or null for the index-0
