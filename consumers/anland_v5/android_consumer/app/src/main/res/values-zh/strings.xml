@@ -90,6 +90,8 @@
     <string name="width_hint">宽度（例如 1920）</string>
     <string name="height_hint">高度（例如 1080）</string>
     <string name="resolution_hint">选择预设或手动输入数值。填 0 表示原生分辨率。\"Screen ×\" 会按本设备面板（横向）缩放。下次连接时生效。</string>
+    <string name="auto_stretch_switch">自动拉伸显示</string>
+    <string name="auto_stretch_hint">开启时，显示内容会填满屏幕（必要时拉伸）。关闭时，显示内容保持自定义分辨率的宽高比，四周留黑边（信箱模式）。输入坐标会自动映射。</string>
 
     <!-- Settings notification -->
     <string name="notification_switch">显示设置通知</string>
