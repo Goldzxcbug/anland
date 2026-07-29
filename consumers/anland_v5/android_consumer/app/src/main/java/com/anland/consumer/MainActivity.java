@@ -129,6 +129,106 @@ public class MainActivity extends Activity
     private boolean isTouchpadMode = true;
     // Finger-gesture touchpad (relative motion, taps, drag, two-finger scroll).
     private VirtualTouchpad virtualTouchpad;
+    // Reuses the original VirtualTouchpad gesture state machine for raw
+    // SOURCE_TOUCHPAD events. Its movement output is intentionally ignored;
+    // raw relative axes still go through the capture-specific cursor adapter.
+    private VirtualTouchpad capturedTouchpadRecognizer;
+
+    // Point
+
+public class MainActivity extends Activity
+        implements SurfaceHolder.Callback, SystemIME.Host {
+    private static final String TAG = "Anland";
+
+    private SurfaceView surfaceView;
+    private boolean surfaceReady = false;
+    // System-clipboard bridge; also the target for the native clipboard callbacks.
+    private Clipboard clipboard;
+    private static final String PREFS_NAME = "anland_settings";
+    private int customScreenWidth = 0;
+    private int customScreenHeight = 0;
+    private int viewWidth = 0;
+    private int viewHeight = 0;
+    private static final String KEY_BOUND_KEYCODE = "bound_keycode";
+    private static final String KEY_SOCKET_PATH = "socket_path";
+    private static final String KEY_USE_ROOT = "use_root";
+    private static final String KEY_MIC_ENABLED = "mic_enabled";
+    private static final String KEY_CAMERA_ENABLED = "camera_enabled";
+    // Latency presets in ms; 0 = engine default. Shared with SettingsActivity.
+    static final String KEY_SPEAKER_LATENCY_MS = "speaker_latency_ms";
+    static final String KEY_MIC_LATENCY_MS = "mic_latency_ms";
+    private static final int REQ_RECORD_AUDIO = 1001;
+    private static final int REQ_CAMERA = 1002;
+    // Camera service fds/threads are created once and persist across reconnects;
+    // this guards that one-time init (see applyCameraState).
+    private boolean cameraInited = false;
+    private static final String DEFAULT_SOCKET_PATH = "/data/local/tmp/display_daemon.sock";
+    // Multi-instance launch parameters. A secondary window is started with these
+    // Intent extras (see SecondaryActivity / SettingsActivity); the launcher icon
+    // starts MainActivity with none, i.e. the default socket and window name "anland".
+    static final String EXTRA_SOCKET_PATH = "socket_path";
+    static final String EXTRA_WINDOW_NAME = "window_name";
+    // This window's own native transport instance (its own consumer_state handle).
+    private Native mNative;
+    // Socket path from the launch Intent; overrides the saved pref when non-null.
+    private String mSocketOverride = null;
+    // Title shown in recents / freeform (setTaskDescription); default "anland".
+    private String mWindowName = "anland";
+    // Live windows keyed by their resolved socket path, so a launch that targets a
+    // socket already on screen can focus that window instead of opening a duplicate.
+    // Only touched on the main thread (onCreate / onResume / onDestroy).
+    private static final java.util.Map<String, MainActivity> sWindowsBySocket =
+            new java.util.HashMap<>();
+    // The socket path this window is currently registered under in sWindowsBySocket.
+    private String mRegisteredSocket = null;
+    // Set when onCreate found the target socket missing and bounced to Settings
+    // (no pipeline was ever initialized). Makes onPause/onResume no-op-and-exit.
+    private boolean mForceSettings = false;
+    private static final String KEY_ACCESSIBILITY_ENABLED = "accessibility_key_intercept";
+    private static final String KEY_EXTRA_KEYS_MODE = "extra_keys_mode";
+    private static final String KEY_BACK_OPENS_EXTRA_KEYS = "back_opens_extra_keys";
+    private static final String KEY_EXTRA_KEYS_LAYOUT = "extra_keys_layout";
+    // Linux input-event-codes.h: KEY_BACK (the browser-back key).
+    private static final int EVDEV_BROWSER_BACK = 158;
+    // When on, the IME and extra-keys bar float over the display instead of
+    // shrinking it: the bar rides up with the keyboard but the surface keeps
+    // its full size. See relayout() and buildExtraKeysBar().
+    private static final String KEY_KEYBOARD_FLOATING = "keyboard_floating";
+    private boolean mKeyboardFloating = false;
+    // Persistent "tap to open Settings" notification, toggleable in Settings > General.
+    private static final String KEY_NOTIFICATION_ENABLED = "settings_notification";
+    private static final String KEY_AUTO_STRETCH = "auto_stretch";
+    private boolean autoStretch = true;
+    private float surfaceOffsetX = 0f;
+    private float surfaceOffsetY = 0f;
+    private float surfaceScale = 1f;
+    // System soft-keyboard bridge: hidden input, text forwarding and toggle.
+    private SystemIME systemIme;
+    private int mImeBottom = 0;   // last IME bottom inset
+    private int mBarHeight = 0;   // extra-keys bar height in px
+    private ExtraKeysBar extraKeysBar;
+    private FrameLayout mRoot;    // content root, host of the extra-keys bar
+    private float mDensity = 1f;
+    // Layout JSON the current bar was built from; used to detect edits on resume.
+    private String mAppliedLayoutJson = "";
+
+    public static MainActivity sInstance;
+
+    // ADDED: VirtualKeyboardView instance
+    private VirtualKeyboardView virtualKeyboardView;
+
+    // ==================== 触摸板相关设置 ====================
+    public static final String KEY_TOUCHPAD_MODE = "touchpad_mode";
+    public static final String KEY_MOUSE_ACCEL = "mouse_speed"; // 名称仍为 speed，实际控制加速度强度
+    // Capture an external mouse/touchpad as a relative pointer so it cannot reach
+    // the Android screen edges. This is deliberately opt-in: existing installations
+    // keep the old absolute-pointer behaviour until the user enables it.
+    public static final String KEY_POINTER_CAPTURE = "pointer_capture";
+
+    // Routing gate: when on, non-mouse touches go to the virtual touchpad.
+    private boolean isTouchpadMode = true;
+    // Finger-gesture touchpad (relative motion, taps, drag, two-finger scroll).
+    private VirtualTouchpad virtualTouchpad;
 
     // Pointer-capture state. Android delivers captured mouse/touchpad events
     // directly to the view hierarchy, bypassing
