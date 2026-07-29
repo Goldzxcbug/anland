@@ -788,14 +788,14 @@ public class MainActivity extends Activity
         int action = event.getActionMasked();
 
         if (capturedTouchActive || event.getPointerCount() >= 2) {
+            boolean entering = !capturedTouchActive;
             capturedTouchActive = action != MotionEvent.ACTION_UP
                     && action != MotionEvent.ACTION_CANCEL;
             if (!capturedTouchActive)
                 capturedPadBaselineValid = false;
-            return handleCapturedTouchEvent(event);
-        }
-
-        if (action == MotionEvent.ACTION_MOVE || action == MotionEvent.ACTION_HOVER_MOVE) {
+            handleCapturedTouchEvent(event, entering);
+        } else if (action == MotionEvent.ACTION_MOVE
+                || action == MotionEvent.ACTION_HOVER_MOVE) {
             for (int i = 0; i < event.getHistorySize(); i++)
                 sendCapturedPadMotionSample(event, i);
             sendCapturedPadMotionSample(event, -1);
@@ -805,6 +805,8 @@ public class MainActivity extends Activity
             capturedPadBaselineValid = false;
         }
 
+        // Physical pad buttons are tracked on both paths: a click held through a
+        // multi-finger gesture would otherwise never be released.
         if (action == MotionEvent.ACTION_CANCEL)
             releaseAllMouseButtons();
         else
@@ -888,22 +890,50 @@ public class MainActivity extends Activity
     }
 
     /**
-     * Forward a captured multi-finger gesture as touch events, exactly the way the
-     * uncaptured path does. Every pointer keeps its own coordinates — collapsing the
+     * Forward a captured multi-finger gesture as touch events through the shared
+     * touchscreen path. Every pointer keeps its own coordinates — collapsing the
      * gesture to a single point would make a pinch impossible to reconstruct.
      *
      * A captured touchpad is a SOURCE_CLASS_POSITION device, so its X/Y are pad-local
      * absolute units rather than the view coordinates Android hands out without
      * capture. Map them back into view space first, then run the unmodified
      * handleTouchEvent over the result.
+     *
+     * @param entering true on the event that promotes this gesture from cursor motion
+     *                 to touch. The fingers already resting on the pad were consumed
+     *                 by the cursor path, so the remote never saw a down for them, and
+     *                 handleTouchEvent only reports the pointer named by the action
+     *                 index. KWin drops motion for an id it never saw go down, which
+     *                 is why the remote would otherwise show a single contact.
      */
-    private boolean handleCapturedTouchEvent(MotionEvent event) {
+    private boolean handleCapturedTouchEvent(MotionEvent event, boolean entering) {
         MotionEvent normalized = normalizeCapturedTouchpadEvent(event);
         try {
+            if (entering)
+                sendCapturedTouchDowns(normalized);
             return handleTouchEvent(normalized);
         } finally {
             normalized.recycle();
         }
+    }
+
+    /** Announce a down for every pointer handleTouchEvent will not report itself. */
+    private void sendCapturedTouchDowns(MotionEvent event) {
+        int action = event.getActionMasked();
+        // handleTouchEvent emits this pointer's own down; the others need one here.
+        int selfReported = (action == MotionEvent.ACTION_DOWN
+                || action == MotionEvent.ACTION_POINTER_DOWN)
+                ? event.getActionIndex() : -1;
+        boolean sent = false;
+        for (int i = 0; i < event.getPointerCount(); i++) {
+            if (i == selfReported)
+                continue;
+            float[] coords = convertToNativeCoords(event.getX(i), event.getY(i));
+            mNative.sendTouch(0, coords[0], coords[1], event.getPointerId(i));
+            sent = true;
+        }
+        if (sent)
+            mNative.sendTouchFrame();
     }
 
     /**
