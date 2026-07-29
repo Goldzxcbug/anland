@@ -1,619 +1,931 @@
-package com.anland.consumer;
+package com.anland.consumer; 
+  
+ import android.content.Context; 
+ import android.content.res.Resources; 
+ import android.graphics.Canvas; 
+ import android.graphics.Color; 
+ import android.graphics.Paint; 
+ import android.graphics.Rect; 
+ import android.util.Log; 
+ import android.util.SparseArray; 
+ import android.view.KeyEvent; 
+ import android.view.MotionEvent; 
+ import android.view.View; 
+ import android.view.ViewGroup; 
+ import android.view.ViewParent; 
+  
+ import java.util.ArrayList; 
+ import java.util.HashMap; 
+ import java.util.List; 
+ import java.util.Map; 
+  
+ public class VirtualKeyboardView extends View { 
+  
+     private static final String TAG = "VirtualKeyboard"; 
+  
+     // ---------- 最终键盘布局 ---------- 
+     private final String[][] keyboardRows = { 
+             {"ESC", "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12"}, 
+             {"`", "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "=", "⌫"}, 
+             {"Tab", "Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P", "[", "]", "\\"}, 
+             {"Caps", "A", "S", "D", "F", "G", "H", "J", "K", "L", ";", "'", "Enter"}, 
+             {"Shift", "Z", "X", "C", "V", "B", "N", "M", ",", "↑", ".", "/", "Shift"},   // ↑ 在 . 前面 
+             {"Ctrl", "Alt", "Space", "Alt", "Home", "←", "↓", "→", "End", "Ctrl"} 
+     }; 
+  
+     // ---------- 符号映射表 ---------- 
+     private static final Map<String, String> SYMBOL_CHAR_MAP = new HashMap<>(); 
+     static { 
+         String[] digits = {"1","2","3","4","5","6","7","8","9","0"}; 
+         String[] digitSymbols = {"!", "@", "#", "$", "%", "^", "&", "*", "(", ")"}; 
+         for (int i = 0; i < digits.length; i++) { 
+             SYMBOL_CHAR_MAP.put(digits[i], digitSymbols[i]); 
+         } 
+         SYMBOL_CHAR_MAP.put("`", "~"); 
+         SYMBOL_CHAR_MAP.put("-", "_"); 
+         SYMBOL_CHAR_MAP.put("=", "+"); 
+         SYMBOL_CHAR_MAP.put("[", "{"); 
+         SYMBOL_CHAR_MAP.put("]", "}"); 
+         SYMBOL_CHAR_MAP.put("\\", "|"); 
+         SYMBOL_CHAR_MAP.put(";", ":"); 
+         SYMBOL_CHAR_MAP.put("'", "\""); 
+         SYMBOL_CHAR_MAP.put(",", "<"); 
+         SYMBOL_CHAR_MAP.put(".", ">"); 
+         SYMBOL_CHAR_MAP.put("/", "?"); 
+     } 
+  
+     private boolean hasSymbol(String label) { 
+         return SYMBOL_CHAR_MAP.containsKey(label); 
+     } 
+  
+     // ---------- 状态 ---------- 
+     private boolean leftShiftOn = false; 
+     private boolean leftCtrlOn  = false; 
+     private boolean leftAltOn   = false; 
+     private boolean rightShiftPressed = false; 
+     private boolean capsLockOn = false; 
+     private boolean symbolLayerActive = false; 
+  
+     private final List<KeyData> keys = new ArrayList<>(); 
+     private final SparseArray<KeyData> activePointers = new SparseArray<>(); 
+  
+     private float lastRawX, lastRawY; 
+     private boolean isDragging = false; 
+     private final int dragHandleHeight; 
+  
+     private int screenWidth, screenHeight; 
+     private OnKeyEventListener listener; 
+  
+     private Paint bgPaint = new Paint(Paint.ANTI_ALIAS_FLAG); 
+     private Paint keyBgPaint = new Paint(Paint.ANTI_ALIAS_FLAG); 
+     private Paint pressedPaint = new Paint(Paint.ANTI_ALIAS_FLAG); 
+     private Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG); 
+     private Paint modActivePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+     private Paint handlePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+     private Paint keyStrokePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
 
-import android.content.Context;
-import android.graphics.Point;
-import android.view.MotionEvent;
-import android.view.ViewConfiguration;
-import android.view.WindowManager;
+     private int keyHeight;
+     private int padding = 4; 
+     private int cornerRadius = 6; 
+  
+     private int keyColor = Color.parseColor("#88E8E8E8"); 
+     private int pressedColor = Color.parseColor("#88B0B0B0"); 
+     private int modActiveColor = Color.parseColor("#8866B0FF"); 
+     private int textColor = Color.WHITE;
+     private int bgColor = Color.parseColor("#33000000");
 
-/**
- * Laptop-style virtual touchpad: interprets finger gestures on the surface as
- * relative mouse motion, taps/clicks, long-press drag and two-finger scroll,
- * forwarding them to the remote through {@link Native}.
- *
- * Self-contained state machine — the host routes non-mouse touches here (see
- * MainActivity.onTouchEvent) when touchpad mode is on, pushes the acceleration
- * preference via {@link #setAccelStrength}, and calls {@link #onSurfaceChanged}
- * when the surface is resized.
- */
-public final class VirtualTouchpad {
-
-    /**
-     * Optional output used by the pointer-capture adapter.  The original
-     * touchpad path keeps writing directly to Native; a capture instance can
-     * reuse the same gesture state machine while supplying its own movement
-     * and coordinate backend.
-     */
-    interface Output {
-        void onMotion(float dx, float dy);
-        void onScroll(int axis, float value);
-        void onButton(int button, boolean pressed);
-    }
-
-    // 状态机
-    private static final int STATE_IDLE = 0;
-    private static final int STATE_ONE_FINGER = 1;
-    private static final int STATE_TWO_FINGER = 2;
-    private static final int STATE_DRAGGING = 3;
-    private int currentState = STATE_IDLE;
-
-    private float lastX1, lastY1;
-    private float startX1, startY1;
-    private float lastX2, lastY2;
-    private long downTime1;
-    private final float touchSlop;
-
-    private boolean isSingleTapCandidate = false;
-    private boolean isTwoFingerTapCandidate = false;
-    private boolean isDraggingActive = false;
-
-    private long lastTapTime = 0;
-    private float lastTapX, lastTapY;
-    private boolean isDoubleTapPending = false;
-
-    private static final long TOUCH_LONG_PRESS_TIMEOUT = 500;
-    private boolean hasLongPressed = false;
-    private boolean isLongPressPossible = false;
-    private boolean isMultiFinger = false;
-
-    // Two-finger classification, decided once per two-finger phase so a gesture
-    // cannot oscillate between scrolling and being declined.
-    private static final int TWO_FINGER_UNDECIDED = 0;
-    private static final int TWO_FINGER_SCROLL = 1;
-    private static final int TWO_FINGER_NOT_SCROLL = 2;
-    private static final int TWO_FINGER_PINCH = 3;
-    private int twoFingerMode = TWO_FINGER_UNDECIDED;
-    // Both fingers' positions when the two-finger phase began. The scroll test
-    // measures displacement from here rather than frame to frame, matching AOSP.
-    private float twoFingerStartX1, twoFingerStartY1;
-    private float twoFingerStartX2, twoFingerStartY2;
-
-    /** Consumed here: cursor motion, scroll, or a click. */
-    static final int GESTURE_HANDLED = 0;
-    /**
-     * A pinch. The host should synthesize two touch points around the cursor and
-     * scale their separation by {@link #pinchScaleFactor()}, the way AOSP does in
-     * GestureConverter::handlePinch, rather than mapping the real pad coordinates.
-     */
-    static final int GESTURE_PINCH = 1;
-    /** Anything else: the host should forward the real contacts as touch. */
-    static final int GESTURE_UNHANDLED = 2;
-
-    // Latched for the rest of the gesture once this class stops consuming it, so the
-    // host sees the whole remaining stream (including the final UP) and can release
-    // whatever it synthesized. GESTURE_HANDLED means nothing is latched.
-    private int declinedResult = GESTURE_HANDLED;
-    // Ratio of the fingers' separation to the previous event's, AOSP's pinch.dz.
-    private float pinchScale = 1.0f;
-    private float lastSpan = 0f;
-
-    // AOSP's equivalents are 1.5mm and 7.0mm ("Two Finger Scroll/Move Distance
-    // Thresh" in libgestures). Coordinates here are view pixels rather than
-    // millimetres, so the physical values do not carry over; these keep AOSP's
-    // ~4.7:1 ratio and scale off touchSlop instead.
-    private final float scrollDistanceThreshold;
-    private final float moveDistanceThreshold;
-
-    // 鼠标位置（相对模式）
-    private float mouseX = 0;
-    private float mouseY = 0;
-    private int screenWidth = 1920;
-    private int screenHeight = 1080;
-
-    private float mouseAccelStrength = 1.0f; // 加速度强度，0.5 ~ 10.0
-
-    // ===== 调整后的平滑/抗抖动参数（更灵敏、更连续） =====
-    private static final float DEAD_ZONE = 0.3f;          // 死区从 0.5 降到 0.3
-    private static final float SMOOTHING_FACTOR = 0.45f;   // 提高响应速度
-    private static final float ACCUMULATED_THRESHOLD = 0.1f; // 从 0.8 大幅降低，让移动更连续
-
-    private float smoothedDx = 0f;
-    private float smoothedDy = 0f;
-    private float accumulatedX = 0f;
-    private float accumulatedY = 0f;
-    private boolean smoothInitialized = false;
-
-    private final Context context;
-    private final Native mNative;
-    private final Output output;
-    // The original on-screen touchpad emits an explicit double-click sequence.
-    // Captured hardware taps already arrive as separate clicks, so emitting a
-    // second synthetic pair would turn two taps into three clicks.
-    private final boolean synthesizeDoubleTap;
-
-    VirtualTouchpad(Context context, Native n) {
-        this(context, n, null);
-    }
-
-    VirtualTouchpad(Context context, Native n, Output output) {
-        this.context = context;
-        this.mNative = n;
-        this.output = output;
-        this.synthesizeDoubleTap = output == null;
-        touchSlop = ViewConfiguration.get(context).getScaledTouchSlop();
-        scrollDistanceThreshold = touchSlop * 0.5f;
-        moveDistanceThreshold = touchSlop * 2.35f;
-        updateScreenSize();
-        mouseX = screenWidth / 2f;
-        mouseY = screenHeight / 2f;
-    }
-
-    /** Set the acceleration strength (clamped to 0.5 ~ 10.0). */
-    void setAccelStrength(float strength) {
-        mouseAccelStrength = Math.max(0.5f, Math.min(10.0f, strength));
-    }
-
-    /** Re-read screen size and re-anchor the cursor after a surface resize. */
-    void onSurfaceChanged() {
-        updateScreenSize();
-        mouseX = clamp(mouseX, 0, screenWidth);
-        mouseY = clamp(mouseY, 0, screenHeight);
-        resetSmoothing();
-    }
-
-    /** Cancel an in-progress gesture when the capture window loses focus. */
-    void cancel() {
-        if (isDraggingActive)
-            sendButton(0x110, false);
-        resetTouchpadState();
-        resetSmoothing();
-        lastTapTime = 0L;
-        lastTapX = 0f;
-        lastTapY = 0f;
-    }
-
-    /** Larger of the two by magnitude, keeping its sign (libgestures MaxMag). */
-    private static float maxMag(float a, float b) {
-        return Math.abs(a) > Math.abs(b) ? a : b;
-    }
-
-    /** Smaller of the two by magnitude, keeping its sign (libgestures MinMag). */
-    private static float minMag(float a, float b) {
-        return Math.abs(a) < Math.abs(b) ? a : b;
-    }
-
-    /**
-     * Classify a two-finger phase, following the rule AOSP's touchpad gesture
-     * library uses (libgestures ImmediateInterpreter::GetTwoFingerGestureType):
-     * take each finger's displacement since the phase began, pick whichever axis
-     * dominates, and require both fingers to have travelled the same way along it.
-     *
-     * A pinch moves the fingers in opposite directions, so the sign product is
-     * negative and it is not a scroll. One finger resting while the other travels
-     * zeroes the small term, which also fails the test — AOSP calls that a cursor
-     * move; here everything that is not a scroll is left to the host.
-     */
-    private int classifyTwoFinger(float x1, float y1, float x2, float y2) {
-        float dx1 = x1 - twoFingerStartX1;
-        float dy1 = y1 - twoFingerStartY1;
-        float dx2 = x2 - twoFingerStartX2;
-        float dy2 = y2 - twoFingerStartY2;
-
-        float largeDx = maxMag(dx1, dx2);
-        float largeDy = maxMag(dy1, dy2);
-        float large;
-        float small;
-        if (Math.abs(largeDx) > Math.abs(largeDy)) {
-            large = largeDx;
-            small = minMag(dx1, dx2);
-        } else {
-            large = largeDy;
-            small = minMag(dy1, dy2);
-        }
-        if (Math.abs(small) < scrollDistanceThreshold)
-            small = 0f;
-
-        if (large * small <= 0f) {
-            // Not the same direction. Stay undecided until one finger has clearly
-            // committed, so a two-finger tap is still allowed to become a click.
-            if (Math.abs(large) < moveDistanceThreshold)
-                return TWO_FINGER_UNDECIDED;
-            // Strictly opposite directions is a pinch; a zero product means one finger
-            // is resting while the other travels, which is not a pinch.
-            return large * small < 0f ? TWO_FINGER_PINCH : TWO_FINGER_NOT_SCROLL;
-        }
-        return Math.abs(large) < scrollDistanceThreshold
-                ? TWO_FINGER_UNDECIDED : TWO_FINGER_SCROLL;
-    }
-
-    /** Separation of the two fingers, used to derive the pinch scale factor. */
-    private static float span(float x1, float y1, float x2, float y2) {
-        return (float) Math.hypot(x2 - x1, y2 - y1);
-    }
-
-    /**
-     * Ratio of the fingers' separation to the previous event's — AOSP's pinch.dz.
-     * Only meaningful on an event that reported {@link #GESTURE_PINCH}.
-     */
-    float pinchScaleFactor() {
-        return pinchScale;
-    }
-
-    /**
-     * Give up on the current gesture: release anything in progress and latch the
-     * unhandled flag so every remaining event reports unhandled, including the final
-     * UP. The host needs that whole tail to release the touch points it forwarded.
-     */
-    private int declineGesture(int result) {
-        if (isDraggingActive)
-            sendButton(0x110, false);
-        isDraggingActive = false;
-        isSingleTapCandidate = false;
-        isTwoFingerTapCandidate = false;
-        isLongPressPossible = false;
-        declinedResult = result;
-        resetSmoothing();
-        return result;
-    }
-
-    private void sendButton(int button, boolean pressed) {
-        if (output != null)
-            output.onButton(button, pressed);
-        else if (mNative != null)
-            mNative.sendMouseButton(button, pressed);
-    }
-
-    private void sendScroll(int axis, float value) {
-        if (output != null)
-            output.onScroll(axis, value);
-        else if (mNative != null)
-            mNative.sendMouseScroll(axis, value);
-    }
-
-    /**
-     * Send a relative movement to an adapter, or preserve the original
-     * absolute-cursor behavior for the normal virtual touchpad.
-     */
-    private void sendMotion(float dx, float dy) {
-        if (output != null) {
-            output.onMotion(dx, dy);
-            return;
-        }
-        mouseX = clamp(mouseX + dx, 0, screenWidth);
-        mouseY = clamp(mouseY + dy, 0, screenHeight);
-        if (mNative != null)
-            mNative.sendMouseMotion(mouseX, mouseY, 0f, 0f);
-    }
-
-    // ==================== 触摸板手势及辅助方法 ====================
-    /**
-     * Interpret one touchpad event.
-     *
-     * Only three gestures are implemented: one finger moves the cursor, two fingers
-     * travelling together scroll, and a quick two-finger tap is a right click.
-     * Anything else — a pinch, three or more fingers — is declined.
-     *
-     * @return {@link #GESTURE_HANDLED}, {@link #GESTURE_PINCH} or
-     *         {@link #GESTURE_UNHANDLED}. A non-handled result latches for the
-     *         remainder of the gesture, so the caller sees the whole stream through
-     *         the final UP and can release whatever it synthesized.
-     */
-    int onTouch(MotionEvent event) {
-        int action = event.getActionMasked();
-        int pointerCount = event.getPointerCount();
-
-        // Once declined, stay declined: the caller is mid-way through representing this
-        // gesture itself and still needs the pointer-up events to release it.
-        if (declinedResult != GESTURE_HANDLED) {
-            int result = declinedResult;
-            if (pointerCount >= 2 && action == MotionEvent.ACTION_MOVE
-                    && result == GESTURE_PINCH) {
-                float newSpan = span(event.getX(0), event.getY(0),
-                        event.getX(1), event.getY(1));
-                pinchScale = lastSpan > 0f && newSpan > 0f ? newSpan / lastSpan : 1.0f;
-                lastSpan = newSpan;
-            } else {
-                pinchScale = 1.0f;
-            }
-            if (action == MotionEvent.ACTION_UP
-                    || action == MotionEvent.ACTION_CANCEL) {
-                resetTouchpadState();
-                resetSmoothing();
-            }
-            return result;
-        }
-
-        switch (action) {
-            case MotionEvent.ACTION_DOWN: {
-                float x = event.getX();
-                float y = event.getY();
-                startX1 = lastX1 = x;
-                startY1 = lastY1 = y;
-                downTime1 = event.getEventTime();
-                hasLongPressed = false;
-                isLongPressPossible = true;
-                isSingleTapCandidate = true;
-                isTwoFingerTapCandidate = false;
-                isDraggingActive = false;
-                isMultiFinger = false;
-                currentState = STATE_ONE_FINGER;
-                twoFingerMode = TWO_FINGER_UNDECIDED;
-                resetSmoothing();
-                break;
-            }
-            case MotionEvent.ACTION_POINTER_DOWN: {
-                isMultiFinger = true;
-                isSingleTapCandidate = false;
-                isLongPressPossible = false;
-                if (currentState == STATE_DRAGGING) {
-                    sendButton(0x110, false);
-                    isDraggingActive = false;
+     // Precomputed colors used per-frame in onDraw. Parsing these strings on
+     // every frame (and once per key) was a source of jank while typing/dragging.
+     private static final int HANDLE_COLOR     = 0x66FFFFFF;
+     private static final int KEY_STROKE_COLOR = 0x44FFFFFF;
+  
+     public interface OnKeyEventListener { 
+         void onKeyDown(int scanCode); 
+         void onKeyUp(int scanCode); 
+     } 
+  
+     public VirtualKeyboardView(Context context) { 
+         super(context); 
+         dragHandleHeight = dpToPx(20); 
+         updateScreenSize(); 
+         initKeys(); 
+         initPaints(); 
+         setFocusable(true); 
+         setFocusableInTouchMode(true); 
+         setClipToOutline(false); 
+         bringToFront(); 
+     } 
+  
+     private void updateScreenSize() {
+        try {
+            // Prefer parent view dimensions (correct in freeform / small-window mode).
+            ViewParent pp = getParent();
+            if (pp instanceof View) {
+                int pw = ((View) pp).getWidth();
+                int ph = ((View) pp).getHeight();
+                if (pw > 0 && ph > 0) {
+                    screenWidth = pw;
+                    screenHeight = ph;
+                    Log.d(TAG, "updateScreenSize (parent): " + screenWidth + "x" + screenHeight);
+                    return;
                 }
-                if (pointerCount == 2) {
-                    currentState = STATE_TWO_FINGER;
-                    isTwoFingerTapCandidate = true;
-                    lastX1 = twoFingerStartX1 = event.getX(0);
-                    lastY1 = twoFingerStartY1 = event.getY(0);
-                    lastX2 = twoFingerStartX2 = event.getX(1);
-                    lastY2 = twoFingerStartY2 = event.getY(1);
-                    twoFingerMode = TWO_FINGER_UNDECIDED;
-                } else if (pointerCount >= 3) {
-                    // Three or more fingers is never one of ours.
-                    return declineGesture(GESTURE_UNHANDLED);
-                }
-                break;
             }
-            case MotionEvent.ACTION_MOVE: {
-                if (pointerCount == 1 && !isMultiFinger) {
-                    float x = event.getX();
-                    float y = event.getY();
-                    float rawDx = x - lastX1;
-                    float rawDy = y - lastY1;
-                    float dist = (float) Math.hypot(x - startX1, y - startY1);
-
-                    if (dist > touchSlop) {
-                        isLongPressPossible = false;
-                        isSingleTapCandidate = false;
-                        // The original state machine intentionally preserves
-                        // this flag through POINTER_UP. In capture mode, clear
-                        // it once the remaining finger actually moves so a
-                        // scroll/drag cannot finish as a right-click.
-                        if (output != null)
-                            isTwoFingerTapCandidate = false;
-                    }
-
-                    if (isLongPressPossible && !hasLongPressed &&
-                            (event.getEventTime() - downTime1) >= TOUCH_LONG_PRESS_TIMEOUT) {
-                        hasLongPressed = true;
-                        currentState = STATE_DRAGGING;
-                        isDraggingActive = true;
-                        sendButton(0x110, true);
-                        mouseX = clamp(mouseX, 0, screenWidth);
-                        mouseY = clamp(mouseY, 0, screenHeight);
-                        if (output != null)
-                            output.onMotion(0f, 0f);
-                        else if (mNative != null)
-                            mNative.sendMouseMotion(mouseX, mouseY, 0f, 0f);
-                        resetSmoothing();
-                        break;
-                    }
-
-                    float[] smoothed = applySmoothing(rawDx, rawDy);
-                    float smoothDx = smoothed[0];
-                    float smoothDy = smoothed[1];
-
-                    if (smoothDx != 0f || smoothDy != 0f) {
-                        // 计算移动距离（平滑后的欧式距离）
-                        float distance = (float) Math.hypot(smoothDx, smoothDy);
-
-                        // 改进的加速度曲线：以 10px 为参考阈值，使小位移也能获得明显加速
-                        float speedFactor = distance / 10.0f;
-                        // 使用 sigmoid-like 曲线：scale = 1 + (strength - 1) * (speed / (1 + speed))
-                        float dynamicScale = 1.0f + (mouseAccelStrength - 1.0f) * (speedFactor / (1.0f + speedFactor));
-                        // 限制范围，防止失控（最大不超过 10 倍）
-                        dynamicScale = Math.max(0.3f, Math.min(10.0f, dynamicScale));
-
-                        float moveX = smoothDx * dynamicScale;
-                        float moveY = smoothDy * dynamicScale;
-                        sendMotion(moveX, moveY);
-                    }
-
-                    lastX1 = x;
-                    lastY1 = y;
-
-                } else if (pointerCount == 2) {
-                    if (currentState == STATE_TWO_FINGER) {
-                        float x1 = event.getX(0);
-                        float y1 = event.getY(0);
-                        float x2 = event.getX(1);
-                        float y2 = event.getY(1);
-
-                        if (twoFingerMode == TWO_FINGER_UNDECIDED) {
-                            twoFingerMode = classifyTwoFinger(x1, y1, x2, y2);
-                            if (twoFingerMode == TWO_FINGER_PINCH) {
-                                // The host rebuilds this from the scale factor, so seed
-                                // the separation and report 1.0 for the opening event —
-                                // the same thing AOSP does for GESTURES_ZOOM_START.
-                                lastSpan = span(x1, y1, x2, y2);
-                                pinchScale = 1.0f;
-                                return declineGesture(GESTURE_PINCH);
-                            }
-                            if (twoFingerMode == TWO_FINGER_NOT_SCROLL) {
-                                // One finger travelling against a resting one: not a
-                                // gesture this class implements, and not a pinch either.
-                                return declineGesture(GESTURE_UNHANDLED);
-                            }
-                        }
-
-                        if (twoFingerMode == TWO_FINGER_SCROLL) {
-                            float avgDx = ((x1 - lastX1) + (x2 - lastX2)) / 2;
-                            float avgDy = ((y1 - lastY1) + (y2 - lastY2)) / 2;
-
-                            if (Math.abs(avgDx) > 1 || Math.abs(avgDy) > 1) {
-                                isTwoFingerTapCandidate = false;
-                                if (Math.abs(avgDy) > Math.abs(avgDx) * 0.5) {
-                                    sendScroll(0, -avgDy * 0.5f);
-                                }
-                                if (Math.abs(avgDx) > Math.abs(avgDy) * 0.5) {
-                                    sendScroll(1, avgDx * 0.5f);
-                                }
-                                lastX1 = x1;
-                                lastY1 = y1;
-                                lastX2 = x2;
-                                lastY2 = y2;
-                            }
-                        } else {
-                            // Still ambiguous, so emit nothing yet, but keep the
-                            // anchors current: the first scroll delta after the
-                            // decision must not be the whole accumulated drift.
-                            lastX1 = x1;
-                            lastY1 = y1;
-                            lastX2 = x2;
-                            lastY2 = y2;
-                        }
-                    }
-                }
-                break;
+            Resources res = getResources();
+            if (res != null) {
+                screenWidth = res.getDisplayMetrics().widthPixels;
+                screenHeight = res.getDisplayMetrics().heightPixels;
+                Log.d(TAG, "updateScreenSize: " + screenWidth + "x" + screenHeight);
             }
-            case MotionEvent.ACTION_POINTER_UP: {
-                int remaining = pointerCount - 1;
-                if (remaining == 1) {
-                    isMultiFinger = false;
-                    isSingleTapCandidate = false;
-                    isLongPressPossible = false;
-                    int idx = (event.getActionIndex() == 0) ? 1 : 0;
-                    lastX1 = event.getX(idx);
-                    lastY1 = event.getY(idx);
-                    startX1 = lastX1;
-                    startY1 = lastY1;
-                    downTime1 = event.getEventTime();
-                    hasLongPressed = false;
-                    currentState = STATE_ONE_FINGER;
-                    resetSmoothing();
-                }
-                break;
+        } catch (Exception e) {
+            Log.e(TAG, "updateScreenSize error", e);
+            screenWidth = 1920;
+            screenHeight = 1080;
+        }
+    } 
+  
+     @Override 
+     protected void onAttachedToWindow() { 
+         super.onAttachedToWindow(); 
+         try { 
+             ViewParent parent = getParent(); 
+             while (parent instanceof ViewGroup) { 
+                 ViewGroup vg = (ViewGroup) parent; 
+                 vg.setClipChildren(false); 
+                 vg.setClipToPadding(false); 
+                 parent = vg.getParent(); 
+             } 
+             View root = getRootView(); 
+             if (root instanceof ViewGroup) { 
+                 ((ViewGroup) root).setClipChildren(false); 
+                 ((ViewGroup) root).setClipToPadding(false); 
+             } 
+             if (getParent() instanceof ViewGroup) { 
+                 bringToFront(); 
+             } 
+         } catch (Exception e) { 
+             Log.e(TAG, "onAttachedToWindow error", e); 
+         } 
+     } 
+  
+     @Override 
+     public void setVisibility(int visibility) { 
+         try { 
+             super.setVisibility(visibility); 
+             if (visibility == VISIBLE) { 
+                 post(() -> { 
+                     try { 
+                         setInitialPosition(); 
+                         applySymbolLayer(); 
+                     } catch (Exception e) { 
+                         Log.e(TAG, "setVisibility VISIBLE init error", e); 
+                     } 
+                 }); 
+             } else if (visibility == GONE) { 
+                 leftShiftOn = false; 
+                 leftCtrlOn = false; 
+                 leftAltOn = false; 
+                 rightShiftPressed = false; 
+                 symbolLayerActive = false; 
+                 if (listener != null) { 
+                     listener.onKeyUp(KeyCodeMapper.getScanCode(KeyEvent.KEYCODE_SHIFT_RIGHT)); 
+                 } 
+                 for (KeyData k : keys) { 
+                     k.modActive = false; 
+                     k.pressed = false; 
+                 } 
+                 applySymbolLayer(); 
+                 invalidate(); 
+             } 
+         } catch (Exception e) { 
+             Log.e(TAG, "setVisibility error", e); 
+         } 
+     } 
+  
+     private void initPaints() { 
+         textPaint.setTextAlign(Paint.Align.CENTER); 
+         textPaint.setAntiAlias(true); 
+         textPaint.setColor(textColor); 
+         textPaint.setShadowLayer(2, 0, 1, Color.BLACK); 
+         keyBgPaint.setAntiAlias(true); 
+         pressedPaint.setAntiAlias(true); 
+         modActivePaint.setAntiAlias(true); 
+         modActivePaint.setColor(modActiveColor); 
+         handlePaint.setColor(HANDLE_COLOR);
+         handlePaint.setAntiAlias(true);
+         keyBgPaint.setStyle(Paint.Style.FILL);
+         keyStrokePaint.setStyle(Paint.Style.STROKE);
+         keyStrokePaint.setStrokeWidth(1);
+         keyStrokePaint.setColor(KEY_STROKE_COLOR);
+     }
+  
+     // ========== 初始化按键 ========== 
+     private void initKeys() { 
+         for (int r = 0; r < keyboardRows.length; r++) { 
+             String[] row = keyboardRows[r]; 
+             for (int c = 0; c < row.length; c++) { 
+                 String rawLabel = row[c]; 
+                 String internalLabel = rawLabel; 
+                 if (rawLabel.equals("Shift")) { 
+                     if (r == 4) { 
+                         if (c == 0) internalLabel = "ShiftL"; 
+                         else if (c == row.length - 1) internalLabel = "ShiftR"; 
+                     } 
+                 } else if (rawLabel.equals("Ctrl")) { 
+                     if (r == 5) { 
+                         if (c == 0) internalLabel = "CtrlL"; 
+                         else if (c == row.length - 1) internalLabel = "CtrlR"; 
+                     } 
+                 } else if (rawLabel.equals("Alt")) { 
+                     if (r == 5) { 
+                         if (c == 1) internalLabel = "AltL"; 
+                         else if (c == 3) internalLabel = "AltR"; 
+                     } 
+                 } 
+  
+                 String displayLabel; 
+                 if (internalLabel.startsWith("Shift")) displayLabel = "Shift"; 
+                 else if (internalLabel.startsWith("Ctrl")) displayLabel = "Ctrl"; 
+                 else if (internalLabel.startsWith("Alt")) displayLabel = "Alt"; 
+                 else displayLabel = rawLabel; 
+  
+                 int keyCode = getKeyCodeForLabel(internalLabel); 
+                 float weight = getWeightForLabel(internalLabel); 
+                 boolean hasSym = hasSymbol(rawLabel); 
+  
+                 KeyData k = new KeyData(displayLabel, keyCode, weight, hasSym); 
+                 k.internalLabel = internalLabel; 
+                 if (hasSym) { 
+                     k.symbolChar = SYMBOL_CHAR_MAP.get(rawLabel); 
+                 } else { 
+                     k.symbolChar = null; 
+                 } 
+                 k.currentLabel = displayLabel; 
+                 k.currentKeyCode = keyCode; 
+                 keys.add(k); 
+             } 
+         } 
+         Log.d(TAG, "Keys initialized: " + keys.size()); 
+     } 
+  
+     private int getKeyCodeForLabel(String label) { 
+         switch (label) { 
+             case "ESC": return KeyEvent.KEYCODE_ESCAPE; 
+             case "F1": return KeyEvent.KEYCODE_F1; 
+             case "F2": return KeyEvent.KEYCODE_F2; 
+             case "F3": return KeyEvent.KEYCODE_F3; 
+             case "F4": return KeyEvent.KEYCODE_F4; 
+             case "F5": return KeyEvent.KEYCODE_F5; 
+             case "F6": return KeyEvent.KEYCODE_F6; 
+             case "F7": return KeyEvent.KEYCODE_F7; 
+             case "F8": return KeyEvent.KEYCODE_F8; 
+             case "F9": return KeyEvent.KEYCODE_F9; 
+             case "F10": return KeyEvent.KEYCODE_F10; 
+             case "F11": return KeyEvent.KEYCODE_F11; 
+             case "F12": return KeyEvent.KEYCODE_F12; 
+             case "`": return KeyEvent.KEYCODE_GRAVE; 
+             case "1": return KeyEvent.KEYCODE_1; 
+             case "2": return KeyEvent.KEYCODE_2; 
+             case "3": return KeyEvent.KEYCODE_3; 
+             case "4": return KeyEvent.KEYCODE_4; 
+             case "5": return KeyEvent.KEYCODE_5; 
+             case "6": return KeyEvent.KEYCODE_6; 
+             case "7": return KeyEvent.KEYCODE_7; 
+             case "8": return KeyEvent.KEYCODE_8; 
+             case "9": return KeyEvent.KEYCODE_9; 
+             case "0": return KeyEvent.KEYCODE_0; 
+             case "-": return KeyEvent.KEYCODE_MINUS; 
+             case "=": return KeyEvent.KEYCODE_EQUALS; 
+             case "⌫": return KeyEvent.KEYCODE_DEL; 
+             case "Tab": return KeyEvent.KEYCODE_TAB; 
+             case "Q": return KeyEvent.KEYCODE_Q; 
+             case "W": return KeyEvent.KEYCODE_W; 
+             case "E": return KeyEvent.KEYCODE_E; 
+             case "R": return KeyEvent.KEYCODE_R; 
+             case "T": return KeyEvent.KEYCODE_T; 
+             case "Y": return KeyEvent.KEYCODE_Y; 
+             case "U": return KeyEvent.KEYCODE_U; 
+             case "I": return KeyEvent.KEYCODE_I; 
+             case "O": return KeyEvent.KEYCODE_O; 
+             case "P": return KeyEvent.KEYCODE_P; 
+             case "[": return KeyEvent.KEYCODE_LEFT_BRACKET; 
+             case "]": return KeyEvent.KEYCODE_RIGHT_BRACKET; 
+             case "\\": return KeyEvent.KEYCODE_BACKSLASH; 
+             case "Caps": return KeyEvent.KEYCODE_CAPS_LOCK; 
+             case "A": return KeyEvent.KEYCODE_A; 
+             case "S": return KeyEvent.KEYCODE_S; 
+             case "D": return KeyEvent.KEYCODE_D; 
+             case "F": return KeyEvent.KEYCODE_F; 
+             case "G": return KeyEvent.KEYCODE_G; 
+             case "H": return KeyEvent.KEYCODE_H; 
+             case "J": return KeyEvent.KEYCODE_J; 
+             case "K": return KeyEvent.KEYCODE_K; 
+             case "L": return KeyEvent.KEYCODE_L; 
+             case ";": return KeyEvent.KEYCODE_SEMICOLON; 
+             case "'": return KeyEvent.KEYCODE_APOSTROPHE; 
+             case "Enter": return KeyEvent.KEYCODE_ENTER; 
+             case "ShiftL": return KeyEvent.KEYCODE_SHIFT_LEFT; 
+             case "ShiftR": return KeyEvent.KEYCODE_SHIFT_RIGHT; 
+             case "Z": return KeyEvent.KEYCODE_Z; 
+             case "X": return KeyEvent.KEYCODE_X; 
+             case "C": return KeyEvent.KEYCODE_C; 
+             case "V": return KeyEvent.KEYCODE_V; 
+             case "B": return KeyEvent.KEYCODE_B; 
+             case "N": return KeyEvent.KEYCODE_N; 
+             case "M": return KeyEvent.KEYCODE_M; 
+             case ",": return KeyEvent.KEYCODE_COMMA; 
+             case "↑": return KeyEvent.KEYCODE_DPAD_UP; 
+             case ".": return KeyEvent.KEYCODE_PERIOD; 
+             case "/": return KeyEvent.KEYCODE_SLASH; 
+             case "CtrlL": return KeyEvent.KEYCODE_CTRL_LEFT; 
+             case "CtrlR": return KeyEvent.KEYCODE_CTRL_RIGHT; 
+             case "AltL": return KeyEvent.KEYCODE_ALT_LEFT; 
+             case "AltR": return KeyEvent.KEYCODE_ALT_RIGHT; 
+             case "Home": return KeyEvent.KEYCODE_MOVE_HOME; 
+             case "End": return KeyEvent.KEYCODE_MOVE_END; 
+             case "Space": return KeyEvent.KEYCODE_SPACE; 
+             case "←": return KeyEvent.KEYCODE_DPAD_LEFT; 
+             case "↓": return KeyEvent.KEYCODE_DPAD_DOWN; 
+             case "→": return KeyEvent.KEYCODE_DPAD_RIGHT; 
+             default: return KeyEvent.KEYCODE_UNKNOWN; 
+         } 
+     } 
+  
+     private float getWeightForLabel(String label) { 
+         switch (label) { 
+             case "ESC": 
+             case "F1": case "F2": case "F3": case "F4": case "F5": 
+             case "F6": case "F7": case "F8": case "F9": case "F10": 
+             case "F11": case "F12": 
+             case "Home": case "End": 
+                 return 1.0f; 
+             case "⌫": return 2.0f; 
+             case "Tab": return 1.5f; 
+             case "Caps": return 1.5f; 
+             case "Enter": return 1.5f; 
+             case "ShiftL": return 1.75f; 
+             case "ShiftR": return 1.75f; 
+             case "CtrlL": return 1.5f; 
+             case "CtrlR": return 1.5f; 
+             case "AltL": return 1.5f; 
+             case "AltR": return 1.5f; 
+             case "Space": return 3.0f; 
+             default: return 1.0f; 
+         } 
+     } 
+  
+     public void setOnKeyEventListener(OnKeyEventListener l) { 
+         this.listener = l; 
+     } 
+  
+     // ========== 测量与布局 ========== 
+     @Override
+    protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+        try {
+            // Refresh screen size so freeform / resize is picked up.
+            updateScreenSize();
+            int desiredWidth = (int) (screenWidth * 0.45f);
+            if (desiredWidth < 400) desiredWidth = 400;
+            // In freeform mode the keyboard must not exceed the parent width.
+            int maxWidth = MeasureSpec.getSize(widthMeasureSpec);
+            if (maxWidth > 0 && desiredWidth > maxWidth) desiredWidth = maxWidth;
+            int rowCount = keyboardRows.length;
+            int keyH = dpToPx(32);
+            int totalHeight = dragHandleHeight + padding + rowCount * (keyH + padding) + padding;
+            if (totalHeight <= 0) totalHeight = 350;
+            setMeasuredDimension(desiredWidth, totalHeight);
+            Log.d(TAG, "onMeasure: " + desiredWidth + "x" + totalHeight);
+        } catch (Exception e) {
+            Log.e(TAG, "onMeasure error", e);
+            setMeasuredDimension(600, 350);
+        }
+    } 
+  
+     @Override 
+     protected void onSizeChanged(int w, int h, int oldw, int oldh) { 
+         super.onSizeChanged(w, h, oldw, oldh); 
+         updateScreenSize(); 
+         try { 
+             layoutKeys(w, h); 
+             post(this::setInitialPosition); 
+         } catch (Exception e) { 
+             Log.e(TAG, "onSizeChanged error", e); 
+         } 
+     } 
+  
+     private void layoutKeys(int viewW, int viewH) { 
+         int totalRows = keyboardRows.length; 
+         if (totalRows == 0) return; 
+  
+         int availH = viewH - dragHandleHeight - padding * (totalRows + 1); 
+         if (availH < 20) availH = 20; 
+         keyHeight = availH / totalRows; 
+         if (keyHeight < 20) keyHeight = 20; 
+  
+         int keyIndex = 0; 
+         for (int row = 0; row < totalRows; row++) { 
+             String[] rowLabels = keyboardRows[row]; 
+             int numKeys = rowLabels.length; 
+  
+             float totalWeight = 0; 
+             for (int c = 0; c < numKeys; c++) { 
+                 KeyData k = keys.get(keyIndex + c); 
+                 totalWeight += k.weight; 
+             } 
+             if (totalWeight <= 0) totalWeight = 1.0f; 
+  
+             int rowWidth = viewW - padding * (numKeys + 1); 
+             if (rowWidth < 10) rowWidth = viewW; 
+             float unit = rowWidth / totalWeight; 
+  
+             int rowY = dragHandleHeight + padding + row * (keyHeight + padding); 
+             if (rowY < 0) rowY = 0; 
+  
+             int x = padding; 
+             for (int c = 0; c < numKeys; c++) { 
+                 KeyData k = keys.get(keyIndex + c); 
+                 int w = (int) (unit * k.weight); 
+                 if (w < 25) w = 25; 
+                 if (c == numKeys - 1) { 
+                     w = viewW - x - padding; 
+                     if (w < 25) w = 25; 
+                 } 
+                 k.rect.set(x, rowY, x + w, rowY + keyHeight); 
+                 x += w + padding; 
+             } 
+             keyIndex += numKeys; 
+         } 
+         Log.d(TAG, "layoutKeys done, keyHeight=" + keyHeight); 
+     } 
+  
+     public void setInitialPosition() {
+        try {
+            if (getWidth() == 0 || getHeight() == 0) {
+                post(this::setInitialPosition);
+                return;
             }
-            case MotionEvent.ACTION_UP: {
-                long duration = event.getEventTime() - downTime1;
-                boolean isQuickTap = duration < 300;
-
-                if (isDraggingActive) {
-                    sendButton(0x110, false);
-                    isDraggingActive = false;
-                    resetTouchpadState();
-                    resetSmoothing();
-                    return GESTURE_HANDLED;
-                }
-
-                if (isTwoFingerTapCandidate && isQuickTap) {
-                    sendButton(0x111, true);
-                    sendButton(0x111, false);
-                    resetTouchpadState();
-                    resetSmoothing();
-                    return GESTURE_HANDLED;
-                }
-
-                if (currentState == STATE_ONE_FINGER && isSingleTapCandidate && isQuickTap) {
-                    long gap = event.getEventTime() - lastTapTime;
-                    float dist = (float) Math.hypot(lastX1 - lastTapX, lastY1 - lastTapY);
-                    if (synthesizeDoubleTap && gap < 300 && dist < touchSlop
-                            && !isDoubleTapPending) {
-                        isDoubleTapPending = true;
-                        sendButton(0x110, true);
-                        sendButton(0x110, false);
-                        sendButton(0x110, true);
-                        sendButton(0x110, false);
-                        isDoubleTapPending = false;
-                        lastTapTime = 0;
-                    } else {
-                        sendButton(0x110, true);
-                        sendButton(0x110, false);
-                        lastTapTime = event.getEventTime();
-                        lastTapX = lastX1;
-                        lastTapY = lastY1;
-                        isDoubleTapPending = false;
-                    }
-                    resetTouchpadState();
-                    resetSmoothing();
-                    return GESTURE_HANDLED;
-                }
-                resetTouchpadState();
-                resetSmoothing();
-                break;
+            int w = getWidth();
+            int h = getHeight();
+            // Use parent view dimensions — correct in freeform / small-window mode.
+            int pw = 0, ph = 0;
+            ViewParent pp = getParent();
+            if (pp instanceof View) {
+                pw = ((View) pp).getWidth();
+                ph = ((View) pp).getHeight();
             }
-            case MotionEvent.ACTION_CANCEL: {
-                if (isDraggingActive) {
-                    sendButton(0x110, false);
-                    isDraggingActive = false;
-                }
-                resetTouchpadState();
-                resetSmoothing();
-                break;
+            if (pw <= 0 || ph <= 0) {
+                // Parent not laid out yet — retry next frame.
+                post(this::setInitialPosition);
+                return;
             }
+            if (w > 0 && h > 0) {
+                float x = (pw - w) / 2f;
+                float y = ph - h - dpToPx(50);
+                // Clamp to visible area.
+                x = Math.max(0, Math.min(x, pw - w));
+                y = Math.max(0, Math.min(y, ph - h));
+                setTranslationX(x);
+                setTranslationY(y);
+                bringToFront();
+                Log.d(TAG, "setInitialPosition: x=" + x + ", y=" + y
+                        + " parent=" + pw + "x" + ph + " view=" + w + "x" + h);
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "setInitialPosition error", e);
         }
-        return GESTURE_HANDLED;
-    }
+    } 
+  
+     // ========== 核心状态管理 ========== 
+     private void updateSymbolLayer() { 
+         symbolLayerActive = leftShiftOn || rightShiftPressed; 
+         applySymbolLayer(); 
+     } 
+  
+     private void applySymbolLayer() { 
+         try { 
+             for (KeyData k : keys) { 
+                 if (k.hasSymbol && k.symbolChar != null) { 
+                     if (symbolLayerActive) { 
+                         k.currentLabel = k.symbolChar; 
+                         k.currentKeyCode = getKeyCodeForSymbol(k.symbolChar); 
+                     } else { 
+                         k.currentLabel = k.defaultLabel; 
+                         k.currentKeyCode = k.defaultKeyCode; 
+                     } 
+                 } 
+             } 
+             for (KeyData k : keys) { 
+                 if ("ShiftL".equals(k.internalLabel)) { 
+                     k.modActive = leftShiftOn; 
+                 } else if ("ShiftR".equals(k.internalLabel)) { 
+                     k.modActive = rightShiftPressed; 
+                 } else if ("CtrlL".equals(k.internalLabel)) { 
+                     k.modActive = leftCtrlOn; 
+                 } else if ("AltL".equals(k.internalLabel)) { 
+                     k.modActive = leftAltOn; 
+                 } else if ("Caps".equals(k.internalLabel)) { 
+                     k.modActive = capsLockOn; 
+                 } 
+             } 
+             invalidate(); 
+         } catch (Exception e) { 
+             Log.e(TAG, "applySymbolLayer error", e); 
+         } 
+     } 
+  
+     private int getKeyCodeForSymbol(String symbol) { 
+         for (Map.Entry<String, String> entry : SYMBOL_CHAR_MAP.entrySet()) { 
+             if (entry.getValue().equals(symbol)) { 
+                 return getKeyCodeForLabel(entry.getKey()); 
+             } 
+         } 
+         return KeyEvent.KEYCODE_UNKNOWN; 
+     } 
+  
+     // ========== 发送按键 ========== 
+     private void sendKey(int keyCode, boolean down) { 
+         if (listener == null) return; 
+         int scan = KeyCodeMapper.getScanCode(keyCode); 
+         if (scan != -1) { 
+             if (down) listener.onKeyDown(scan); 
+             else listener.onKeyUp(scan); 
+         } 
+     } 
+  
+     private void sendKeyWithCaps(int keyCode, boolean down) { 
+         if (listener == null) return; 
+         boolean isLetter = keyCode >= KeyEvent.KEYCODE_A && keyCode <= KeyEvent.KEYCODE_Z; 
+         boolean shouldApplyCaps = isLetter && capsLockOn && !rightShiftPressed; 
+  
+         if (shouldApplyCaps) { 
+             if (down) { 
+                 sendKey(KeyEvent.KEYCODE_SHIFT_LEFT, true); 
+                 sendKey(keyCode, true); 
+             } else { 
+                 sendKey(keyCode, false); 
+                 sendKey(KeyEvent.KEYCODE_SHIFT_LEFT, false); 
+             } 
+         } else { 
+             sendKey(keyCode, down); 
+         } 
+     } 
+  
+     // ---------- 左侧修饰键组合 ---------- 
+     private void executeCombination(int normalKeyCode) { 
+         List<KeyData> mods = new ArrayList<>(); 
+         for (KeyData k : keys) { 
+             if (isLeftModifier(k) && getLeftModifierState(k)) { 
+                 mods.add(k); 
+             } 
+         } 
+         if (mods.isEmpty()) return; 
+  
+         for (KeyData k : mods) { 
+             sendKey(k.currentKeyCode, true); 
+         } 
+         sendKeyWithCaps(normalKeyCode, true); 
+         sendKeyWithCaps(normalKeyCode, false); 
+         for (int i = mods.size() - 1; i >= 0; i--) { 
+             sendKey(mods.get(i).currentKeyCode, false); 
+         } 
+  
+         leftShiftOn = false; 
+         leftCtrlOn = false; 
+         leftAltOn = false; 
+         for (KeyData k : keys) { 
+             if (isLeftModifier(k)) { 
+                 k.modActive = false; 
+             } 
+         } 
+         updateSymbolLayer(); 
+         invalidate(); 
+     } 
+  
+     private boolean isLeftModifier(KeyData k) { 
+         if (k == null) return false; 
+         String in = k.internalLabel; 
+         return "ShiftL".equals(in) || "CtrlL".equals(in) || "AltL".equals(in); 
+     } 
+  
+     private boolean getLeftModifierState(KeyData k) { 
+         if (k == null) return false; 
+         String in = k.internalLabel; 
+         if ("ShiftL".equals(in)) return leftShiftOn; 
+         if ("CtrlL".equals(in)) return leftCtrlOn; 
+         if ("AltL".equals(in)) return leftAltOn; 
+         return false; 
+     } 
+  
+     private void toggleLeftModifier(KeyData k) { 
+         if (k == null) return; 
+         String in = k.internalLabel; 
+         boolean newState; 
+         if ("ShiftL".equals(in)) { 
+             newState = !leftShiftOn; 
+             leftShiftOn = newState; 
+         } else if ("CtrlL".equals(in)) { 
+             newState = !leftCtrlOn; 
+             leftCtrlOn = newState; 
+         } else if ("AltL".equals(in)) { 
+             newState = !leftAltOn; 
+             leftAltOn = newState; 
+         } else { 
+             return; 
+         } 
+         k.modActive = newState; 
+         updateSymbolLayer(); 
+         invalidate(); 
+     } 
+  
+     // ---------- 右修饰键 ---------- 
+     private void pressRightModifier(KeyData k) { 
+         if (k == null) return; 
+         String in = k.internalLabel; 
+         if ("ShiftR".equals(in)) { 
+             rightShiftPressed = true; 
+             sendKey(KeyEvent.KEYCODE_SHIFT_RIGHT, true); 
+             updateSymbolLayer(); 
+         } else if ("CtrlR".equals(in)) { 
+             sendKey(KeyEvent.KEYCODE_CTRL_RIGHT, true); 
+         } else if ("AltR".equals(in)) { 
+             sendKey(KeyEvent.KEYCODE_ALT_RIGHT, true); 
+         } 
+         k.pressed = true; 
+         invalidate(); 
+     } 
+  
+     private void releaseRightModifier(KeyData k) { 
+         if (k == null) return; 
+         String in = k.internalLabel; 
+         if ("ShiftR".equals(in)) { 
+             rightShiftPressed = false; 
+             sendKey(KeyEvent.KEYCODE_SHIFT_RIGHT, false); 
+             updateSymbolLayer(); 
+         } else if ("CtrlR".equals(in)) { 
+             sendKey(KeyEvent.KEYCODE_CTRL_RIGHT, false); 
+         } else if ("AltR".equals(in)) { 
+             sendKey(KeyEvent.KEYCODE_ALT_RIGHT, false); 
+         } 
+         k.pressed = false; 
+         invalidate(); 
+     } 
+  
+     // ========== onTouchEvent ========== 
+     @Override 
+     public boolean onTouchEvent(MotionEvent event) { 
+         try { 
+             int action = event.getActionMasked(); 
+             float x = event.getX(); 
+             float y = event.getY(); 
+  
+             if (action == MotionEvent.ACTION_DOWN && y < dragHandleHeight) { 
+                 isDragging = true; 
+                 lastRawX = x; 
+                 lastRawY = y; 
+                 bringToFront(); 
+                 return true; 
+             } 
+  
+             if (isDragging) { 
+                 switch (action) { 
+                     case MotionEvent.ACTION_MOVE: 
+                         // Use view-relative getX()/getY() instead of getRawX()/getRawY()
+                         // so that dragging works correctly in freeform / small-window mode
+                         // where the window has a screen offset.
+                         float dx = event.getX() - lastRawX; 
+                         float dy = event.getY() - lastRawY; 
+                         float newX = getTranslationX() + dx; 
+                         float newY = getTranslationY() + dy; 
+                         setTranslationX(newX);
+                         setTranslationY(newY);
+                         lastRawX = event.getX();
+                         lastRawY = event.getY(); 
+                         return true; 
+                     case MotionEvent.ACTION_UP: 
+                     case MotionEvent.ACTION_CANCEL: 
+                         isDragging = false; 
+                         return true; 
+                 } 
+                 return true; 
+             } 
+  
+             int pointerIndex = event.getActionIndex(); 
+             int pointerId = event.getPointerId(pointerIndex); 
+             float touchX = event.getX(pointerIndex); 
+             float touchY = event.getY(pointerIndex); 
+             KeyData hitKey = findKeyAt(touchX, touchY); 
+  
+             switch (action) { 
+                 case MotionEvent.ACTION_DOWN: 
+                 case MotionEvent.ACTION_POINTER_DOWN: 
+                     if (hitKey == null) break; 
+  
+                     if (isLeftModifier(hitKey)) { 
+                         toggleLeftModifier(hitKey); 
+                         return true; 
+                     } 
+  
+                     if ("Caps".equals(hitKey.internalLabel)) { 
+                         capsLockOn = !capsLockOn; 
+                         hitKey.modActive = capsLockOn; 
+                         invalidate(); 
+                         return true; 
+                     } 
+  
+                     if (isRightModifier(hitKey)) { 
+                         activePointers.put(pointerId, hitKey); 
+                         pressRightModifier(hitKey); 
+                         return true; 
+                     } 
+  
+                     int code = hitKey.currentKeyCode; 
+                     if (isDirectionKey(code) || code == KeyEvent.KEYCODE_MOVE_HOME || code == KeyEvent.KEYCODE_MOVE_END) { 
+                         activePointers.put(pointerId, hitKey); 
+                         hitKey.pressed = true; 
+                         sendKey(code, true); 
+                         invalidate(); 
+                         return true; 
+                     } 
+  
+                     if (leftShiftOn || leftCtrlOn || leftAltOn) { 
+                         executeCombination(code); 
+                         return true; 
+                     } else { 
+                         activePointers.put(pointerId, hitKey); 
+                         hitKey.pressed = true; 
+                         sendKeyWithCaps(code, true); 
+                         invalidate(); 
+                         return true; 
+                     } 
+  
+                 case MotionEvent.ACTION_UP: 
+                 case MotionEvent.ACTION_POINTER_UP: { 
+                     KeyData released = activePointers.get(pointerId); 
+                     if (released == null) break; 
+                     int relCode = released.currentKeyCode; 
+  
+                     if (isRightModifier(released)) { 
+                         releaseRightModifier(released); 
+                     } else if (isDirectionKey(relCode) || relCode == KeyEvent.KEYCODE_MOVE_HOME || relCode == KeyEvent.KEYCODE_MOVE_END) { 
+                         sendKey(relCode, false); 
+                         released.pressed = false; 
+                     } else if (!isLeftModifier(released) && !"Caps".equals(released.internalLabel)) { 
+                         sendKeyWithCaps(relCode, false); 
+                         released.pressed = false; 
+                     } 
+                     activePointers.remove(pointerId); 
+                     invalidate(); 
+                     break; 
+                 } 
+  
+                 case MotionEvent.ACTION_MOVE: { 
+                     for (int i = 0; i < activePointers.size(); i++) { 
+                         int pid = activePointers.keyAt(i); 
+                         KeyData key = activePointers.valueAt(i); 
+                         int idx = event.findPointerIndex(pid); 
+                         if (idx < 0) continue; 
+                         float px = event.getX(idx); 
+                         float py = event.getY(idx); 
+                         if (!key.rect.contains((int) px, (int) py)) { 
+                             key.pressed = false; 
+                             int kc = key.currentKeyCode; 
+                             if (isRightModifier(key)) { 
+                                 releaseRightModifier(key); 
+                             } else if (isDirectionKey(kc) || kc == KeyEvent.KEYCODE_MOVE_HOME || kc == KeyEvent.KEYCODE_MOVE_END) { 
+                                 sendKey(kc, false); 
+                             } else if (!isLeftModifier(key) && !"Caps".equals(key.internalLabel)) { 
+                                 sendKeyWithCaps(kc, false); 
+                             } 
+                             activePointers.remove(pid); 
+                             invalidate(); 
+                         } 
+                     } 
+                     break; 
+                 } 
+  
+                 case MotionEvent.ACTION_CANCEL: { 
+                     for (int i = 0; i < activePointers.size(); i++) { 
+                         KeyData key = activePointers.valueAt(i); 
+                         key.pressed = false; 
+                         int kc = key.currentKeyCode; 
+                         if (isRightModifier(key)) { 
+                             releaseRightModifier(key); 
+                         } else if (isDirectionKey(kc) || kc == KeyEvent.KEYCODE_MOVE_HOME || kc == KeyEvent.KEYCODE_MOVE_END) { 
+                             sendKey(kc, false); 
+                         } else if (!isLeftModifier(key) && !"Caps".equals(key.internalLabel)) { 
+                             sendKeyWithCaps(kc, false); 
+                         } 
+                     } 
+                     activePointers.clear(); 
+                     leftShiftOn = false; 
+                     leftCtrlOn = false; 
+                     leftAltOn = false; 
+                     rightShiftPressed = false; 
+                     updateSymbolLayer(); 
+                     invalidate(); 
+                     break; 
+                 } 
+             } 
+             return true; 
+         } catch (Exception e) { 
+             Log.e(TAG, "onTouchEvent fatal error", e); 
+             return false; 
+         } 
+     } 
+  
+     private boolean isRightModifier(KeyData k) { 
+         if (k == null) return false; 
+         String in = k.internalLabel; 
+         return "ShiftR".equals(in) || "CtrlR".equals(in) || "AltR".equals(in); 
+     } 
+  
+     private boolean isDirectionKey(int keyCode) { 
+         return keyCode == KeyEvent.KEYCODE_DPAD_UP || 
+                 keyCode == KeyEvent.KEYCODE_DPAD_DOWN || 
+                 keyCode == KeyEvent.KEYCODE_DPAD_LEFT || 
+                 keyCode == KeyEvent.KEYCODE_DPAD_RIGHT; 
+     } 
+  
+     private KeyData findKeyAt(float x, float y) { 
+         for (KeyData k : keys) { 
+             if (k.rect.contains((int) x, (int) y)) return k; 
+         } 
+         return null; 
+     } 
+  
+     @Override 
+     protected void onDraw(Canvas canvas) { 
+         try { 
+             if (keys.isEmpty()) return; 
+  
+             bgPaint.setColor(bgColor); 
+             canvas.drawRoundRect(0, 0, getWidth(), getHeight(), cornerRadius, cornerRadius, bgPaint); 
+  
+             handlePaint.setColor(HANDLE_COLOR);
+             canvas.drawRoundRect(0, 0, getWidth(), dragHandleHeight, cornerRadius, cornerRadius, handlePaint);
+             float dotY = dragHandleHeight / 2f;
+             float dotSpacing = dpToPx(8); 
+             float startX = getWidth() / 2f - dotSpacing; 
+             for (int i = 0; i < 3; i++) { 
+                 canvas.drawCircle(startX + i * dotSpacing, dotY, dpToPx(2), handlePaint); 
+             } 
+  
+             for (KeyData k : keys) { 
+                 Rect r = k.rect; 
+                 int bg; 
+                 if (k.pressed) { 
+                     bg = pressedColor; 
+                 } else if (k.modActive) { 
+                     bg = modActiveColor; 
+                 } else { 
+                     bg = keyColor; 
+                 } 
+                 keyBgPaint.setColor(bg);
+                 canvas.drawRoundRect(r.left, r.top, r.right, r.bottom, cornerRadius, cornerRadius, keyBgPaint);
+                 canvas.drawRoundRect(r.left, r.top, r.right, r.bottom, cornerRadius, cornerRadius, keyStrokePaint);
 
-    private void resetTouchpadState() {
-        currentState = STATE_IDLE;
-        isSingleTapCandidate = false;
-        isTwoFingerTapCandidate = false;
-        isDoubleTapPending = false;
-        hasLongPressed = false;
-        isDraggingActive = false;
-        isLongPressPossible = false;
-        isMultiFinger = false;
-        twoFingerMode = TWO_FINGER_UNDECIDED;
-        // Cleared here rather than in declineGesture: the latch has to outlive the
-        // events that follow it and only lifts when the gesture itself ends.
-        declinedResult = GESTURE_HANDLED;
-        pinchScale = 1.0f;
-        lastSpan = 0f;
-    }
-
-    private void resetSmoothing() {
-        smoothedDx = 0f;
-        smoothedDy = 0f;
-        accumulatedX = 0f;
-        accumulatedY = 0f;
-        smoothInitialized = false;
-    }
-
-    private float[] applySmoothing(float rawDx, float rawDy) {
-        float deadDx = Math.abs(rawDx) < DEAD_ZONE ? 0f : rawDx;
-        float deadDy = Math.abs(rawDy) < DEAD_ZONE ? 0f : rawDy;
-
-        if (deadDx == 0f && deadDy == 0f) {
-            return new float[]{0f, 0f};
-        }
-
-        if (!smoothInitialized) {
-            smoothedDx = deadDx;
-            smoothedDy = deadDy;
-            smoothInitialized = true;
-        } else {
-            smoothedDx = SMOOTHING_FACTOR * deadDx + (1 - SMOOTHING_FACTOR) * smoothedDx;
-            smoothedDy = SMOOTHING_FACTOR * deadDy + (1 - SMOOTHING_FACTOR) * smoothedDy;
-        }
-
-        // 累积阈值大幅降低，让移动更加连续
-        accumulatedX += smoothedDx;
-        accumulatedY += smoothedDy;
-
-        float outX = 0f;
-        float outY = 0f;
-        if (Math.abs(accumulatedX) >= ACCUMULATED_THRESHOLD) {
-            outX = accumulatedX;
-            accumulatedX = 0f;
-        }
-        if (Math.abs(accumulatedY) >= ACCUMULATED_THRESHOLD) {
-            outY = accumulatedY;
-            accumulatedY = 0f;
-        }
-        return new float[]{outX, outY};
-    }
-
-    private float clamp(float value, float min, float max) {
-        return Math.max(min, Math.min(max, value));
-    }
-
-    private void updateScreenSize() {
-        Point size = new Point();
-        WindowManager wm = context.getSystemService(WindowManager.class);
-        if (wm != null) {
-            wm.getDefaultDisplay().getSize(size);
-            screenWidth = size.x;
-            screenHeight = size.y;
-        }
-    }
-}
+                 textPaint.setColor(textColor); 
+                 float textSize = keyHeight * 0.4f; 
+                 if (textSize <= 0) textSize = 20; 
+                 textPaint.setTextSize(textSize); 
+                 float cx = r.centerX(); 
+                 float cy = r.centerY() - ((textPaint.descent() + textPaint.ascent()) / 2); 
+                 String display = k.currentLabel != null ? k.currentLabel : k.defaultLabel; 
+                 canvas.drawText(display, cx, cy, textPaint); 
+             } 
+         } catch (Exception e) { 
+             Log.e(TAG, "onDraw error", e); 
+         } 
+     } 
+  
+     private int dpToPx(int dp) { 
+         try { 
+             return (int) (dp * getResources().getDisplayMetrics().density); 
+         } catch (Exception e) { 
+             return dp; 
+         } 
+     } 
+  
+     // ========== 内部数据类 ========== 
+     private static class KeyData { 
+         Rect rect = new Rect(); 
+         String defaultLabel; 
+         int defaultKeyCode; 
+         String internalLabel; 
+         boolean hasSymbol; 
+         String symbolChar; 
+         String currentLabel; 
+         int currentKeyCode; 
+         float weight; 
+         boolean pressed = false; 
+         boolean modActive = false; 
+  
+         KeyData(String label, int keyCode, float weight, boolean hasSymbol) { 
+             this.defaultLabel = label; 
+             this.defaultKeyCode = keyCode; 
+             this.currentLabel = label; 
+             this.currentKeyCode = keyCode; 
+             this.weight = weight; 
+             this.hasSymbol = hasSymbol; 
+         } 
+     } 
+ }

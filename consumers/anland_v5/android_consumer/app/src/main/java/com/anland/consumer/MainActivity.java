@@ -120,6 +120,12 @@ public class MainActivity extends Activity
     // ==================== 触摸板相关设置 ====================
     public static final String KEY_TOUCHPAD_MODE = "touchpad_mode";
     public static final String KEY_MOUSE_ACCEL = "mouse_speed"; // 名称仍为 speed，实际控制加速度强度
+    // Two-finger scroll tuning, shared by the on-screen and captured touchpads.
+    public static final String KEY_SCROLL_SPEED = "scroll_speed";
+    public static final String KEY_SCROLL_REVERSE = "scroll_reverse";
+    // Multiples of touchSlop; see VirtualTouchpad.setGestureThresholds.
+    public static final String KEY_SCROLL_THRESHOLD = "touchpad_scroll_threshold";
+    public static final String KEY_MOVE_THRESHOLD = "touchpad_move_threshold";
     // Capture an external mouse/touchpad as a relative pointer so it cannot reach
     // the Android screen edges. This is deliberately opt-in: existing installations
     // keep the old absolute-pointer behaviour until the user enables it.
@@ -163,15 +169,6 @@ public class MainActivity extends Activity
     // Set while a gesture the recognizer declined is being forwarded as touch, so the
     // catch-up downs are emitted once and the cursor stays put until it finishes.
     private boolean capturedTouchpadTouchActive = false;
-    // Synthetic pinch state. AOSP's GestureConverter uses the same 200px opening
-    // separation (INITIAL_PINCH_SEPARATION_PX in GestureConverter.h).
-    private static final float INITIAL_PINCH_SEPARATION_PX = 200.0f;
-    // Kept clear of the ids the pad reports, so a synthetic contact can never be
-    // confused with a real one forwarded by the raw path.
-    private static final int PINCH_POINTER_ID_0 = 100;
-    private static final int PINCH_POINTER_ID_1 = 101;
-    private boolean capturedPinchActive = false;
-    private float capturedPinchSeparation = INITIAL_PINCH_SEPARATION_PX;
 
     static {
         // Loads the single shared .so backing MainActivity, Native and
@@ -532,9 +529,7 @@ public class MainActivity extends Activity
                             mNative.sendMouseButton(button, pressed);
                     }
                 });
-        capturedTouchpadAccel = Math.max(0.5f,
-                Math.min(10.0f, prefs.getFloat(KEY_MOUSE_ACCEL, 1.0f)));
-        virtualTouchpad.setAccelStrength(capturedTouchpadAccel);
+        applyTouchpadPrefs(prefs);
         pointerCaptureEnabled = prefs.getBoolean(KEY_POINTER_CAPTURE, false);
 
         // Requesting capture before the window is attached is a no-op. The post
@@ -630,6 +625,35 @@ public class MainActivity extends Activity
 
     private void setupCursorHiding() {
         surfaceView.setPointerIcon(PointerIcon.getSystemIcon(this, PointerIcon.TYPE_NULL));
+    }
+
+    /**
+     * Push the touchpad tuning preferences to both recognizers. Called from onCreate
+     * and again on resume, so edits made in Settings take effect on return.
+     */
+    private void applyTouchpadPrefs(SharedPreferences prefs) {
+        capturedTouchpadAccel = Math.max(0.5f,
+                Math.min(10.0f, prefs.getFloat(KEY_MOUSE_ACCEL, 1.0f)));
+        float scrollSpeed = prefs.getFloat(KEY_SCROLL_SPEED,
+                VirtualTouchpad.DEFAULT_SCROLL_SPEED);
+        boolean scrollReversed = prefs.getBoolean(KEY_SCROLL_REVERSE, false);
+        float scrollFactor = prefs.getFloat(KEY_SCROLL_THRESHOLD,
+                VirtualTouchpad.DEFAULT_SCROLL_THRESHOLD_FACTOR);
+        float moveFactor = prefs.getFloat(KEY_MOVE_THRESHOLD,
+                VirtualTouchpad.DEFAULT_MOVE_THRESHOLD_FACTOR);
+
+        // The captured recognizer's own motion output is ignored (the cursor comes from
+        // the relative axes), so it only needs the scroll and threshold settings.
+        VirtualTouchpad[] recognizers = {virtualTouchpad, capturedTouchpadRecognizer};
+        for (VirtualTouchpad pad : recognizers) {
+            if (pad == null)
+                continue;
+            pad.setScrollSpeed(scrollSpeed);
+            pad.setScrollReversed(scrollReversed);
+            pad.setGestureThresholds(scrollFactor, moveFactor);
+        }
+        if (virtualTouchpad != null)
+            virtualTouchpad.setAccelStrength(capturedTouchpadAccel);
     }
 
     /** Keep the window's pointer-capture state in sync with the saved setting. */
@@ -851,7 +875,6 @@ public class MainActivity extends Activity
         // every contact count and declines whatever it does not implement, which this
         // method then forwards as touch.
         if (canceled) {
-            endSyntheticPinch();
             releaseForwardedCapturedTouches(event);
             if (capturedTouchpadRecognizer != null)
                 capturedTouchpadRecognizer.cancel();
@@ -867,26 +890,16 @@ public class MainActivity extends Activity
             sendCapturedTouchpadScrollAxes(event, -1);
             capturedTouchpadBaselineValid = false;
         } else if (hasButton) {
-            endSyntheticPinch();
             releaseForwardedCapturedTouches(event);
             if (capturedTouchpadRecognizer != null)
                 capturedTouchpadRecognizer.cancel();
         } else if (capturedTouchpadRecognizer != null) {
             MotionEvent gestureEvent = normalizeCapturedTouchpadEvent(event);
             try {
-                int result = capturedTouchpadRecognizer.onTouch(gestureEvent);
-                if (result == VirtualTouchpad.GESTURE_PINCH) {
-                    // Rebuilt from the scale factor around the cursor, not from the pad
-                    // coordinates: see updateSyntheticPinch.
-                    updateSyntheticPinch(
-                            capturedTouchpadRecognizer.pinchScaleFactor());
-                } else {
-                    endSyntheticPinch();
-                    if (result == VirtualTouchpad.GESTURE_UNHANDLED)
-                        forwardCapturedTouchpadAsTouch(gestureEvent);
-                    else
-                        capturedTouchpadTouchActive = false;
-                }
+                if (capturedTouchpadRecognizer.onTouch(gestureEvent))
+                    capturedTouchpadTouchActive = false;
+                else
+                    forwardCapturedTouchpadAsTouch(gestureEvent);
             } finally {
                 gestureEvent.recycle();
             }
@@ -897,7 +910,7 @@ public class MainActivity extends Activity
         // declined gesture is being forwarded as touch the cursor stays put, so its
         // tail (fingers lifting back to one) cannot drag it away.
         if (!canceled && !scrollEvent
-                && !capturedTouchpadTouchActive && !capturedPinchActive) {
+                && !capturedTouchpadTouchActive) {
             switch (action) {
                 case MotionEvent.ACTION_DOWN:
                     setCapturedTouchpadBaseline(event, -1);
@@ -939,61 +952,6 @@ public class MainActivity extends Activity
      * pointer named by the action index. KWin drops motion for an id it never saw go
      * down, which would leave a pinch showing a single contact.
      */
-    /**
-     * Drive a synthetic two-finger pinch, following AOSP's GestureConverter::
-     * handlePinch. The pad's real finger positions are deliberately NOT used: the
-     * touchpad is small and its absolute coordinates say nothing about where the user
-     * is looking. Instead two contacts straddle the cursor, and only their separation
-     * carries the gesture, scaled by the recognizer's factor each event.
-     */
-    private void updateSyntheticPinch(float scaleFactor) {
-        boolean starting = !capturedPinchActive;
-        if (starting) {
-            capturedPinchActive = true;
-            capturedPinchSeparation = INITIAL_PINCH_SEPARATION_PX;
-        } else if (Float.isFinite(scaleFactor) && scaleFactor > 0f) {
-            capturedPinchSeparation *= scaleFactor;
-        }
-        // Keep the contacts distinguishable however far the user closes the pinch.
-        capturedPinchSeparation = Math.max(2f, capturedPinchSeparation);
-
-        ensurePointerPosition();
-        float[] left = convertToNativeCoords(
-                pointerX - capturedPinchSeparation / 2f, pointerY);
-        float[] right = convertToNativeCoords(
-                pointerX + capturedPinchSeparation / 2f, pointerY);
-
-        if (starting) {
-            // AOSP opens with ACTION_DOWN for one pointer then ACTION_POINTER_DOWN for
-            // the second, so emit the two downs as separate frames.
-            mNative.sendTouch(0, left[0], left[1], PINCH_POINTER_ID_0);
-            mNative.sendTouchFrame();
-            mNative.sendTouch(0, right[0], right[1], PINCH_POINTER_ID_1);
-            mNative.sendTouchFrame();
-            return;
-        }
-        mNative.sendTouch(2, left[0], left[1], PINCH_POINTER_ID_0);
-        mNative.sendTouch(2, right[0], right[1], PINCH_POINTER_ID_1);
-        mNative.sendTouchFrame();
-    }
-
-    /** Lift the synthetic pinch contacts, mirroring AOSP's endPinch ordering. */
-    private void endSyntheticPinch() {
-        if (!capturedPinchActive)
-            return;
-        capturedPinchActive = false;
-
-        ensurePointerPosition();
-        float[] left = convertToNativeCoords(
-                pointerX - capturedPinchSeparation / 2f, pointerY);
-        float[] right = convertToNativeCoords(
-                pointerX + capturedPinchSeparation / 2f, pointerY);
-        mNative.sendTouch(1, right[0], right[1], PINCH_POINTER_ID_1);
-        mNative.sendTouchFrame();
-        mNative.sendTouch(1, left[0], left[1], PINCH_POINTER_ID_0);
-        mNative.sendTouchFrame();
-    }
-
     /**
      * Release touches forwarded for a declined gesture that got cut short before its
      * own UP arrived — a physical pad button, or a cancelled stream. Without this the
@@ -1227,7 +1185,6 @@ public class MainActivity extends Activity
     }
 
     private void resetCapturedTouchpadGesture() {
-        endSyntheticPinch();
         if (capturedTouchpadRecognizer != null)
             capturedTouchpadRecognizer.cancel();
         capturedTouchpadBaselineValid = false;
@@ -1332,9 +1289,7 @@ public class MainActivity extends Activity
         // ===== 重新读取触摸板设置 =====
         SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
         isTouchpadMode = prefs.getBoolean(KEY_TOUCHPAD_MODE, false);
-        capturedTouchpadAccel = Math.max(0.5f,
-                Math.min(10.0f, prefs.getFloat(KEY_MOUSE_ACCEL, 1.0f)));
-        virtualTouchpad.setAccelStrength(capturedTouchpadAccel);
+        applyTouchpadPrefs(prefs);
         pointerCaptureEnabled = prefs.getBoolean(KEY_POINTER_CAPTURE, false);
         // A manual Back-key release lasts until the next click or lifecycle
         // transition. Returning from Settings starts a fresh capture session.
