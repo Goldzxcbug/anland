@@ -156,6 +156,11 @@ public class MainActivity extends Activity
     private final Matrix capturedTouchpadTransform = new Matrix();
     // True while a captured multi-finger gesture is being forwarded as touch events.
     private boolean capturedTouchActive = false;
+    // Previous single-finger pad position, used to derive a delta on builds where
+    // AXIS_RELATIVE_X/Y is absent from captured touchpad events.
+    private boolean capturedPadBaselineValid = false;
+    private float capturedPadLastX = 0f;
+    private float capturedPadLastY = 0f;
 
     static {
         // Loads the single shared .so backing MainActivity, Native and
@@ -747,40 +752,105 @@ public class MainActivity extends Activity
     /**
      * Handle mouse and hardware-touchpad events delivered through pointer capture.
      *
-     * Android's own touchpad gesture recognition stays active under capture, so the
-     * hardware touchpad needs no gesture logic of its own — dispatch by
-     * classification the same way onTouchEvent() does. Two differences follow from
-     * capture itself: the event carries no usable absolute position, so the cursor is
-     * maintained by the app from relative deltas; and a captured touchpad reports
-     * pad-local coordinates, so multi-finger contacts are mapped back into view space
-     * before being forwarded as touch.
+     * Capture does NOT reuse the uncaptured gesture pipeline: InputFlinger's
+     * TouchpadInputMapper::process() short-circuits to CapturedTouchpadEventConverter
+     * while captured, bypassing the gesture interpreter entirely. That converter
+     * hardcodes MotionClassification::NONE and emits no scroll or gesture axes, so
+     * classification is useless here and handleTouchpadScroll() can never fire. What
+     * it does emit is genuine multi-touch: one ACTION_(POINTER_)DOWN/MOVE/UP stream
+     * with per-finger coordinates. So the pointer count is the only signal available.
      */
     private boolean handleCapturedPointerEvent(MotionEvent event) {
-        // A few OEMs combine source capability bits, so accept either captured
-        // source and let the classification below decide how to route the event.
-        if (!event.isFromSource(InputDevice.SOURCE_MOUSE_RELATIVE)
-                && !event.isFromSource(InputDevice.SOURCE_TOUCHPAD))
+        // A few OEMs combine source capability bits, so treat anything carrying the
+        // touchpad bit as a pad; only a pure relative mouse takes the mouse path.
+        if (event.isFromSource(InputDevice.SOURCE_TOUCHPAD)) {
+            if (mNative == null)
+                return true;
+            return handleCapturedTouchpadEvent(event);
+        }
+        if (!event.isFromSource(InputDevice.SOURCE_MOUSE_RELATIVE))
             return false;
         if (mNative == null)
             return true;
+        return handleCapturedMouseEvent(event);
+    }
 
+    /**
+     * Route a captured touchpad event by contact count: one finger drives the cursor,
+     * two or more are forwarded as touch so the remote sees a real pinch.
+     *
+     * Once a gesture is on the touch path it stays there until the last finger lifts.
+     * The contact count drops back to 1 before the final ACTION_UP, and switching
+     * paths midway would leave that UP on the cursor path — never releasing the touch
+     * point on the remote.
+     */
+    private boolean handleCapturedTouchpadEvent(MotionEvent event) {
         int action = event.getActionMasked();
-        int cls = event.getClassification();
 
-        // Once a gesture is being forwarded as touch it stays on that path until the
-        // last finger lifts: switching paths midway would leave the final ACTION_UP
-        // on the mouse path, never releasing the touch point on the remote.
-        boolean startsTouch = cls == CLASSIFICATION_MULTI_FINGER_SWIPE
-                || cls == CLASSIFICATION_PINCH;
-
-        if (capturedTouchActive || startsTouch) {
+        if (capturedTouchActive || event.getPointerCount() >= 2) {
             capturedTouchActive = action != MotionEvent.ACTION_UP
                     && action != MotionEvent.ACTION_CANCEL;
+            if (!capturedTouchActive)
+                capturedPadBaselineValid = false;
             return handleCapturedTouchEvent(event);
         }
-        if (cls == CLASSIFICATION_TWO_FINGER_SWIPE)
-            return handleTouchpadScroll(event);
-        return handleCapturedMouseEvent(event);
+
+        if (action == MotionEvent.ACTION_MOVE || action == MotionEvent.ACTION_HOVER_MOVE) {
+            for (int i = 0; i < event.getHistorySize(); i++)
+                sendCapturedPadMotionSample(event, i);
+            sendCapturedPadMotionSample(event, -1);
+        } else {
+            // Re-anchor on every non-move action so a new contact cannot be read as a
+            // jump from wherever the previous finger happened to leave off.
+            capturedPadBaselineValid = false;
+        }
+
+        if (action == MotionEvent.ACTION_CANCEL)
+            releaseAllMouseButtons();
+        else
+            updateMouseButtonStateFromEvent(event);
+        return true;
+    }
+
+    /**
+     * Advance the cursor from one captured touchpad sample.
+     *
+     * Both delta sources are in raw pad units, so each is scaled by view/pad-range
+     * before use. AXIS_RELATIVE_X/Y is preferred but sits behind the aconfig flag
+     * include_relative_axis_values_for_captured_touchpads, so it is absent entirely on
+     * builds where that flag is off; the difference between consecutive absolute pad
+     * coordinates covers that case.
+     */
+    private void sendCapturedPadMotionSample(MotionEvent event, int historyPos) {
+        float dx = capturedAxis(event, MotionEvent.AXIS_RELATIVE_X, historyPos);
+        float dy = capturedAxis(event, MotionEvent.AXIS_RELATIVE_Y, historyPos);
+        float x = historyPos >= 0 ? event.getHistoricalX(0, historyPos) : event.getX();
+        float y = historyPos >= 0 ? event.getHistoricalY(0, historyPos) : event.getY();
+
+        if (dx == 0f && dy == 0f && capturedPadBaselineValid) {
+            dx = x - capturedPadLastX;
+            dy = y - capturedPadLastY;
+        }
+        capturedPadLastX = x;
+        capturedPadLastY = y;
+        capturedPadBaselineValid = true;
+
+        sendCapturedMouseMotion(dx * capturedPadScale(event, MotionEvent.AXIS_X, true),
+                dy * capturedPadScale(event, MotionEvent.AXIS_Y, false));
+    }
+
+    /** View pixels per raw pad unit along one axis, or 0 when the range is unknown. */
+    private float capturedPadScale(MotionEvent event, int axis, boolean xAxis) {
+        InputDevice device = event.getDevice();
+        if (device == null)
+            return 0f;
+        InputDevice.MotionRange range = device.getMotionRange(
+                axis, InputDevice.SOURCE_TOUCHPAD);
+        if (range == null)
+            range = device.getMotionRange(axis);
+        float span = range == null ? 0f : range.getRange();
+        int size = xAxis ? pointerViewWidth() : pointerViewHeight();
+        return span > 0f && size > 0 ? size / span : 0f;
     }
 
     /**
@@ -828,9 +898,6 @@ public class MainActivity extends Activity
      * handleTouchEvent over the result.
      */
     private boolean handleCapturedTouchEvent(MotionEvent event) {
-        if (!event.isFromSource(InputDevice.SOURCE_TOUCHPAD))
-            return handleTouchEvent(event);
-
         MotionEvent normalized = normalizeCapturedTouchpadEvent(event);
         try {
             return handleTouchEvent(normalized);
@@ -875,18 +942,14 @@ public class MainActivity extends Activity
     }
 
     /**
-     * Resolve one captured motion sample's relative delta and forward it.
-     *
-     * AXIS_RELATIVE_X/Y is the reliable source for both captured sources. A
-     * captured touchpad is a SOURCE_CLASS_POSITION device, so its X/Y hold
-     * absolute pad coordinates — only a genuine relative mouse reports its delta
-     * there, which is the sole case the fallback covers.
+     * Resolve one captured mouse sample's relative delta and forward it. A captured
+     * relative mouse reports its delta in X/Y; AXIS_RELATIVE_X/Y carries the same
+     * value and is preferred when populated.
      */
     private void sendCapturedMotionSample(MotionEvent event, int historyPos) {
         float dx = capturedAxis(event, MotionEvent.AXIS_RELATIVE_X, historyPos);
         float dy = capturedAxis(event, MotionEvent.AXIS_RELATIVE_Y, historyPos);
-        if (dx == 0f && dy == 0f
-                && !event.isFromSource(InputDevice.SOURCE_TOUCHPAD)) {
+        if (dx == 0f && dy == 0f) {
             dx = historyPos >= 0 ? event.getHistoricalX(0, historyPos) : event.getX();
             dy = historyPos >= 0 ? event.getHistoricalY(0, historyPos) : event.getY();
         }
