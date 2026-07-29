@@ -743,9 +743,9 @@ public class MainActivity extends Activity
      * and multi-finger gestures arrive already translated into scroll axes and
      * classified MotionEvents, exactly as they do without capture. So the hardware
      * touchpad needs no gesture logic of its own — dispatch by classification the
-     * same way onTouchEvent() does. The single difference is that captured events
-     * carry relative deltas instead of an absolute position, so the cursor is
-     * maintained by the app rather than by the system.
+     * same way onTouchEvent() does. The single difference is that a captured event
+     * has no usable absolute position, so the cursor is maintained by the app from
+     * relative deltas rather than by the system.
      */
     private boolean handleCapturedPointerEvent(MotionEvent event) {
         // A few OEMs combine source capability bits, so accept either captured
@@ -765,20 +765,18 @@ public class MainActivity extends Activity
     }
 
     /**
-     * Captured counterpart of handleMouseEvent: X/Y hold a relative delta rather
-     * than a position, so advance the app-maintained cursor instead of reading the
-     * absolute coordinates out of the event.
+     * Captured counterpart of handleMouseEvent: the event carries a relative delta
+     * rather than a position, so advance the app-maintained cursor instead of
+     * reading absolute coordinates out of the event.
      */
     private boolean handleCapturedMouseEvent(MotionEvent event) {
         int action = event.getActionMasked();
         if (action == MotionEvent.ACTION_MOVE || action == MotionEvent.ACTION_HOVER_MOVE) {
-            // Relative mouse samples can be batched.  Consume every historical
-            // sample so fast movements do not lose deltas between frames.
-            for (int i = 0; i < event.getHistorySize(); i++) {
-                sendCapturedMouseMotion(event.getHistoricalX(0, i),
-                        event.getHistoricalY(0, i));
-            }
-            sendCapturedMouseMotion(event.getX(), event.getY());
+            // Captured samples can be batched.  Consume every historical sample so
+            // fast movements do not lose deltas between frames.
+            for (int i = 0; i < event.getHistorySize(); i++)
+                sendCapturedMotionSample(event, i);
+            sendCapturedMotionSample(event, -1);
         }
 
         if (action == MotionEvent.ACTION_SCROLL) {
@@ -802,9 +800,9 @@ public class MainActivity extends Activity
 
     /**
      * Captured counterpart of handleTouchEvent, used for the multi-finger swipe and
-     * pinch classifications. Captured X/Y are relative deltas, so the forwarded
-     * touch is anchored at the app-maintained cursor rather than at the event
-     * coordinates.
+     * pinch classifications. Captured X/Y are never screen coordinates — a relative
+     * mouse reports a delta there, a touchpad reports pad-local absolute units — so
+     * the forwarded touch is anchored at the app-maintained cursor instead.
      */
     private boolean handleCapturedTouchEvent(MotionEvent event) {
         int action = event.getActionMasked();
@@ -832,6 +830,31 @@ public class MainActivity extends Activity
                 return true;
         }
         return false;
+    }
+
+    /**
+     * Resolve one captured motion sample's relative delta and forward it.
+     *
+     * AXIS_RELATIVE_X/Y is the reliable source for both captured sources. A
+     * captured touchpad is a SOURCE_CLASS_POSITION device, so its X/Y hold
+     * absolute pad coordinates — only a genuine relative mouse reports its delta
+     * there, which is the sole case the fallback covers.
+     */
+    private void sendCapturedMotionSample(MotionEvent event, int historyPos) {
+        float dx = capturedAxis(event, MotionEvent.AXIS_RELATIVE_X, historyPos);
+        float dy = capturedAxis(event, MotionEvent.AXIS_RELATIVE_Y, historyPos);
+        if (dx == 0f && dy == 0f
+                && !event.isFromSource(InputDevice.SOURCE_TOUCHPAD)) {
+            dx = historyPos >= 0 ? event.getHistoricalX(0, historyPos) : event.getX();
+            dy = historyPos >= 0 ? event.getHistoricalY(0, historyPos) : event.getY();
+        }
+        sendCapturedMouseMotion(dx, dy);
+    }
+
+    private float capturedAxis(MotionEvent event, int axis, int historyPos) {
+        return historyPos >= 0
+                ? event.getHistoricalAxisValue(axis, 0, historyPos)
+                : event.getAxisValue(axis, 0);
     }
 
     private void sendCapturedMouseMotion(float dx, float dy) {
