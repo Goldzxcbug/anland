@@ -75,6 +75,19 @@ struct buf_info {
 
 #define OUTPUT_TYPE_CLIPBOARD 1
 #define OUTPUT_TYPE_RESOURCES_REQUEST 2
+/* Producer -> consumer: set a transient Android-side runtime parameter (UINT32).
+ * Carried as a fixed-size OutputEvent (no trailing payload): { var, value }.
+ * A non-zero value requests the Android app enable the corresponding behaviour
+ * (e.g. pointer capture) while the producer asserts it; 0 withdraws the request.
+ * The consumer regresses every var to 0 on its own fallback, so the producer
+ * MUST resend the current value on each reconnect. */
+#define OUTPUT_TYPE_SET_CONSUMER_VAR 3
+
+/* Var identifiers addressable via OUTPUT_TYPE_SET_CONSUMER_VAR. */
+/* 1 = force-enable Android pointer capture (Wayland zwp_locked_pointer_v1 active,
+ *   i.e. a game grabbed the mouse for relative motion); 0 = release back to the
+ *   user setting. Overrides the pointer_capture setting while asserted. */
+#define CONSUMER_VAR_CAPTURE_MOUSE 1
 
 
 
@@ -139,6 +152,10 @@ struct OutputEvent{
             uint32_t type;
             uint32_t args[3]; //support 3 args
         } resources_request;
+        struct {
+            uint32_t var;   //CONSUMER_VAR_* identifier
+            uint32_t value; //new UINT32 value (0 = default / release)
+        } set_consumer_var;
         struct
         {
             uint32_t padding[4];

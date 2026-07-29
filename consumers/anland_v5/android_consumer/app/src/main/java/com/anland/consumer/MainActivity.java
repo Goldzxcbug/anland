@@ -15,6 +15,7 @@ import android.content.SharedPreferences;
 import android.os.Build;
 import android.os.Bundle;
 import android.util.Log;
+import android.util.SparseArray;
 import android.view.Display;
 import android.view.Gravity;
 import android.view.InputDevice;
@@ -152,6 +153,15 @@ public class MainActivity extends Activity
     // relative delta for every motion event.
     private boolean pointerCaptureEnabled = false;
     private boolean pointerCaptureSuppressed = false;
+    // Forced by the producer via CONSUMER_VAR_CAPTURE_MOUSE while a Wayland client
+    // holds an active pointer lock (a game grabbed the mouse for relative motion).
+    // Interaction with the user setting (see pointerCaptureWanted()): if the setting
+    // is ON, capture stays on the whole time and the var is ignored; if the setting
+    // is OFF, capture follows the var (on while asserted, off when 0). A manual
+    // Back-key release still suppresses either source. Regressed to false on consumer
+    // fallback; the producer resends the current value on reconnect.
+    private volatile boolean captureMouseForced = false;
+    private static final int CONSUMER_VAR_CAPTURE_MOUSE = 1;
     // Tracks the Back key whose DOWN released pointer capture, so only its matching
     // UP is swallowed. Device/downTime matching prevents a stale missing UP from
     // consuming a later, unrelated Back press.
@@ -170,6 +180,12 @@ public class MainActivity extends Activity
     private float capturedTouchpadLastCentroidX = 0f;
     private float capturedTouchpadLastCentroidY = 0f;
     private final float[] capturedTouchpadResolvedDelta = new float[2];
+
+    // Touchpad click-drag: while a mouse button is physically held, the pressing
+    // finger rests and another moves. These hold each contact's last pad position
+    // by pointer id so the moving finger can be isolated and driven as the cursor.
+    private final SparseArray<Float> buttonDragLastX = new SparseArray<>();
+    private final SparseArray<Float> buttonDragLastY = new SparseArray<>();
 
     static {
         // Loads the single shared .so backing MainActivity, Native and
@@ -194,6 +210,11 @@ public class MainActivity extends Activity
     // If the daemon socket is gone the daemon really went down, so close this window.
     public void onFallback(){
         runOnUiThread(() -> {
+            // The producer connection is gone: every consumer var regresses to 0.
+            // The producer resends the current value once it reconnects.
+            captureMouseForced = false;
+            if (mRoot != null)
+                mRoot.post(this::syncPointerCapture);
             if (!isSocketFile(resolveSocketPath())) {
                 //exit
                 android.widget.Toast.makeText(this, "Deamon Down",
@@ -726,12 +747,31 @@ public class MainActivity extends Activity
                 xRange.getRange(), yRange.getRange());
     }
 
+    /** Whether pointer capture should be active. Setting ON -> always on (the var is
+     *  ignored); setting OFF -> follows the producer's CONSUMER_VAR_CAPTURE_MOUSE. */
+    private boolean pointerCaptureWanted() {
+        return pointerCaptureEnabled || captureMouseForced;
+    }
+
+    /** Called from the native event thread when the producer sets a consumer var.
+     *  CONSUMER_VAR_CAPTURE_MOUSE forces pointer capture on (value != 0) for as long
+     *  as a Wayland client holds a pointer lock; 0 releases it back to the setting. */
+    public void nativeSetConsumerVar(int var, int value) {
+        runOnUiThread(() -> {
+            if (var == CONSUMER_VAR_CAPTURE_MOUSE) {
+                captureMouseForced = (value != 0);
+                if (mRoot != null)
+                    mRoot.post(this::syncPointerCapture);
+            }
+        });
+    }
+
     /** Keep the window's pointer-capture state in sync with the saved setting. */
     private void syncPointerCapture() {
         if (mRoot == null)
             return;
 
-        boolean shouldCapture = pointerCaptureEnabled
+        boolean shouldCapture = pointerCaptureWanted()
                 && !pointerCaptureSuppressed
                 && mRoot.hasWindowFocus();
         if (shouldCapture) {
@@ -818,7 +858,7 @@ public class MainActivity extends Activity
     }
 
     private void requestPointerCaptureAfterClick() {
-        if (!pointerCaptureEnabled || mRoot == null)
+        if (!pointerCaptureWanted() || mRoot == null)
             return;
         pointerCaptureSuppressed = false;
         mRoot.post(this::syncPointerCapture);
@@ -941,6 +981,18 @@ public class MainActivity extends Activity
                 && hasCapturedTouchpadScrollAxes(event);
         boolean scrollEvent = action == MotionEvent.ACTION_SCROLL || explicitScroll;
 
+        // A touchpad click-drag is driven by the maintained mouse-button state:
+        // when a left/right button is physically held, one finger rests (the
+        // presser) and another moves, and that moving finger must drive the
+        // cursor. While no such button is held the per-finger drag tracker stays
+        // empty, leaving ordinary two-finger gestures untouched.
+        boolean leftOrRightHeld = (effectiveButtonState(event)
+                & (MotionEvent.BUTTON_PRIMARY | MotionEvent.BUTTON_SECONDARY)) != 0;
+        if (!leftOrRightHeld) {
+            buttonDragLastX.clear();
+            buttonDragLastY.clear();
+        }
+
         // Multi-finger gestures are not filtered out here: the Touchpad sees every
         // contact count and forwards whatever it does not implement as touch itself.
         // cancel() also releases any touches it has already forwarded, which the
@@ -976,11 +1028,15 @@ public class MainActivity extends Activity
             switch (action) {
                 case MotionEvent.ACTION_DOWN:
                     setCapturedTouchpadBaseline(event, -1);
+                    buttonDragLastX.clear();
+                    buttonDragLastY.clear();
                     break;
                 case MotionEvent.ACTION_POINTER_DOWN:
                 case MotionEvent.ACTION_POINTER_UP:
                     // A pointer-count transition must not create a cursor jump.
                     capturedTouchpadBaselineValid = false;
+                    buttonDragLastX.clear();
+                    buttonDragLastY.clear();
                     break;
                 case MotionEvent.ACTION_MOVE:
                 case MotionEvent.ACTION_HOVER_MOVE:
@@ -988,10 +1044,17 @@ public class MainActivity extends Activity
                         for (int i = 0; i < event.getHistorySize(); i++)
                             processCapturedTouchpadMotionSample(event, i);
                         processCapturedTouchpadMotionSample(event, -1);
+                    } else if (leftOrRightHeld) {
+                        // Click-drag: a button is held while one finger rests and
+                        // another moves. Drive the cursor from the moving finger;
+                        // the held button is forwarded by updateMouseButtonState.
+                        processCapturedTouchpadButtonDrag(event);
                     }
                     break;
                 case MotionEvent.ACTION_UP:
                     capturedTouchpadBaselineValid = false;
+                    buttonDragLastX.clear();
+                    buttonDragLastY.clear();
                     break;
             }
         }
@@ -1014,6 +1077,61 @@ public class MainActivity extends Activity
         float[] fallback = applyCapturedTouchpadAbsoluteFallback(
                 event, historyPos, dx, dy);
         sendCapturedTouchpadMotion(fallback[0], fallback[1]);
+    }
+
+    /**
+     * Touchpad click-drag motion: a mouse button is physically held while one
+     * finger rests and another travels. Isolate the contact that moved the most
+     * this sample (the traveller) and drive the cursor with its delta, ignoring
+     * the resting finger. The held button is forwarded separately by
+     * updateMouseButtonState, so this emits relative motion only. Per-finger
+     * positions are kept by pointer id and reset on every pointer-count change.
+     */
+    private void processCapturedTouchpadButtonDrag(MotionEvent event) {
+        int pointerCount = event.getPointerCount();
+        if (pointerCount < 2)
+            return;
+        float scaleX = capturedTouchpadCoordinateScale(event, MotionEvent.AXIS_X, true);
+        float scaleY = capturedTouchpadCoordinateScale(event, MotionEvent.AXIS_Y, false);
+
+        // Drop contacts that have lifted since the last sample.
+        for (int i = buttonDragLastX.size() - 1; i >= 0; i--) {
+            int id = buttonDragLastX.keyAt(i);
+            if (event.findPointerIndex(id) < 0) {
+                buttonDragLastX.removeAt(i);
+                buttonDragLastY.delete(id);
+            }
+        }
+
+        // The moving finger is the one with the largest travel since the last
+        // sample; the resting finger contributes ~zero and is ignored.
+        float bestDx = 0f, bestDy = 0f;
+        float bestMag = -1f;
+        for (int i = 0; i < pointerCount; i++) {
+            int id = event.getPointerId(i);
+            float lastX = buttonDragLastX.get(id, Float.NaN);
+            float lastY = buttonDragLastY.get(id, Float.NaN);
+            if (Float.isNaN(lastX) || Float.isNaN(lastY))
+                continue; // new contact this sample: no delta yet
+            float dx = (event.getX(i) - lastX) * scaleX;
+            float dy = (event.getY(i) - lastY) * scaleY;
+            float mag = dx * dx + dy * dy;
+            if (mag > bestMag) {
+                bestMag = mag;
+                bestDx = dx;
+                bestDy = dy;
+            }
+        }
+
+        // Record every current contact so the next sample has a baseline.
+        for (int i = 0; i < pointerCount; i++) {
+            int id = event.getPointerId(i);
+            buttonDragLastX.put(id, event.getX(i));
+            buttonDragLastY.put(id, event.getY(i));
+        }
+
+        if (bestMag > 0f)
+            sendCapturedTouchpadMotion(bestDx, bestDy);
     }
 
     /** Pad axis range, preferring the touchpad source over the device-wide one. */
@@ -1660,7 +1778,7 @@ public class MainActivity extends Activity
     public boolean onTouchEvent(MotionEvent event) {
         boolean mouseEvent = isMouseEvent(event);
         if (mouseEvent && event.getActionMasked() == MotionEvent.ACTION_DOWN
-                && pointerCaptureEnabled && mRoot != null
+                && pointerCaptureWanted() && mRoot != null
                 && !mRoot.hasPointerCapture()) {
             // A Back-key release leaves the pointer free long enough for the user
             // to move/click normally; the next click starts a new capture session.
@@ -1692,7 +1810,7 @@ public class MainActivity extends Activity
         if (isMouseEvent(event)) {
             int action = event.getActionMasked();
             if (action == MotionEvent.ACTION_BUTTON_PRESS
-                    && pointerCaptureEnabled && mRoot != null
+                    && pointerCaptureWanted() && mRoot != null
                     && !mRoot.hasPointerCapture()) {
                 requestPointerCaptureAfterClick();
             }
@@ -1881,14 +1999,19 @@ public class MainActivity extends Activity
 
     // ACTION_BUTTON_RELEASE may report a stale buttonState on some touchpad
     // drivers. Use the explicit action button as a correction when available.
-    private void updateMouseButtonStateFromEvent(MotionEvent event) {
+    /** Effective button bitmask, correcting PRESS/RELEASE actions against getButtonState. */
+    private static int effectiveButtonState(MotionEvent event) {
         int buttonState = event.getButtonState();
         int action = event.getActionMasked();
         if (action == MotionEvent.ACTION_BUTTON_PRESS)
             buttonState |= event.getActionButton();
         else if (action == MotionEvent.ACTION_BUTTON_RELEASE)
             buttonState &= ~event.getActionButton();
-        updateMouseButtonState(buttonState);
+        return buttonState;
+    }
+
+    private void updateMouseButtonStateFromEvent(MotionEvent event) {
+        updateMouseButtonState(effectiveButtonState(event));
     }
 
     private void releaseAllMouseButtons() {
