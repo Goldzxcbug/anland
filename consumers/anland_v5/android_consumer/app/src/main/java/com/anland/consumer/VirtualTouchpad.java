@@ -192,4 +192,259 @@ public final class VirtualTouchpad {
                 downTime1 = event.getEventTime();
                 hasLongPressed = false;
                 isLongPressPossible = true;
-               
+                isSingleTapCandidate = true;
+                isTwoFingerTapCandidate = false;
+                isDraggingActive = false;
+                isMultiFinger = false;
+                currentState = STATE_ONE_FINGER;
+                resetSmoothing();
+                break;
+            }
+            case MotionEvent.ACTION_POINTER_DOWN: {
+                isMultiFinger = true;
+                isSingleTapCandidate = false;
+                isLongPressPossible = false;
+                if (currentState == STATE_DRAGGING) {
+                    sendButton(0x110, false);
+                    isDraggingActive = false;
+                }
+                if (pointerCount == 2) {
+                    currentState = STATE_TWO_FINGER;
+                    isTwoFingerTapCandidate = true;
+                    lastX1 = event.getX(0);
+                    lastY1 = event.getY(0);
+                    lastX2 = event.getX(1);
+                    lastY2 = event.getY(1);
+                }
+                break;
+            }
+            case MotionEvent.ACTION_MOVE: {
+                if (pointerCount == 1 && !isMultiFinger) {
+                    float x = event.getX();
+                    float y = event.getY();
+                    float rawDx = x - lastX1;
+                    float rawDy = y - lastY1;
+                    float dist = (float) Math.hypot(x - startX1, y - startY1);
+
+                    if (dist > touchSlop) {
+                        isLongPressPossible = false;
+                        isSingleTapCandidate = false;
+                        // The original state machine intentionally preserves
+                        // this flag through POINTER_UP. In capture mode, clear
+                        // it once the remaining finger actually moves so a
+                        // scroll/drag cannot finish as a right-click.
+                        if (output != null)
+                            isTwoFingerTapCandidate = false;
+                    }
+
+                    if (isLongPressPossible && !hasLongPressed &&
+                            (event.getEventTime() - downTime1) >= TOUCH_LONG_PRESS_TIMEOUT) {
+                        hasLongPressed = true;
+                        currentState = STATE_DRAGGING;
+                        isDraggingActive = true;
+                        sendButton(0x110, true);
+                        mouseX = clamp(mouseX, 0, screenWidth);
+                        mouseY = clamp(mouseY, 0, screenHeight);
+                        if (output != null)
+                            output.onMotion(0f, 0f);
+                        else if (mNative != null)
+                            mNative.sendMouseMotion(mouseX, mouseY, 0f, 0f);
+                        resetSmoothing();
+                        break;
+                    }
+
+                    float[] smoothed = applySmoothing(rawDx, rawDy);
+                    float smoothDx = smoothed[0];
+                    float smoothDy = smoothed[1];
+
+                    if (smoothDx != 0f || smoothDy != 0f) {
+                        // 计算移动距离（平滑后的欧式距离）
+                        float distance = (float) Math.hypot(smoothDx, smoothDy);
+
+                        // 改进的加速度曲线：以 10px 为参考阈值，使小位移也能获得明显加速
+                        float speedFactor = distance / 10.0f;
+                        // 使用 sigmoid-like 曲线：scale = 1 + (strength - 1) * (speed / (1 + speed))
+                        float dynamicScale = 1.0f + (mouseAccelStrength - 1.0f) * (speedFactor / (1.0f + speedFactor));
+                        // 限制范围，防止失控（最大不超过 10 倍）
+                        dynamicScale = Math.max(0.3f, Math.min(10.0f, dynamicScale));
+
+                        float moveX = smoothDx * dynamicScale;
+                        float moveY = smoothDy * dynamicScale;
+                        sendMotion(moveX, moveY);
+                    }
+
+                    lastX1 = x;
+                    lastY1 = y;
+
+                } else if (pointerCount == 2) {
+                    if (currentState == STATE_TWO_FINGER) {
+                        float x1 = event.getX(0);
+                        float y1 = event.getY(0);
+                        float x2 = event.getX(1);
+                        float y2 = event.getY(1);
+                        float avgDx = ((x1 - lastX1) + (x2 - lastX2)) / 2;
+                        float avgDy = ((y1 - lastY1) + (y2 - lastY2)) / 2;
+
+                        if (Math.abs(avgDx) > 1 || Math.abs(avgDy) > 1) {
+                            isTwoFingerTapCandidate = false;
+                            if (Math.abs(avgDy) > Math.abs(avgDx) * 0.5) {
+                                sendScroll(0, -avgDy * 0.5f);
+                            }
+                            if (Math.abs(avgDx) > Math.abs(avgDy) * 0.5) {
+                                sendScroll(1, avgDx * 0.5f);
+                            }
+                            lastX1 = x1;
+                            lastY1 = y1;
+                            lastX2 = x2;
+                            lastY2 = y2;
+                        }
+                    }
+                }
+                break;
+            }
+            case MotionEvent.ACTION_POINTER_UP: {
+                int remaining = pointerCount - 1;
+                if (remaining == 1) {
+                    isMultiFinger = false;
+                    isSingleTapCandidate = false;
+                    isLongPressPossible = false;
+                    int idx = (event.getActionIndex() == 0) ? 1 : 0;
+                    lastX1 = event.getX(idx);
+                    lastY1 = event.getY(idx);
+                    startX1 = lastX1;
+                    startY1 = lastY1;
+                    downTime1 = event.getEventTime();
+                    hasLongPressed = false;
+                    currentState = STATE_ONE_FINGER;
+                    resetSmoothing();
+                }
+                break;
+            }
+            case MotionEvent.ACTION_UP: {
+                long duration = event.getEventTime() - downTime1;
+                boolean isQuickTap = duration < 300;
+
+                if (isDraggingActive) {
+                    sendButton(0x110, false);
+                    isDraggingActive = false;
+                    resetTouchpadState();
+                    resetSmoothing();
+                    return true;
+                }
+
+                if (isTwoFingerTapCandidate && isQuickTap) {
+                    sendButton(0x111, true);
+                    sendButton(0x111, false);
+                    resetTouchpadState();
+                    resetSmoothing();
+                    return true;
+                }
+
+                if (currentState == STATE_ONE_FINGER && isSingleTapCandidate && isQuickTap) {
+                    long gap = event.getEventTime() - lastTapTime;
+                    float dist = (float) Math.hypot(lastX1 - lastTapX, lastY1 - lastTapY);
+                    if (synthesizeDoubleTap && gap < 300 && dist < touchSlop
+                            && !isDoubleTapPending) {
+                        isDoubleTapPending = true;
+                        sendButton(0x110, true);
+                        sendButton(0x110, false);
+                        sendButton(0x110, true);
+                        sendButton(0x110, false);
+                        isDoubleTapPending = false;
+                        lastTapTime = 0;
+                    } else {
+                        sendButton(0x110, true);
+                        sendButton(0x110, false);
+                        lastTapTime = event.getEventTime();
+                        lastTapX = lastX1;
+                        lastTapY = lastY1;
+                        isDoubleTapPending = false;
+                    }
+                    resetTouchpadState();
+                    resetSmoothing();
+                    return true;
+                }
+                resetTouchpadState();
+                resetSmoothing();
+                break;
+            }
+            case MotionEvent.ACTION_CANCEL: {
+                if (isDraggingActive) {
+                    sendButton(0x110, false);
+                    isDraggingActive = false;
+                }
+                resetTouchpadState();
+                resetSmoothing();
+                break;
+            }
+        }
+        return true;
+    }
+
+    private void resetTouchpadState() {
+        currentState = STATE_IDLE;
+        isSingleTapCandidate = false;
+        isTwoFingerTapCandidate = false;
+        isDoubleTapPending = false;
+        hasLongPressed = false;
+        isDraggingActive = false;
+        isLongPressPossible = false;
+        isMultiFinger = false;
+    }
+
+    private void resetSmoothing() {
+        smoothedDx = 0f;
+        smoothedDy = 0f;
+        accumulatedX = 0f;
+        accumulatedY = 0f;
+        smoothInitialized = false;
+    }
+
+    private float[] applySmoothing(float rawDx, float rawDy) {
+        float deadDx = Math.abs(rawDx) < DEAD_ZONE ? 0f : rawDx;
+        float deadDy = Math.abs(rawDy) < DEAD_ZONE ? 0f : rawDy;
+
+        if (deadDx == 0f && deadDy == 0f) {
+            return new float[]{0f, 0f};
+        }
+
+        if (!smoothInitialized) {
+            smoothedDx = deadDx;
+            smoothedDy = deadDy;
+            smoothInitialized = true;
+        } else {
+            smoothedDx = SMOOTHING_FACTOR * deadDx + (1 - SMOOTHING_FACTOR) * smoothedDx;
+            smoothedDy = SMOOTHING_FACTOR * deadDy + (1 - SMOOTHING_FACTOR) * smoothedDy;
+        }
+
+        // 累积阈值大幅降低，让移动更加连续
+        accumulatedX += smoothedDx;
+        accumulatedY += smoothedDy;
+
+        float outX = 0f;
+        float outY = 0f;
+        if (Math.abs(accumulatedX) >= ACCUMULATED_THRESHOLD) {
+            outX = accumulatedX;
+            accumulatedX = 0f;
+        }
+        if (Math.abs(accumulatedY) >= ACCUMULATED_THRESHOLD) {
+            outY = accumulatedY;
+            accumulatedY = 0f;
+        }
+        return new float[]{outX, outY};
+    }
+
+    private float clamp(float value, float min, float max) {
+        return Math.max(min, Math.min(max, value));
+    }
+
+    private void updateScreenSize() {
+        Point size = new Point();
+        WindowManager wm = context.getSystemService(WindowManager.class);
+        if (wm != null) {
+            wm.getDefaultDisplay().getSize(size);
+            screenWidth = size.x;
+            screenHeight = size.y;
+        }
+    }
+}
