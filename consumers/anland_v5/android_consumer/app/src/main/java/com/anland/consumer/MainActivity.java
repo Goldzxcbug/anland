@@ -160,9 +160,18 @@ public class MainActivity extends Activity
     private float capturedTouchpadLastCentroidY = 0f;
     private final float[] capturedTouchpadResolvedDelta = new float[2];
     private final Matrix capturedTouchpadTransform = new Matrix();
-    // Set while a three-finger gesture has cancelled the recognizer, so two-finger
-    // tracking is re-armed once the contact count settles back down to two.
-    private boolean capturedTouchpadRearmPending = false;
+    // Set while a gesture the recognizer declined is being forwarded as touch, so the
+    // catch-up downs are emitted once and the cursor stays put until it finishes.
+    private boolean capturedTouchpadTouchActive = false;
+    // Synthetic pinch state. AOSP's GestureConverter uses the same 200px opening
+    // separation (INITIAL_PINCH_SEPARATION_PX in GestureConverter.h).
+    private static final float INITIAL_PINCH_SEPARATION_PX = 200.0f;
+    // Kept clear of the ids the pad reports, so a synthetic contact can never be
+    // confused with a real one forwarded by the raw path.
+    private static final int PINCH_POINTER_ID_0 = 100;
+    private static final int PINCH_POINTER_ID_1 = 101;
+    private boolean capturedPinchActive = false;
+    private float capturedPinchSeparation = INITIAL_PINCH_SEPARATION_PX;
 
     static {
         // Loads the single shared .so backing MainActivity, Native and
@@ -833,25 +842,20 @@ public class MainActivity extends Activity
                 || ((action == MotionEvent.ACTION_POINTER_UP
                     || action == MotionEvent.ACTION_UP)
                     && (event.getFlags() & MotionEvent.FLAG_CANCELED) != 0);
-        int classification = event.getClassification();
-        boolean unsupportedGesture = pointerCount >= 3
-                || classification == CLASSIFICATION_PINCH
-                || classification == CLASSIFICATION_MULTI_FINGER_SWIPE;
         boolean explicitScroll = (action == MotionEvent.ACTION_MOVE
                 || action == MotionEvent.ACTION_HOVER_MOVE)
                 && hasCapturedTouchpadScrollAxes(event);
         boolean scrollEvent = action == MotionEvent.ACTION_SCROLL || explicitScroll;
 
-        if (canceled || unsupportedGesture) {
+        // Multi-finger gestures are no longer filtered out here: the recognizer sees
+        // every contact count and declines whatever it does not implement, which this
+        // method then forwards as touch.
+        if (canceled) {
+            endSyntheticPinch();
+            releaseForwardedCapturedTouches(event);
             if (capturedTouchpadRecognizer != null)
                 capturedTouchpadRecognizer.cancel();
             capturedTouchpadBaselineValid = false;
-            // Cancelling leaves the recognizer idle, and the pointer-count transition
-            // back down to two fingers is itself dropped here (ACTION_POINTER_UP still
-            // reports the lifting pointer, so a 3->2 lift has pointerCount == 3). Note
-            // that we have to re-arm two-finger tracking once the count settles, or
-            // scroll stays dead until every finger lifts.
-            capturedTouchpadRearmPending = !canceled && pointerCount >= 3;
         } else if (scrollEvent) {
             // Absolute capture normally supplies raw pointer coordinates, but a
             // few drivers still emit scroll axes. They must cancel a pending tap
@@ -863,26 +867,37 @@ public class MainActivity extends Activity
             sendCapturedTouchpadScrollAxes(event, -1);
             capturedTouchpadBaselineValid = false;
         } else if (hasButton) {
+            endSyntheticPinch();
+            releaseForwardedCapturedTouches(event);
             if (capturedTouchpadRecognizer != null)
                 capturedTouchpadRecognizer.cancel();
         } else if (capturedTouchpadRecognizer != null) {
             MotionEvent gestureEvent = normalizeCapturedTouchpadEvent(event);
             try {
-                if (capturedTouchpadRearmPending && pointerCount == 2) {
-                    capturedTouchpadRearmPending = false;
-                    capturedTouchpadRecognizer.rearmTwoFinger(
-                            gestureEvent.getX(0), gestureEvent.getY(0),
-                            gestureEvent.getX(1), gestureEvent.getY(1));
+                int result = capturedTouchpadRecognizer.onTouch(gestureEvent);
+                if (result == VirtualTouchpad.GESTURE_PINCH) {
+                    // Rebuilt from the scale factor around the cursor, not from the pad
+                    // coordinates: see updateSyntheticPinch.
+                    updateSyntheticPinch(
+                            capturedTouchpadRecognizer.pinchScaleFactor());
+                } else {
+                    endSyntheticPinch();
+                    if (result == VirtualTouchpad.GESTURE_UNHANDLED)
+                        forwardCapturedTouchpadAsTouch(gestureEvent);
+                    else
+                        capturedTouchpadTouchActive = false;
                 }
-                capturedTouchpadRecognizer.onTouch(gestureEvent);
             } finally {
                 gestureEvent.recycle();
             }
         }
 
         // A physical button cancels tap recognition, but it must not stop the
-        // relative cursor stream: touchpad click-drag still needs motion.
-        if (!canceled && !unsupportedGesture && !scrollEvent) {
+        // relative cursor stream: touchpad click-drag still needs motion. While a
+        // declined gesture is being forwarded as touch the cursor stays put, so its
+        // tail (fingers lifting back to one) cannot drag it away.
+        if (!canceled && !scrollEvent
+                && !capturedTouchpadTouchActive && !capturedPinchActive) {
             switch (action) {
                 case MotionEvent.ACTION_DOWN:
                     setCapturedTouchpadBaseline(event, -1);
@@ -902,9 +917,6 @@ public class MainActivity extends Activity
                     break;
                 case MotionEvent.ACTION_UP:
                     capturedTouchpadBaselineValid = false;
-                    // The gesture is over; do not carry a pending re-arm into the next
-                    // one, where it would fire on an ordinary two-finger touch.
-                    capturedTouchpadRearmPending = false;
                     break;
             }
         }
@@ -914,6 +926,126 @@ public class MainActivity extends Activity
         else
             updateMouseButtonStateFromEvent(event);
         return true;
+    }
+
+    /**
+     * Forward a gesture the recognizer declined (a pinch, or three or more fingers)
+     * as touch events, reusing the touchscreen path on already-normalized view
+     * coordinates.
+     *
+     * The first such event needs a catch-up: the fingers already on the pad were
+     * consumed as cursor motion or as an as-yet-undecided two-finger phase, so the
+     * remote has never seen a down for them, and handleTouchEvent only reports the
+     * pointer named by the action index. KWin drops motion for an id it never saw go
+     * down, which would leave a pinch showing a single contact.
+     */
+    /**
+     * Drive a synthetic two-finger pinch, following AOSP's GestureConverter::
+     * handlePinch. The pad's real finger positions are deliberately NOT used: the
+     * touchpad is small and its absolute coordinates say nothing about where the user
+     * is looking. Instead two contacts straddle the cursor, and only their separation
+     * carries the gesture, scaled by the recognizer's factor each event.
+     */
+    private void updateSyntheticPinch(float scaleFactor) {
+        boolean starting = !capturedPinchActive;
+        if (starting) {
+            capturedPinchActive = true;
+            capturedPinchSeparation = INITIAL_PINCH_SEPARATION_PX;
+        } else if (Float.isFinite(scaleFactor) && scaleFactor > 0f) {
+            capturedPinchSeparation *= scaleFactor;
+        }
+        // Keep the contacts distinguishable however far the user closes the pinch.
+        capturedPinchSeparation = Math.max(2f, capturedPinchSeparation);
+
+        ensurePointerPosition();
+        float[] left = convertToNativeCoords(
+                pointerX - capturedPinchSeparation / 2f, pointerY);
+        float[] right = convertToNativeCoords(
+                pointerX + capturedPinchSeparation / 2f, pointerY);
+
+        if (starting) {
+            // AOSP opens with ACTION_DOWN for one pointer then ACTION_POINTER_DOWN for
+            // the second, so emit the two downs as separate frames.
+            mNative.sendTouch(0, left[0], left[1], PINCH_POINTER_ID_0);
+            mNative.sendTouchFrame();
+            mNative.sendTouch(0, right[0], right[1], PINCH_POINTER_ID_1);
+            mNative.sendTouchFrame();
+            return;
+        }
+        mNative.sendTouch(2, left[0], left[1], PINCH_POINTER_ID_0);
+        mNative.sendTouch(2, right[0], right[1], PINCH_POINTER_ID_1);
+        mNative.sendTouchFrame();
+    }
+
+    /** Lift the synthetic pinch contacts, mirroring AOSP's endPinch ordering. */
+    private void endSyntheticPinch() {
+        if (!capturedPinchActive)
+            return;
+        capturedPinchActive = false;
+
+        ensurePointerPosition();
+        float[] left = convertToNativeCoords(
+                pointerX - capturedPinchSeparation / 2f, pointerY);
+        float[] right = convertToNativeCoords(
+                pointerX + capturedPinchSeparation / 2f, pointerY);
+        mNative.sendTouch(1, right[0], right[1], PINCH_POINTER_ID_1);
+        mNative.sendTouchFrame();
+        mNative.sendTouch(1, left[0], left[1], PINCH_POINTER_ID_0);
+        mNative.sendTouchFrame();
+    }
+
+    /**
+     * Release touches forwarded for a declined gesture that got cut short before its
+     * own UP arrived — a physical pad button, or a cancelled stream. Without this the
+     * contacts stay down on the remote for good.
+     */
+    private void releaseForwardedCapturedTouches(MotionEvent event) {
+        if (!capturedTouchpadTouchActive)
+            return;
+        capturedTouchpadTouchActive = false;
+        MotionEvent normalized = normalizeCapturedTouchpadEvent(event);
+        try {
+            boolean sent = false;
+            for (int i = 0; i < normalized.getPointerCount(); i++) {
+                float[] coords = convertToNativeCoords(
+                        normalized.getX(i), normalized.getY(i));
+                mNative.sendTouch(1, coords[0], coords[1],
+                        normalized.getPointerId(i));
+                sent = true;
+            }
+            if (sent)
+                mNative.sendTouchFrame();
+        } finally {
+            normalized.recycle();
+        }
+    }
+
+    private void forwardCapturedTouchpadAsTouch(MotionEvent normalized) {
+        int action = normalized.getActionMasked();
+        if (!capturedTouchpadTouchActive) {
+            capturedTouchpadTouchActive = true;
+            // handleTouchEvent emits this pointer's own down; the others need one here.
+            int selfReported = (action == MotionEvent.ACTION_DOWN
+                    || action == MotionEvent.ACTION_POINTER_DOWN)
+                    ? normalized.getActionIndex() : -1;
+            boolean sent = false;
+            for (int i = 0; i < normalized.getPointerCount(); i++) {
+                if (i == selfReported)
+                    continue;
+                float[] coords = convertToNativeCoords(
+                        normalized.getX(i), normalized.getY(i));
+                mNative.sendTouch(0, coords[0], coords[1],
+                        normalized.getPointerId(i));
+                sent = true;
+            }
+            if (sent)
+                mNative.sendTouchFrame();
+        }
+
+        handleTouchEvent(normalized);
+
+        if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL)
+            capturedTouchpadTouchActive = false;
     }
 
     private void processCapturedTouchpadMotionSample(MotionEvent event,
@@ -1095,11 +1227,12 @@ public class MainActivity extends Activity
     }
 
     private void resetCapturedTouchpadGesture() {
+        endSyntheticPinch();
         if (capturedTouchpadRecognizer != null)
             capturedTouchpadRecognizer.cancel();
         capturedTouchpadBaselineValid = false;
         capturedTouchpadBaselinePointers = 0;
-        capturedTouchpadRearmPending = false;
+        capturedTouchpadTouchActive = false;
         capturedTouchpadLastCentroidX = 0f;
         capturedTouchpadLastCentroidY = 0f;
     }
@@ -1606,7 +1739,13 @@ public class MainActivity extends Activity
 
         // ===== 触摸板模式优先处理（仅针对非鼠标触摸事件） =====
         if (isTouchpadMode && !mouseEvent) {
-            return virtualTouchpad.onTouch(event);
+            // onTouch now reports whether it implements the gesture. The on-screen
+            // touchpad keeps its previous behaviour of dropping the ones it does not:
+            // its coordinates are widget-local, so forwarding them as touch would land
+            // in the wrong place on the remote. Returning false here would also stop
+            // Android delivering the rest of the gesture.
+            virtualTouchpad.onTouch(event);
+            return true;
         }
 
         if (mouseEvent) {
