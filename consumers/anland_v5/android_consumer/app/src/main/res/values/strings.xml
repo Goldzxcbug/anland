@@ -81,6 +81,9 @@
     <string name="scroll_threshold_hint">How far a finger must travel before it counts as moving. Lower this if a pinch is being treated as a scroll.</string>
     <string name="move_threshold_label">Gesture commit threshold</string>
     <string name="move_threshold_hint">How far the leading finger must travel before an ambiguous two-finger gesture is resolved. Lower this if scrolling is slow to engage.</string>
+    <string name="gesture_scale_label">Gesture magnitude</string>
+    <string name="gesture_scale_value">%1$.0f px</string>
+    <string name="gesture_scale_hint">Gestures forwarded as touch (pinch, three or more fingers) are mapped into a square of this size centred on the pointer. Larger values make the same finger movement travel further.</string>
 
     <!-- Connection -->
     <string name="socket_path_label">Daemon socket path</string>

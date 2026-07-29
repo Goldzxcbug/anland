@@ -1,33 +1,54 @@
 package com.anland.consumer;
 
 import android.content.Context;
-import android.graphics.Point;
+import android.graphics.Matrix;
+import android.view.InputDevice;
 import android.view.MotionEvent;
 import android.view.ViewConfiguration;
-import android.view.WindowManager;
 
 /**
- * Laptop-style virtual touchpad: interprets finger gestures on the surface as
- * relative mouse motion, taps/clicks, long-press drag and two-finger scroll,
- * forwarding them to the remote through {@link Native}.
+ * Laptop-style touchpad: interprets finger contacts as relative cursor motion,
+ * taps/clicks, long-press drag and two-finger scroll.
  *
- * Self-contained state machine — the host routes non-mouse touches here (see
- * MainActivity.onTouchEvent) when touchpad mode is on, pushes the acceleration
- * preference via {@link #setAccelStrength}, and calls {@link #onSurfaceChanged}
- * when the surface is resized.
+ * One class serves both touch devices the app has, because the gesture logic is
+ * the same for both; they differ only in the coordinate space their contacts
+ * arrive in, which {@link #setInputBounds} describes:
+ *
+ * <ul>
+ *   <li>the on-screen touchpad — input is the screen, so the bounds are the view
+ *       size; active while touchpad mode is on;</li>
+ *   <li>the physical touchpad (and any physical mouse behind it) — input is the
+ *       pad's own coordinate range; active while pointer capture is on.</li>
+ * </ul>
+ *
+ * Only three gestures are implemented: one finger moves the cursor, two fingers
+ * travelling together scroll, and a quick two-finger tap is a right click.
+ * Anything else — a pinch, three or more fingers — is forwarded as touch, mapped
+ * into a square around the cursor (see {@link #setGestureScale}).
+ *
+ * The cursor itself belongs to the host: this class only reports deltas through
+ * {@link Output#onMotion} and reads the current position back through
+ * {@link Output#cursorX}/{@link Output#cursorY}, so both instances share one
+ * pointer.
  */
-public final class VirtualTouchpad {
+public final class Touchpad {
 
-    /**
-     * Optional output used by the pointer-capture adapter.  The original
-     * touchpad path keeps writing directly to Native; a capture instance can
-     * reuse the same gesture state machine while supplying its own movement
-     * and coordinate backend.
-     */
+    /** Touch actions used by {@link Output#onTouch}, matching the wire protocol. */
+    static final int TOUCH_DOWN = 0;
+    static final int TOUCH_UP = 1;
+    static final int TOUCH_MOVE = 2;
+
+    /** Everything this class produces, and the cursor position it needs back. */
     interface Output {
         void onMotion(float dx, float dy);
         void onScroll(int axis, float value);
         void onButton(int button, boolean pressed);
+        /** One contact of a gesture forwarded as touch, in output coordinates. */
+        void onTouch(int action, int pointerId, float x, float y);
+        /** End of a batch of {@link #onTouch} calls. */
+        void onTouchFrame();
+        float cursorX();
+        float cursorY();
     }
 
     // 状态机
@@ -67,13 +88,13 @@ public final class VirtualTouchpad {
     private float twoFingerStartX1, twoFingerStartY1;
     private float twoFingerStartX2, twoFingerStartY2;
 
-    // Latched for the rest of the gesture once this class declines it, so the host
-    // sees the whole remaining stream (including the final UP) and can release the
-    // touches it forwarded.
+    // Latched for the rest of the gesture once the recognizer declines it, so the
+    // whole remaining stream (including the final UP) reaches the forwarding path
+    // and the touches it emitted are released.
     private boolean gestureUnhandled = false;
 
     // AOSP's equivalents are 1.5mm and 7.0mm ("Two Finger Scroll/Move Distance
-    // Thresh" in libgestures). Coordinates here are view pixels rather than
+    // Thresh" in libgestures). Coordinates here are output pixels rather than
     // millimetres, so the physical values do not carry over; these are multiples of
     // touchSlop instead, and both multipliers are exposed in Settings because the
     // right values depend on the pad. Defaults keep AOSP's ~4.7:1 ratio.
@@ -90,11 +111,19 @@ public final class VirtualTouchpad {
     private float scrollSpeed = DEFAULT_SCROLL_SPEED;
     private boolean scrollReversed = false;
 
-    // 鼠标位置（相对模式）
-    private float mouseX = 0;
-    private float mouseY = 0;
-    private int screenWidth = 1920;
-    private int screenHeight = 1080;
+    // The input coordinate space: where this device's contacts live. A zero range
+    // means "not known yet", which leaves coordinates untouched.
+    private float inputMinX = 0f;
+    private float inputMinY = 0f;
+    private float inputRangeX = 0f;
+    private float inputRangeY = 0f;
+    // The output coordinate space, i.e. the view the gestures act on.
+    private int outputWidth = 0;
+    private int outputHeight = 0;
+
+    /** Side of the square, in output pixels, a forwarded gesture is mapped into. */
+    static final float DEFAULT_GESTURE_SCALE = 800f;
+    private float gestureScale = DEFAULT_GESTURE_SCALE;
 
     private float mouseAccelStrength = 1.0f; // 加速度强度，0.5 ~ 10.0
 
@@ -109,29 +138,61 @@ public final class VirtualTouchpad {
     private float accumulatedY = 0f;
     private boolean smoothInitialized = false;
 
-    private final Context context;
-    private final Native mNative;
+    // Contacts currently held down on the remote for a declined gesture, with the
+    // last position each was sent at so they can be released without an event.
+    private static final int MAX_FORWARDED = 10;
+    private final int[] forwardedIds = new int[MAX_FORWARDED];
+    private final float[] forwardedX = new float[MAX_FORWARDED];
+    private final float[] forwardedY = new float[MAX_FORWARDED];
+    private int forwardedCount = 0;
+
+    private final Matrix normalizeTransform = new Matrix();
+    private float gestureFactor = 1f;
+    private float gestureOffsetX = 0f;
+    private float gestureOffsetY = 0f;
+    private final float[] mappedPoint = new float[2];
+
     private final Output output;
-    // The original on-screen touchpad emits an explicit double-click sequence.
-    // Captured hardware taps already arrive as separate clicks, so emitting a
-    // second synthetic pair would turn two taps into three clicks.
+    // The on-screen touchpad emits an explicit double-click sequence. Captured
+    // hardware taps already arrive as separate clicks, so emitting a second
+    // synthetic pair there would turn two taps into three clicks.
     private final boolean synthesizeDoubleTap;
 
-    VirtualTouchpad(Context context, Native n) {
-        this(context, n, null);
-    }
-
-    VirtualTouchpad(Context context, Native n, Output output) {
-        this.context = context;
-        this.mNative = n;
+    Touchpad(Context context, Output output, boolean synthesizeDoubleTap) {
         this.output = output;
-        this.synthesizeDoubleTap = output == null;
+        this.synthesizeDoubleTap = synthesizeDoubleTap;
         touchSlop = ViewConfiguration.get(context).getScaledTouchSlop();
         setGestureThresholds(DEFAULT_SCROLL_THRESHOLD_FACTOR,
                 DEFAULT_MOVE_THRESHOLD_FACTOR);
-        updateScreenSize();
-        mouseX = screenWidth / 2f;
-        mouseY = screenHeight / 2f;
+    }
+
+    /**
+     * Describe the coordinate space this instance's events arrive in: the view size
+     * for the on-screen touchpad, the pad's motion range for a physical one.
+     */
+    void setInputBounds(float minX, float minY, float rangeX, float rangeY) {
+        inputMinX = minX;
+        inputMinY = minY;
+        inputRangeX = Math.max(0f, rangeX);
+        inputRangeY = Math.max(0f, rangeY);
+    }
+
+    /** Set the view size gestures are interpreted and forwarded in. */
+    void setOutputSize(int width, int height) {
+        if (width == outputWidth && height == outputHeight)
+            return;
+        outputWidth = width;
+        outputHeight = height;
+        resetSmoothing();
+    }
+
+    /**
+     * Set the side, in output pixels, of the square a forwarded gesture is mapped
+     * into. This is the gesture's magnitude: the whole input area spans this many
+     * pixels, so a larger value makes the same finger movement travel further.
+     */
+    void setGestureScale(float scale) {
+        gestureScale = Math.max(50f, Math.min(4000f, scale));
     }
 
     /** Set the acceleration strength (clamped to 0.5 ~ 10.0). */
@@ -162,16 +223,14 @@ public final class VirtualTouchpad {
         moveDistanceThreshold = touchSlop * Math.max(0.1f, Math.min(10.0f, moveFactor));
     }
 
-    /** Re-read screen size and re-anchor the cursor after a surface resize. */
-    void onSurfaceChanged() {
-        updateScreenSize();
-        mouseX = clamp(mouseX, 0, screenWidth);
-        mouseY = clamp(mouseY, 0, screenHeight);
-        resetSmoothing();
+    /** True while a declined gesture is being forwarded as touch. */
+    boolean isForwardingTouch() {
+        return forwardedCount > 0;
     }
 
-    /** Cancel an in-progress gesture when the capture window loses focus. */
+    /** Cancel an in-progress gesture, e.g. when the capture window loses focus. */
     void cancel() {
+        releaseForwardedTouches();
         if (isDraggingActive)
             sendButton(0x110, false);
         resetTouchpadState();
@@ -179,6 +238,50 @@ public final class VirtualTouchpad {
         lastTapTime = 0L;
         lastTapX = 0f;
         lastTapY = 0f;
+    }
+
+    /**
+     * Interpret one event from this device.
+     *
+     * Events belonging to a gesture this class does not implement are forwarded as
+     * touch instead, so nothing is silently dropped.
+     */
+    void onTouch(MotionEvent event) {
+        MotionEvent normalized = normalizeToOutput(event);
+        boolean handled;
+        try {
+            handled = recognize(normalized != null ? normalized : event);
+        } finally {
+            if (normalized != null)
+                normalized.recycle();
+        }
+        if (!handled)
+            forwardAsTouch(event);
+    }
+
+    /**
+     * Scale contacts from the input space into output pixels, which is what the
+     * touchSlop-based thresholds are calibrated against.
+     *
+     * Returns null when the two spaces already coincide — the on-screen touchpad's
+     * case — so no copy is made. SOURCE_CLASS_POSITION ignores MotionEvent
+     * transforms on newer Android releases, hence the temporary touchscreen source.
+     */
+    private MotionEvent normalizeToOutput(MotionEvent event) {
+        if (inputRangeX <= 0f || inputRangeY <= 0f
+                || outputWidth <= 0 || outputHeight <= 0)
+            return null;
+        float sx = outputWidth / inputRangeX;
+        float sy = outputHeight / inputRangeY;
+        if (sx == 1f && sy == 1f && inputMinX == 0f && inputMinY == 0f)
+            return null;
+
+        MotionEvent copy = MotionEvent.obtain(event);
+        copy.setSource(InputDevice.SOURCE_TOUCHSCREEN);
+        normalizeTransform.setScale(sx, sy);
+        normalizeTransform.postTranslate(-inputMinX * sx, -inputMinY * sy);
+        copy.transform(normalizeTransform);
+        return copy;
     }
 
     /** Larger of the two by magnitude, keeping its sign (libgestures MaxMag). */
@@ -200,7 +303,7 @@ public final class VirtualTouchpad {
      * A pinch moves the fingers in opposite directions, so the sign product is
      * negative and it is not a scroll. One finger resting while the other travels
      * zeroes the small term, which also fails the test — AOSP calls that a cursor
-     * move; here everything that is not a scroll is left to the host.
+     * move; here everything that is not a scroll is forwarded as touch.
      */
     private int classifyTwoFinger(float x1, float y1, float x2, float y2) {
         float dx1 = x1 - twoFingerStartX1;
@@ -235,8 +338,8 @@ public final class VirtualTouchpad {
 
     /**
      * Give up on the current gesture: release anything in progress and latch the
-     * unhandled flag so every remaining event reports unhandled, including the final
-     * UP. The host needs that whole tail to release the touch points it forwarded.
+     * unhandled flag so every remaining event is forwarded, including the final UP.
+     * The forwarding path needs that whole tail to release its touch points.
      */
     private boolean declineGesture() {
         if (isDraggingActive)
@@ -253,51 +356,32 @@ public final class VirtualTouchpad {
     private void sendButton(int button, boolean pressed) {
         if (output != null)
             output.onButton(button, pressed);
-        else if (mNative != null)
-            mNative.sendMouseButton(button, pressed);
     }
 
     private void sendScroll(int axis, float value) {
         if (output != null)
             output.onScroll(axis, value);
-        else if (mNative != null)
-            mNative.sendMouseScroll(axis, value);
     }
 
-    /**
-     * Send a relative movement to an adapter, or preserve the original
-     * absolute-cursor behavior for the normal virtual touchpad.
-     */
     private void sendMotion(float dx, float dy) {
-        if (output != null) {
+        if (output != null)
             output.onMotion(dx, dy);
-            return;
-        }
-        mouseX = clamp(mouseX + dx, 0, screenWidth);
-        mouseY = clamp(mouseY + dy, 0, screenHeight);
-        if (mNative != null)
-            mNative.sendMouseMotion(mouseX, mouseY, 0f, 0f);
     }
 
     // ==================== 触摸板手势及辅助方法 ====================
     /**
-     * Interpret one touchpad event.
-     *
-     * Only three gestures are implemented: one finger moves the cursor, two fingers
-     * travelling together scroll, and a quick two-finger tap is a right click.
-     * Anything else — a pinch, three or more fingers — is declined.
+     * Run the gesture state machine over contacts already in output coordinates.
      *
      * @return true when this class consumed the event, false when the gesture is not
      *         one it implements. A false result latches for the remainder of the
-     *         gesture, so the caller sees the whole stream through the final UP and
-     *         can forward it as touch instead.
+     *         gesture, so the whole stream through the final UP is forwarded.
      */
-    boolean onTouch(MotionEvent event) {
+    private boolean recognize(MotionEvent event) {
         int action = event.getActionMasked();
         int pointerCount = event.getPointerCount();
 
-        // Once declined, stay declined: the caller is mid-way through forwarding this
-        // gesture as touch and still needs the pointer-up events to release it.
+        // Once declined, stay declined: the gesture is mid-way through being
+        // forwarded as touch and its pointer-up events still have to get there.
         if (gestureUnhandled) {
             if (action == MotionEvent.ACTION_UP
                     || action == MotionEvent.ACTION_CANCEL) {
@@ -358,12 +442,10 @@ public final class VirtualTouchpad {
                     if (dist > touchSlop) {
                         isLongPressPossible = false;
                         isSingleTapCandidate = false;
-                        // The original state machine intentionally preserves
-                        // this flag through POINTER_UP. In capture mode, clear
-                        // it once the remaining finger actually moves so a
-                        // scroll/drag cannot finish as a right-click.
-                        if (output != null)
-                            isTwoFingerTapCandidate = false;
+                        // Cleared once the remaining finger actually moves, so a
+                        // scroll or drag whose second finger lifted early cannot
+                        // finish as a right-click.
+                        isTwoFingerTapCandidate = false;
                     }
 
                     if (isLongPressPossible && !hasLongPressed &&
@@ -371,13 +453,9 @@ public final class VirtualTouchpad {
                         hasLongPressed = true;
                         currentState = STATE_DRAGGING;
                         isDraggingActive = true;
+                        // No motion is emitted with the press: the cursor belongs to
+                        // the host and is already where the drag should start.
                         sendButton(0x110, true);
-                        mouseX = clamp(mouseX, 0, screenWidth);
-                        mouseY = clamp(mouseY, 0, screenHeight);
-                        if (output != null)
-                            output.onMotion(0f, 0f);
-                        else if (mNative != null)
-                            mNative.sendMouseMotion(mouseX, mouseY, 0f, 0f);
                         resetSmoothing();
                         break;
                     }
@@ -416,7 +494,7 @@ public final class VirtualTouchpad {
                             twoFingerMode = classifyTwoFinger(x1, y1, x2, y2);
                             if (twoFingerMode == TWO_FINGER_NOT_SCROLL) {
                                 // A pinch, or one finger travelling against a resting
-                                // one. Hand the gesture back to the caller.
+                                // one. Hand the gesture to the forwarding path.
                                 return declineGesture();
                             }
                         }
@@ -534,6 +612,138 @@ public final class VirtualTouchpad {
         return true;
     }
 
+    // ==================== 未处理手势 → 触摸转发 ====================
+    /**
+     * Forward a declined gesture (a pinch, or three or more fingers) as touch.
+     *
+     * Contacts are mapped into a square of {@link #gestureScale} output pixels
+     * centred on the cursor. Spreading the input area over the whole output would be
+     * wrong for a gesture: the input's aspect ratio is not the output's, so the
+     * gesture came out distorted, and it covered the entire output however small the
+     * real finger movement was. A square around the cursor puts the gesture where
+     * the user is looking and makes its magnitude one setting. The scale is uniform
+     * on both axes, so the input's own aspect ratio survives inside that square and
+     * a pinch behaves the same whichever way the fingers move.
+     */
+    private void forwardAsTouch(MotionEvent event) {
+        if (output == null)
+            return;
+        int action = event.getActionMasked();
+        if (action == MotionEvent.ACTION_CANCEL) {
+            releaseForwardedTouches();
+            return;
+        }
+        if (!computeGestureTransform())
+            return;
+
+        int upIndex = (action == MotionEvent.ACTION_UP
+                || action == MotionEvent.ACTION_POINTER_UP)
+                ? event.getActionIndex() : -1;
+        boolean sent = false;
+
+        for (int i = 0; i < event.getPointerCount(); i++) {
+            if (i == upIndex)
+                continue;
+            int id = event.getPointerId(i);
+            mapToCursorSquare(event.getX(i), event.getY(i));
+            int slot = forwardedSlot(id);
+            if (slot < 0) {
+                // Catch-up down. The fingers already on the device were read as
+                // cursor motion, or as a two-finger phase that had not been decided
+                // yet, so the remote has never seen them go down — and a compositor
+                // drops motion for a contact id it never saw, which would leave a
+                // pinch showing a single finger.
+                if (addForwarded(id, mappedPoint[0], mappedPoint[1])) {
+                    output.onTouch(TOUCH_DOWN, id, mappedPoint[0], mappedPoint[1]);
+                    sent = true;
+                }
+            } else if (action == MotionEvent.ACTION_MOVE) {
+                forwardedX[slot] = mappedPoint[0];
+                forwardedY[slot] = mappedPoint[1];
+                output.onTouch(TOUCH_MOVE, id, mappedPoint[0], mappedPoint[1]);
+                sent = true;
+            }
+        }
+
+        if (upIndex >= 0) {
+            int id = event.getPointerId(upIndex);
+            mapToCursorSquare(event.getX(upIndex), event.getY(upIndex));
+            if (removeForwarded(id)) {
+                output.onTouch(TOUCH_UP, id, mappedPoint[0], mappedPoint[1]);
+                sent = true;
+            }
+        }
+
+        if (sent)
+            output.onTouchFrame();
+    }
+
+    /**
+     * Release every contact still held down for a forwarded gesture. Needed when the
+     * gesture is cut short before its own UP arrives — a physical pad button, a
+     * cancelled stream, or lost capture — otherwise they stay down on the remote for
+     * good.
+     */
+    private void releaseForwardedTouches() {
+        if (forwardedCount == 0 || output == null)
+            return;
+        for (int i = 0; i < forwardedCount; i++)
+            output.onTouch(TOUCH_UP, forwardedIds[i], forwardedX[i], forwardedY[i]);
+        forwardedCount = 0;
+        output.onTouchFrame();
+    }
+
+    /** Centre the square on the cursor. False when there is nothing to map into. */
+    private boolean computeGestureTransform() {
+        if (inputRangeX <= 0f || inputRangeY <= 0f)
+            return false;
+        float cursorX = output.cursorX();
+        float cursorY = output.cursorY();
+        if (!Float.isFinite(cursorX) || !Float.isFinite(cursorY))
+            return false;
+        // The longer input axis spans the full square; the shorter keeps its ratio.
+        gestureFactor = gestureScale / Math.max(inputRangeX, inputRangeY);
+        gestureOffsetX = cursorX - (inputMinX + inputRangeX / 2f) * gestureFactor;
+        gestureOffsetY = cursorY - (inputMinY + inputRangeY / 2f) * gestureFactor;
+        return true;
+    }
+
+    private void mapToCursorSquare(float x, float y) {
+        mappedPoint[0] = x * gestureFactor + gestureOffsetX;
+        mappedPoint[1] = y * gestureFactor + gestureOffsetY;
+    }
+
+    private int forwardedSlot(int pointerId) {
+        for (int i = 0; i < forwardedCount; i++) {
+            if (forwardedIds[i] == pointerId)
+                return i;
+        }
+        return -1;
+    }
+
+    private boolean addForwarded(int pointerId, float x, float y) {
+        if (forwardedCount >= MAX_FORWARDED)
+            return false;
+        forwardedIds[forwardedCount] = pointerId;
+        forwardedX[forwardedCount] = x;
+        forwardedY[forwardedCount] = y;
+        forwardedCount++;
+        return true;
+    }
+
+    private boolean removeForwarded(int pointerId) {
+        int slot = forwardedSlot(pointerId);
+        if (slot < 0)
+            return false;
+        forwardedCount--;
+        for (int i = slot; i < forwardedCount; i++) {
+            forwardedIds[i] = forwardedIds[i + 1];
+            forwardedX[i] = forwardedX[i + 1];
+            forwardedY[i] = forwardedY[i + 1];
+        }
+        return true;
+    }
+
     private void resetTouchpadState() {
         currentState = STATE_IDLE;
         isSingleTapCandidate = false;
@@ -589,19 +799,5 @@ public final class VirtualTouchpad {
             accumulatedY = 0f;
         }
         return new float[]{outX, outY};
-    }
-
-    private float clamp(float value, float min, float max) {
-        return Math.max(min, Math.min(max, value));
-    }
-
-    private void updateScreenSize() {
-        Point size = new Point();
-        WindowManager wm = context.getSystemService(WindowManager.class);
-        if (wm != null) {
-            wm.getDefaultDisplay().getSize(size);
-            screenWidth = size.x;
-            screenHeight = size.y;
-        }
     }
 }

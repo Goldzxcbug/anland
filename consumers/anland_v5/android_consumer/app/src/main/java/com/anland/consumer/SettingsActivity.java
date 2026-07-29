@@ -72,6 +72,7 @@ public class SettingsActivity extends Activity {
     private static final String KEY_SCROLL_REVERSE = "scroll_reverse";
     private static final String KEY_SCROLL_THRESHOLD = "touchpad_scroll_threshold";
     private static final String KEY_MOVE_THRESHOLD = "touchpad_move_threshold";
+    private static final String KEY_GESTURE_SCALE = "touchpad_gesture_scale";
 
     // Latency presets: target buffer in ms (0 = auto). The user-visible labels live
     // in the R.array.latency_labels string-array, parallel to this array.
@@ -681,6 +682,9 @@ public class SettingsActivity extends Activity {
         addFloatSlider(root, R.string.move_threshold_label,
                 R.string.threshold_factor_value, R.string.move_threshold_hint,
                 KEY_MOVE_THRESHOLD, 0.1f, 8.0f, 0.05f, 2.35f);
+        addFloatSlider(root, R.string.gesture_scale_label, R.string.gesture_scale_value,
+                R.string.gesture_scale_hint,
+                KEY_GESTURE_SCALE, 100f, 3000f, 20f, 800f);
     }
 
     /**
