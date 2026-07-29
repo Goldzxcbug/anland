@@ -56,6 +56,44 @@ public final class VirtualTouchpad {
     private boolean isLongPressPossible = false;
     private boolean isMultiFinger = false;
 
+    // Two-finger classification, decided once per two-finger phase so a gesture
+    // cannot oscillate between scrolling and being declined.
+    private static final int TWO_FINGER_UNDECIDED = 0;
+    private static final int TWO_FINGER_SCROLL = 1;
+    private static final int TWO_FINGER_NOT_SCROLL = 2;
+    private static final int TWO_FINGER_PINCH = 3;
+    private int twoFingerMode = TWO_FINGER_UNDECIDED;
+    // Both fingers' positions when the two-finger phase began. The scroll test
+    // measures displacement from here rather than frame to frame, matching AOSP.
+    private float twoFingerStartX1, twoFingerStartY1;
+    private float twoFingerStartX2, twoFingerStartY2;
+
+    /** Consumed here: cursor motion, scroll, or a click. */
+    static final int GESTURE_HANDLED = 0;
+    /**
+     * A pinch. The host should synthesize two touch points around the cursor and
+     * scale their separation by {@link #pinchScaleFactor()}, the way AOSP does in
+     * GestureConverter::handlePinch, rather than mapping the real pad coordinates.
+     */
+    static final int GESTURE_PINCH = 1;
+    /** Anything else: the host should forward the real contacts as touch. */
+    static final int GESTURE_UNHANDLED = 2;
+
+    // Latched for the rest of the gesture once this class stops consuming it, so the
+    // host sees the whole remaining stream (including the final UP) and can release
+    // whatever it synthesized. GESTURE_HANDLED means nothing is latched.
+    private int declinedResult = GESTURE_HANDLED;
+    // Ratio of the fingers' separation to the previous event's, AOSP's pinch.dz.
+    private float pinchScale = 1.0f;
+    private float lastSpan = 0f;
+
+    // AOSP's equivalents are 1.5mm and 7.0mm ("Two Finger Scroll/Move Distance
+    // Thresh" in libgestures). Coordinates here are view pixels rather than
+    // millimetres, so the physical values do not carry over; these keep AOSP's
+    // ~4.7:1 ratio and scale off touchSlop instead.
+    private final float scrollDistanceThreshold;
+    private final float moveDistanceThreshold;
+
     // 鼠标位置（相对模式）
     private float mouseX = 0;
     private float mouseY = 0;
@@ -93,6 +131,8 @@ public final class VirtualTouchpad {
         this.output = output;
         this.synthesizeDoubleTap = output == null;
         touchSlop = ViewConfiguration.get(context).getScaledTouchSlop();
+        scrollDistanceThreshold = touchSlop * 0.5f;
+        moveDistanceThreshold = touchSlop * 2.35f;
         updateScreenSize();
         mouseX = screenWidth / 2f;
         mouseY = screenHeight / 2f;
@@ -122,31 +162,88 @@ public final class VirtualTouchpad {
         lastTapY = 0f;
     }
 
+    /** Larger of the two by magnitude, keeping its sign (libgestures MaxMag). */
+    private static float maxMag(float a, float b) {
+        return Math.abs(a) > Math.abs(b) ? a : b;
+    }
+
+    /** Smaller of the two by magnitude, keeping its sign (libgestures MinMag). */
+    private static float minMag(float a, float b) {
+        return Math.abs(a) < Math.abs(b) ? a : b;
+    }
+
     /**
-     * Re-enter two-finger tracking with fresh anchors, used by the pointer-capture
-     * adapter when a gesture drops back to two fingers.
+     * Classify a two-finger phase, following the rule AOSP's touchpad gesture
+     * library uses (libgestures ImmediateInterpreter::GetTwoFingerGestureType):
+     * take each finger's displacement since the phase began, pick whichever axis
+     * dominates, and require both fingers to have travelled the same way along it.
      *
-     * A third finger cancels the gesture, and the pointer-count transition that
-     * follows never reaches onTouch (the host drops events while three or more
-     * fingers are down), so the state machine would otherwise stay idle and stop
-     * reporting scroll until every finger lifts. Anchoring on the current positions
-     * keeps the first delta after the transition from jumping.
-     *
-     * Deliberately does not arm the tap candidates: the fingers have already been
-     * down long enough to be a third-finger gesture, not a two-finger tap.
+     * A pinch moves the fingers in opposite directions, so the sign product is
+     * negative and it is not a scroll. One finger resting while the other travels
+     * zeroes the small term, which also fails the test — AOSP calls that a cursor
+     * move; here everything that is not a scroll is left to the host.
      */
-    void rearmTwoFinger(float x1, float y1, float x2, float y2) {
-        currentState = STATE_TWO_FINGER;
-        lastX1 = x1;
-        lastY1 = y1;
-        lastX2 = x2;
-        lastY2 = y2;
-        isMultiFinger = true;
+    private int classifyTwoFinger(float x1, float y1, float x2, float y2) {
+        float dx1 = x1 - twoFingerStartX1;
+        float dy1 = y1 - twoFingerStartY1;
+        float dx2 = x2 - twoFingerStartX2;
+        float dy2 = y2 - twoFingerStartY2;
+
+        float largeDx = maxMag(dx1, dx2);
+        float largeDy = maxMag(dy1, dy2);
+        float large;
+        float small;
+        if (Math.abs(largeDx) > Math.abs(largeDy)) {
+            large = largeDx;
+            small = minMag(dx1, dx2);
+        } else {
+            large = largeDy;
+            small = minMag(dy1, dy2);
+        }
+        if (Math.abs(small) < scrollDistanceThreshold)
+            small = 0f;
+
+        if (large * small <= 0f) {
+            // Not the same direction. Stay undecided until one finger has clearly
+            // committed, so a two-finger tap is still allowed to become a click.
+            if (Math.abs(large) < moveDistanceThreshold)
+                return TWO_FINGER_UNDECIDED;
+            // Strictly opposite directions is a pinch; a zero product means one finger
+            // is resting while the other travels, which is not a pinch.
+            return large * small < 0f ? TWO_FINGER_PINCH : TWO_FINGER_NOT_SCROLL;
+        }
+        return Math.abs(large) < scrollDistanceThreshold
+                ? TWO_FINGER_UNDECIDED : TWO_FINGER_SCROLL;
+    }
+
+    /** Separation of the two fingers, used to derive the pinch scale factor. */
+    private static float span(float x1, float y1, float x2, float y2) {
+        return (float) Math.hypot(x2 - x1, y2 - y1);
+    }
+
+    /**
+     * Ratio of the fingers' separation to the previous event's — AOSP's pinch.dz.
+     * Only meaningful on an event that reported {@link #GESTURE_PINCH}.
+     */
+    float pinchScaleFactor() {
+        return pinchScale;
+    }
+
+    /**
+     * Give up on the current gesture: release anything in progress and latch the
+     * unhandled flag so every remaining event reports unhandled, including the final
+     * UP. The host needs that whole tail to release the touch points it forwarded.
+     */
+    private int declineGesture(int result) {
+        if (isDraggingActive)
+            sendButton(0x110, false);
+        isDraggingActive = false;
         isSingleTapCandidate = false;
         isTwoFingerTapCandidate = false;
         isLongPressPossible = false;
-        hasLongPressed = false;
+        declinedResult = result;
         resetSmoothing();
+        return result;
     }
 
     private void sendButton(int button, boolean pressed) {
@@ -179,9 +276,42 @@ public final class VirtualTouchpad {
     }
 
     // ==================== 触摸板手势及辅助方法 ====================
-    boolean onTouch(MotionEvent event) {
+    /**
+     * Interpret one touchpad event.
+     *
+     * Only three gestures are implemented: one finger moves the cursor, two fingers
+     * travelling together scroll, and a quick two-finger tap is a right click.
+     * Anything else — a pinch, three or more fingers — is declined.
+     *
+     * @return {@link #GESTURE_HANDLED}, {@link #GESTURE_PINCH} or
+     *         {@link #GESTURE_UNHANDLED}. A non-handled result latches for the
+     *         remainder of the gesture, so the caller sees the whole stream through
+     *         the final UP and can release whatever it synthesized.
+     */
+    int onTouch(MotionEvent event) {
         int action = event.getActionMasked();
         int pointerCount = event.getPointerCount();
+
+        // Once declined, stay declined: the caller is mid-way through representing this
+        // gesture itself and still needs the pointer-up events to release it.
+        if (declinedResult != GESTURE_HANDLED) {
+            int result = declinedResult;
+            if (pointerCount >= 2 && action == MotionEvent.ACTION_MOVE
+                    && result == GESTURE_PINCH) {
+                float newSpan = span(event.getX(0), event.getY(0),
+                        event.getX(1), event.getY(1));
+                pinchScale = lastSpan > 0f && newSpan > 0f ? newSpan / lastSpan : 1.0f;
+                lastSpan = newSpan;
+            } else {
+                pinchScale = 1.0f;
+            }
+            if (action == MotionEvent.ACTION_UP
+                    || action == MotionEvent.ACTION_CANCEL) {
+                resetTouchpadState();
+                resetSmoothing();
+            }
+            return result;
+        }
 
         switch (action) {
             case MotionEvent.ACTION_DOWN: {
@@ -197,6 +327,7 @@ public final class VirtualTouchpad {
                 isDraggingActive = false;
                 isMultiFinger = false;
                 currentState = STATE_ONE_FINGER;
+                twoFingerMode = TWO_FINGER_UNDECIDED;
                 resetSmoothing();
                 break;
             }
@@ -211,10 +342,14 @@ public final class VirtualTouchpad {
                 if (pointerCount == 2) {
                     currentState = STATE_TWO_FINGER;
                     isTwoFingerTapCandidate = true;
-                    lastX1 = event.getX(0);
-                    lastY1 = event.getY(0);
-                    lastX2 = event.getX(1);
-                    lastY2 = event.getY(1);
+                    lastX1 = twoFingerStartX1 = event.getX(0);
+                    lastY1 = twoFingerStartY1 = event.getY(0);
+                    lastX2 = twoFingerStartX2 = event.getX(1);
+                    lastY2 = twoFingerStartY2 = event.getY(1);
+                    twoFingerMode = TWO_FINGER_UNDECIDED;
+                } else if (pointerCount >= 3) {
+                    // Three or more fingers is never one of ours.
+                    return declineGesture(GESTURE_UNHANDLED);
                 }
                 break;
             }
@@ -282,17 +417,45 @@ public final class VirtualTouchpad {
                         float y1 = event.getY(0);
                         float x2 = event.getX(1);
                         float y2 = event.getY(1);
-                        float avgDx = ((x1 - lastX1) + (x2 - lastX2)) / 2;
-                        float avgDy = ((y1 - lastY1) + (y2 - lastY2)) / 2;
 
-                        if (Math.abs(avgDx) > 1 || Math.abs(avgDy) > 1) {
-                            isTwoFingerTapCandidate = false;
-                            if (Math.abs(avgDy) > Math.abs(avgDx) * 0.5) {
-                                sendScroll(0, -avgDy * 0.5f);
+                        if (twoFingerMode == TWO_FINGER_UNDECIDED) {
+                            twoFingerMode = classifyTwoFinger(x1, y1, x2, y2);
+                            if (twoFingerMode == TWO_FINGER_PINCH) {
+                                // The host rebuilds this from the scale factor, so seed
+                                // the separation and report 1.0 for the opening event —
+                                // the same thing AOSP does for GESTURES_ZOOM_START.
+                                lastSpan = span(x1, y1, x2, y2);
+                                pinchScale = 1.0f;
+                                return declineGesture(GESTURE_PINCH);
                             }
-                            if (Math.abs(avgDx) > Math.abs(avgDy) * 0.5) {
-                                sendScroll(1, avgDx * 0.5f);
+                            if (twoFingerMode == TWO_FINGER_NOT_SCROLL) {
+                                // One finger travelling against a resting one: not a
+                                // gesture this class implements, and not a pinch either.
+                                return declineGesture(GESTURE_UNHANDLED);
                             }
+                        }
+
+                        if (twoFingerMode == TWO_FINGER_SCROLL) {
+                            float avgDx = ((x1 - lastX1) + (x2 - lastX2)) / 2;
+                            float avgDy = ((y1 - lastY1) + (y2 - lastY2)) / 2;
+
+                            if (Math.abs(avgDx) > 1 || Math.abs(avgDy) > 1) {
+                                isTwoFingerTapCandidate = false;
+                                if (Math.abs(avgDy) > Math.abs(avgDx) * 0.5) {
+                                    sendScroll(0, -avgDy * 0.5f);
+                                }
+                                if (Math.abs(avgDx) > Math.abs(avgDy) * 0.5) {
+                                    sendScroll(1, avgDx * 0.5f);
+                                }
+                                lastX1 = x1;
+                                lastY1 = y1;
+                                lastX2 = x2;
+                                lastY2 = y2;
+                            }
+                        } else {
+                            // Still ambiguous, so emit nothing yet, but keep the
+                            // anchors current: the first scroll delta after the
+                            // decision must not be the whole accumulated drift.
                             lastX1 = x1;
                             lastY1 = y1;
                             lastX2 = x2;
@@ -329,7 +492,7 @@ public final class VirtualTouchpad {
                     isDraggingActive = false;
                     resetTouchpadState();
                     resetSmoothing();
-                    return true;
+                    return GESTURE_HANDLED;
                 }
 
                 if (isTwoFingerTapCandidate && isQuickTap) {
@@ -337,7 +500,7 @@ public final class VirtualTouchpad {
                     sendButton(0x111, false);
                     resetTouchpadState();
                     resetSmoothing();
-                    return true;
+                    return GESTURE_HANDLED;
                 }
 
                 if (currentState == STATE_ONE_FINGER && isSingleTapCandidate && isQuickTap) {
@@ -362,7 +525,7 @@ public final class VirtualTouchpad {
                     }
                     resetTouchpadState();
                     resetSmoothing();
-                    return true;
+                    return GESTURE_HANDLED;
                 }
                 resetTouchpadState();
                 resetSmoothing();
@@ -378,7 +541,7 @@ public final class VirtualTouchpad {
                 break;
             }
         }
-        return true;
+        return GESTURE_HANDLED;
     }
 
     private void resetTouchpadState() {
@@ -390,6 +553,12 @@ public final class VirtualTouchpad {
         isDraggingActive = false;
         isLongPressPossible = false;
         isMultiFinger = false;
+        twoFingerMode = TWO_FINGER_UNDECIDED;
+        // Cleared here rather than in declineGesture: the latch has to outlive the
+        // events that follow it and only lifts when the gesture itself ends.
+        declinedResult = GESTURE_HANDLED;
+        pinchScale = 1.0f;
+        lastSpan = 0f;
     }
 
     private void resetSmoothing() {
