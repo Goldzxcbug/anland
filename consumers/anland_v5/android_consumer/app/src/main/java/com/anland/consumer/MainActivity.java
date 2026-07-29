@@ -10,6 +10,7 @@ import android.app.PendingIntent;
 import android.content.Intent;
 import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
+import android.graphics.Matrix;
 import android.hardware.display.DisplayManager;
 import android.content.SharedPreferences;
 import android.os.Build;
@@ -151,6 +152,10 @@ public class MainActivity extends Activity
     // capture the system applies its own ballistics, so this is the only place the
     // multiplier can be honoured for a captured mouse or touchpad.
     private float mouseSensitivity = 1.0f;
+    // Reused when mapping captured touchpad coordinates into view space.
+    private final Matrix capturedTouchpadTransform = new Matrix();
+    // True while a captured multi-finger gesture is being forwarded as touch events.
+    private boolean capturedTouchActive = false;
 
     static {
         // Loads the single shared .so backing MainActivity, Native and
@@ -400,8 +405,10 @@ public class MainActivity extends Activity
             @Override
             public void dispatchPointerCaptureChanged(boolean hasCapture) {
                 super.dispatchPointerCaptureChanged(hasCapture);
-                if (!hasCapture)
+                if (!hasCapture) {
                     releaseAllMouseButtons();
+                    capturedTouchActive = false;
+                }
             }
         };
         root.addView(surfaceView, new FrameLayout.LayoutParams(
@@ -612,6 +619,7 @@ public class MainActivity extends Activity
         if (suppressUntilClick)
             pointerCaptureSuppressed = true;
         releaseAllMouseButtons();
+        capturedTouchActive = false;
         if (mRoot != null && mRoot.hasPointerCapture())
             mRoot.releasePointerCapture();
     }
@@ -739,13 +747,13 @@ public class MainActivity extends Activity
     /**
      * Handle mouse and hardware-touchpad events delivered through pointer capture.
      *
-     * Android's own touchpad gesture recognition stays active under capture: two-
-     * and multi-finger gestures arrive already translated into scroll axes and
-     * classified MotionEvents, exactly as they do without capture. So the hardware
-     * touchpad needs no gesture logic of its own — dispatch by classification the
-     * same way onTouchEvent() does. The single difference is that a captured event
-     * has no usable absolute position, so the cursor is maintained by the app from
-     * relative deltas rather than by the system.
+     * Android's own touchpad gesture recognition stays active under capture, so the
+     * hardware touchpad needs no gesture logic of its own — dispatch by
+     * classification the same way onTouchEvent() does. Two differences follow from
+     * capture itself: the event carries no usable absolute position, so the cursor is
+     * maintained by the app from relative deltas; and a captured touchpad reports
+     * pad-local coordinates, so multi-finger contacts are mapped back into view space
+     * before being forwarded as touch.
      */
     private boolean handleCapturedPointerEvent(MotionEvent event) {
         // A few OEMs combine source capability bits, so accept either captured
@@ -756,11 +764,22 @@ public class MainActivity extends Activity
         if (mNative == null)
             return true;
 
+        int action = event.getActionMasked();
         int cls = event.getClassification();
+
+        // Once a gesture is being forwarded as touch it stays on that path until the
+        // last finger lifts: switching paths midway would leave the final ACTION_UP
+        // on the mouse path, never releasing the touch point on the remote.
+        boolean startsTouch = cls == CLASSIFICATION_MULTI_FINGER_SWIPE
+                || cls == CLASSIFICATION_PINCH;
+
+        if (capturedTouchActive || startsTouch) {
+            capturedTouchActive = action != MotionEvent.ACTION_UP
+                    && action != MotionEvent.ACTION_CANCEL;
+            return handleCapturedTouchEvent(event);
+        }
         if (cls == CLASSIFICATION_TWO_FINGER_SWIPE)
             return handleTouchpadScroll(event);
-        if (cls == CLASSIFICATION_MULTI_FINGER_SWIPE || cls == CLASSIFICATION_PINCH)
-            return handleCapturedTouchEvent(event);
         return handleCapturedMouseEvent(event);
     }
 
@@ -799,37 +818,60 @@ public class MainActivity extends Activity
     }
 
     /**
-     * Captured counterpart of handleTouchEvent, used for the multi-finger swipe and
-     * pinch classifications. Captured X/Y are never screen coordinates — a relative
-     * mouse reports a delta there, a touchpad reports pad-local absolute units — so
-     * the forwarded touch is anchored at the app-maintained cursor instead.
+     * Forward a captured multi-finger gesture as touch events, exactly the way the
+     * uncaptured path does. Every pointer keeps its own coordinates — collapsing the
+     * gesture to a single point would make a pinch impossible to reconstruct.
+     *
+     * A captured touchpad is a SOURCE_CLASS_POSITION device, so its X/Y are pad-local
+     * absolute units rather than the view coordinates Android hands out without
+     * capture. Map them back into view space first, then run the unmodified
+     * handleTouchEvent over the result.
      */
     private boolean handleCapturedTouchEvent(MotionEvent event) {
-        int action = event.getActionMasked();
-        int pointerId = event.getPointerId(event.getActionIndex());
-        ensurePointerPosition();
-        float[] coords = convertToNativeCoords(pointerX, pointerY);
+        if (!event.isFromSource(InputDevice.SOURCE_TOUCHPAD))
+            return handleTouchEvent(event);
 
-        switch (action) {
-            case MotionEvent.ACTION_DOWN:
-            case MotionEvent.ACTION_POINTER_DOWN:
-                mNative.sendTouch(0, coords[0], coords[1], pointerId);
-                mNative.sendTouchFrame();
-                return true;
-
-            case MotionEvent.ACTION_UP:
-            case MotionEvent.ACTION_POINTER_UP:
-            case MotionEvent.ACTION_CANCEL:
-                mNative.sendTouch(1, coords[0], coords[1], pointerId);
-                mNative.sendTouchFrame();
-                return true;
-
-            case MotionEvent.ACTION_MOVE:
-                mNative.sendTouch(2, coords[0], coords[1], pointerId);
-                mNative.sendTouchFrame();
-                return true;
+        MotionEvent normalized = normalizeCapturedTouchpadEvent(event);
+        try {
+            return handleTouchEvent(normalized);
+        } finally {
+            normalized.recycle();
         }
-        return false;
+    }
+
+    /**
+     * Convert device-specific pad coordinates to view pixels. MotionEvent.transform()
+     * is ignored for SOURCE_CLASS_POSITION on newer Android releases, so the copy is
+     * retagged as a touchscreen before transforming it.
+     */
+    private MotionEvent normalizeCapturedTouchpadEvent(MotionEvent event) {
+        MotionEvent copy = MotionEvent.obtain(event);
+        copy.setSource(InputDevice.SOURCE_TOUCHSCREEN);
+
+        int width = pointerViewWidth();
+        int height = pointerViewHeight();
+        InputDevice device = event.getDevice();
+        InputDevice.MotionRange xRange = device == null ? null
+                : device.getMotionRange(MotionEvent.AXIS_X,
+                        InputDevice.SOURCE_TOUCHPAD);
+        InputDevice.MotionRange yRange = device == null ? null
+                : device.getMotionRange(MotionEvent.AXIS_Y,
+                        InputDevice.SOURCE_TOUCHPAD);
+        if (device != null && xRange == null)
+            xRange = device.getMotionRange(MotionEvent.AXIS_X);
+        if (device != null && yRange == null)
+            yRange = device.getMotionRange(MotionEvent.AXIS_Y);
+
+        if (width > 0 && height > 0 && xRange != null && yRange != null
+                && xRange.getRange() > 0f && yRange.getRange() > 0f) {
+            float sx = width / xRange.getRange();
+            float sy = height / yRange.getRange();
+            capturedTouchpadTransform.setScale(sx, sy);
+            capturedTouchpadTransform.postTranslate(-xRange.getMin() * sx,
+                    -yRange.getMin() * sy);
+            copy.transform(capturedTouchpadTransform);
+        }
+        return copy;
     }
 
     /**
