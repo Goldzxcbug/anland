@@ -51,6 +51,13 @@ struct audio_bridge {
     volatile int cap_latency_ms;
     volatile bool resend_formats;   /* a preset changed -> re-announce on the live fd */
 
+    /* Output stream died (error callback fired, or a write returned an error) ->
+     * the play thread closes and reopens it. AAudio disconnects a low-latency
+     * stream on route changes, HAL fast-track teardown after the desktop goes
+     * silent, or audio-policy preemption; without this flag the dead stream is
+     * never recovered and all audio stays silent until the Activity is recreated. */
+    volatile bool play_rebuild;
+
     uint8_t rx[MAX_DGRAM];
 };
 
@@ -62,7 +69,23 @@ static int current_fd(struct audio_bridge *b)
 
 /* ---- AAudio stream helpers ---- */
 
-static AAudioStream *open_stream(aaudio_direction_t dir, int channels)
+/* AAudio invokes this from its own thread the moment the output stream becomes
+ * unusable: an audio route changed (headset/BT plugged or unplugged), the HAL tore
+ * down the low-latency fast track after the desktop went silent and the stream
+ * underran, audio focus/policy preempted us, etc. The stream object is now dead --
+ * writes into it silently produce no sound -- so just signal the play thread to
+ * close and reopen it. (Never call AAudio on the stream from in here.) */
+static void play_error_cb(AAudioStream *stream, void *userData, aaudio_result_t error)
+{
+    struct audio_bridge *b = userData;
+    (void)stream;
+    LOGE("playback stream error: %s -- scheduling rebuild",
+         AAudio_convertResultToText(error));
+    b->play_rebuild = true;
+}
+
+static AAudioStream *open_stream(aaudio_direction_t dir, int channels,
+                                 AAudioStream_errorCallback error_cb, void *user_data)
 {
     AAudioStreamBuilder *bld = NULL;
     if (AAudio_createStreamBuilder(&bld) != AAUDIO_OK || !bld)
@@ -75,6 +98,8 @@ static AAudioStream *open_stream(aaudio_direction_t dir, int channels)
     AAudioStreamBuilder_setFormat(bld, AAUDIO_FORMAT_PCM_I16);
     AAudioStreamBuilder_setPerformanceMode(bld, AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
     AAudioStreamBuilder_setSharingMode(bld, AAUDIO_SHARING_MODE_SHARED);
+    if (error_cb)
+        AAudioStreamBuilder_setErrorCallback(bld, error_cb, user_data);
 
     AAudioStream *stream = NULL;
     aaudio_result_t r = AAudioStreamBuilder_openStream(bld, &stream);
@@ -119,6 +144,29 @@ static void send_format(int fd, uint32_t role, uint32_t rate, uint32_t channels,
 
 /* ---- playback: socket -> speaker ---- */
 
+/* Close any dead output stream and open a fresh one, reading back the device-
+ * chosen rate/channels. Used for the initial open (audio_start) and for runtime
+ * recovery (the play thread, once the error callback or a failed write flags the
+ * stream as dead). A new stream may pick a different device format, so callers
+ * arrange to re-announce it to the producer. Returns true on success. */
+static bool reopen_play_stream(struct audio_bridge *b)
+{
+    if (b->play) {
+        AAudioStream_requestStop(b->play);
+        AAudioStream_close(b->play);
+        b->play = NULL;
+    }
+    b->play = open_stream(AAUDIO_DIRECTION_OUTPUT, WANT_PLAY_CHANNELS,
+                          play_error_cb, b);
+    if (!b->play)
+        return false;
+    b->play_rate = AAudioStream_getSampleRate(b->play);
+    b->play_channels = AAudioStream_getChannelCount(b->play);
+    AAudioStream_requestStart(b->play);
+    LOGI("playback stream opened: %d Hz x%d", b->play_rate, b->play_channels);
+    return true;
+}
+
 static void *play_thread_func(void *arg)
 {
     struct audio_bridge *b = arg;
@@ -127,6 +175,22 @@ static void *play_thread_func(void *arg)
     bool had_fd = false;   /* drives a one-shot format handshake per connection */
 
     while (b->running) {
+        /* The output stream is opened once (audio_start) and normally kept for the
+         * bridge's lifetime. AAudio can disconnect it at any time -- a route change,
+         * the HAL tearing down the low-latency fast track once the desktop goes
+         * silent and the stream underruns, or an audio-policy preemption. A
+         * disconnected stream is dead: writes silently produce no sound. Reopen it
+         * here instead of losing all audio until the Activity is recreated. */
+        if (b->play_rebuild || !b->play) {
+            b->play_rebuild = false;
+            if (!reopen_play_stream(b)) {
+                usleep(200000);   /* open failed (device busy?): retry shortly */
+                continue;
+            }
+            had_fd = false;        /* new stream -> re-announce its format upstream */
+            b->resend_formats = true;
+        }
+
         int fd = current_fd(b);
         if (fd < 0) {
             had_fd = false;
@@ -170,9 +234,16 @@ static void *play_thread_func(void *arg)
             continue;
 
         /* Blocking write with a short timeout: on underrun/overrun AAudio paces us;
-         * we never stall the loop longer than the timeout. */
-        AAudioStream_write(b->play, b->rx + sizeof(struct audio_msg), frames,
-                           20 * 1000 * 1000L);
+         * we never stall the loop longer than the timeout. A negative result means
+         * the stream disconnected/errored under us -- flag it for reopen on the next
+         * iteration so we don't keep writing into a dead stream. */
+        aaudio_result_t wr = AAudioStream_write(b->play, b->rx + sizeof(struct audio_msg),
+                                                frames, 20 * 1000 * 1000L);
+        if (wr < 0) {
+            LOGE("playback write failed: %s -- rebuilding stream",
+                 AAudio_convertResultToText(wr));
+            b->play_rebuild = true;
+        }
     }
 
     LOGI("playback thread stopped");
@@ -258,21 +329,18 @@ void audio_start(audio_bridge *b)
         return;
 
     /* Open the output stream and read back the rate/channels the device actually
-     * chose -- this is the real playback capability we negotiate with the producer. */
+     * chose -- this is the real playback capability we negotiate with the producer.
+     * If the open fails here (device not ready yet) the play thread keeps retrying
+     * reopen_play_stream() until it succeeds. */
     b->play_rate = 48000;
     b->play_channels = WANT_PLAY_CHANNELS;
-    b->play = open_stream(AAUDIO_DIRECTION_OUTPUT, WANT_PLAY_CHANNELS);
-    if (b->play) {
-        b->play_rate = AAudioStream_getSampleRate(b->play);
-        b->play_channels = AAudioStream_getChannelCount(b->play);
-        AAudioStream_requestStart(b->play);
-    }
+    reopen_play_stream(b);
 
     /* Open the input stream even before the mic is enabled; it is started/stopped
      * by the capture thread. May be NULL if RECORD_AUDIO is not granted. */
     b->cap_rate = 48000;
     b->cap_channels = WANT_CAP_CHANNELS;
-    b->rec = open_stream(AAUDIO_DIRECTION_INPUT, WANT_CAP_CHANNELS);
+    b->rec = open_stream(AAUDIO_DIRECTION_INPUT, WANT_CAP_CHANNELS, NULL, NULL);
     if (b->rec) {
         b->cap_rate = AAudioStream_getSampleRate(b->rec);
         b->cap_channels = AAudioStream_getChannelCount(b->rec);
