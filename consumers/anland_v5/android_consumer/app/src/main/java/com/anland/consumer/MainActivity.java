@@ -187,6 +187,14 @@ public class MainActivity extends Activity
     private final SparseArray<Float> buttonDragLastX = new SparseArray<>();
     private final SparseArray<Float> buttonDragLastY = new SparseArray<>();
 
+    // Single-button (clickpad) touchpads report every physical press as
+    // BUTTON_PRIMARY and cannot tell left from right. On press we ask the
+    // Touchpad for the pressing finger (the slowest contact, held still to click)
+    // and pick left/right from its position, latching the choice here for the
+    // whole press. Release always drops the latched button, so a finger drifting
+    // across the midline before lift-off cannot strand a held button.
+    private int lastTouchpadBtnPressed = 0;
+
     static {
         // Loads the single shared .so backing MainActivity, Native and
         // CameraServices; the last two only declare their natives.
@@ -1059,10 +1067,14 @@ public class MainActivity extends Activity
             }
         }
 
-        if (action == MotionEvent.ACTION_CANCEL)
+        if (action == MotionEvent.ACTION_CANCEL) {
+            lastTouchpadBtnPressed = 0;
             releaseAllMouseButtons();
-        else
-            updateMouseButtonStateFromEvent(event);
+        } else {
+            // Resolve clickpad left/right from the pressing finger's position
+            // and latch it, instead of trusting the hardware's generic primary.
+            updateTouchpadButtonStateFromEvent(event);
+        }
         return true;
     }
 
@@ -1281,6 +1293,7 @@ public class MainActivity extends Activity
         capturedTouchpadBaselinePointers = 0;
         capturedTouchpadLastCentroidX = 0f;
         capturedTouchpadLastCentroidY = 0f;
+        lastTouchpadBtnPressed = 0;
     }
 
     /**
@@ -2012,6 +2025,38 @@ public class MainActivity extends Activity
 
     private void updateMouseButtonStateFromEvent(MotionEvent event) {
         updateMouseButtonState(effectiveButtonState(event));
+    }
+
+    /**
+     * Touchpad button state with clickpad left/right resolution. Reached only for
+     * SOURCE_TOUCHPAD events in capture mode. A single-button pad reports every
+     * press as BUTTON_PRIMARY, so on PRESS the Touchpad picks the pressing finger
+     * (the slowest contact) and returns left/right from its position; that choice
+     * is latched in {@link #lastTouchpadBtnPressed}. On RELEASE the latch is
+     * dropped regardless of where the finger now rests, so a finger drifting
+     * across the midline cannot strand a held button.
+     */
+    private void updateTouchpadButtonStateFromEvent(MotionEvent event) {
+        int action = event.getActionMasked();
+        int bs = event.getButtonState();
+        if (action == MotionEvent.ACTION_BUTTON_PRESS) {
+            int wire = (capturedTouchpad != null)
+                    ? capturedTouchpad.clickpadButton(event) : 0x110; // BTN_LEFT
+            lastTouchpadBtnPressed = (wire == 0x111) // BTN_RIGHT
+                    ? MotionEvent.BUTTON_SECONDARY : MotionEvent.BUTTON_PRIMARY;
+            bs &= ~(MotionEvent.BUTTON_PRIMARY | MotionEvent.BUTTON_SECONDARY);
+            bs |= lastTouchpadBtnPressed;
+        } else if (action == MotionEvent.ACTION_BUTTON_RELEASE) {
+            // Release exactly what we pressed: the latch, not the current position.
+            bs &= ~(MotionEvent.BUTTON_PRIMARY | MotionEvent.BUTTON_SECONDARY);
+            lastTouchpadBtnPressed = 0;
+        } else if (lastTouchpadBtnPressed != 0) {
+            // While held, keep the latched button instead of the hardware's
+            // generic primary so the compositor sees a consistent left/right.
+            bs &= ~(MotionEvent.BUTTON_PRIMARY | MotionEvent.BUTTON_SECONDARY);
+            bs |= lastTouchpadBtnPressed;
+        }
+        updateMouseButtonState(bs);
     }
 
     private void releaseAllMouseButtons() {
