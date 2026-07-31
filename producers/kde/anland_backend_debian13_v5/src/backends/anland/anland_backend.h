@@ -14,6 +14,7 @@
 #include "core/outputbackend.h"
 
 #include <QByteArray>
+#include <QPointer>
 #include <QPointF>
 #include <QVector>
 #include <memory>
@@ -22,6 +23,9 @@ extern "C" {
 #include "display_producer.h"
 #include "protocol.h"
 }
+
+#include "wayland/pointerconstraints_v1.h"
+#include "wayland/surface.h"
 
 class QSocketNotifier;
 class QTimer;
@@ -109,6 +113,17 @@ private:
     void sendClipboardToKWin(const QByteArray &text);
     void sendTextInputToKWin(const QByteArray &text);
 
+    // Consumer-var bridge: force the Android app into pointer-capture (relative
+    // mouse) mode while a Wayland client holds an active pointer constraint --
+    // either a zwp_locked_pointer_v1 (native game pointer lock, and Xwayland's
+    // hidden-cursor+confine emulation of it) or a zwp_confined_pointer_v1
+    // (Xwayland visible-cursor confine, and native confinement). This overrides
+    // the user's pointer_capture setting. The var is resent on every reconnect
+    // because the consumer resets it to 0 on fallback.
+    void setupMouseCaptureTracking();
+    void updateMouseCaptureVar();
+    void sendConsumerVar(uint32_t var, uint32_t value);
+
     static void fallbackTrampoline(void *data);
 
     QString m_socketPath;
@@ -127,6 +142,24 @@ private:
     bool m_inFallback = false;
     QByteArray m_clipboardText;
     std::unique_ptr<AbstractDataSource> m_clipboardSource;
+
+    // Active pointer-constraint tracking for CONSUMER_VAR_CAPTURE_MOUSE. We mirror
+    // KWin's own updatePointerConstraints() triggers (window activation + the
+    // focused surface's pointerConstraintsChanged + each constraint's own
+    // lockedChanged/confinedChanged) to observe zwp_locked_pointer_v1 and
+    // zwp_confined_pointer_v1 enable/disable without touching core input code.
+    // The lock covers native pointer lock plus Xwayland's hidden-cursor+confine
+    // emulation; the confine covers Xwayland visible-cursor confine and native
+    // confinement. The QPointers auto-null when the KWin objects are destroyed,
+    // and Qt auto-clears the connections to a destroyed QObject, so re-derivation
+    // stays safe.
+    QPointer<SurfaceInterface> m_captureMouseSurface;
+    QPointer<LockedPointerV1Interface> m_captureMouseLock;
+    QPointer<ConfinedPointerV1Interface> m_captureMouseConfined;
+    QMetaObject::Connection m_captureMouseSurfaceConn;
+    QMetaObject::Connection m_captureMouseLockConn;
+    QMetaObject::Connection m_captureMouseConfinedConn;
+    bool m_captureMouseActive = false; // last CONSUMER_VAR_CAPTURE_MOUSE value sent
 };
 
 } // namespace KWin
