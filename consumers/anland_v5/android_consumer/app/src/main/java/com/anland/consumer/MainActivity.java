@@ -12,6 +12,9 @@ import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
 import android.hardware.display.DisplayManager;
 import android.content.SharedPreferences;
+import android.media.AudioAttributes;
+import android.media.AudioFocusRequest;
+import android.media.AudioManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.util.Log;
@@ -57,6 +60,8 @@ public class MainActivity extends Activity
     // Latency presets in ms; 0 = engine default. Shared with SettingsActivity.
     static final String KEY_SPEAKER_LATENCY_MS = "speaker_latency_ms";
     static final String KEY_MIC_LATENCY_MS = "mic_latency_ms";
+    // Audio keep-alive toggle. Shared with SettingsActivity.
+    static final String KEY_AUDIO_KEEPALIVE = "audio_keepalive";
     private static final int REQ_RECORD_AUDIO = 1001;
     private static final int REQ_CAMERA = 1002;
     // Camera service fds/threads are created once and persist across reconnects;
@@ -70,6 +75,9 @@ public class MainActivity extends Activity
     static final String EXTRA_WINDOW_NAME = "window_name";
     // This window's own native transport instance (its own consumer_state handle).
     private Native mNative;
+    // Media audio focus for this window (volume keys + playback priority).
+    private AudioManager mAudioManager;
+    private AudioFocusRequest mAudioFocusRequest;
     // Socket path from the launch Intent; overrides the saved pref when non-null.
     private String mSocketOverride = null;
     // Title shown in recents / freeform (setTaskDescription); default "anland".
@@ -369,6 +377,7 @@ public class MainActivity extends Activity
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
+        setupMediaAudio();
         applyOrientation();
 
         // Apply the launch parameters: socket path (overrides the saved pref) and
@@ -828,12 +837,28 @@ public class MainActivity extends Activity
     }
 
     /**
+     * Whether a Back key comes from a real keyboard key rather than from Android's
+     * navigation. An external keyboard often reports its physical Esc as Back, and
+     * that key belongs to the desktop, not to the pointer-capture release. The
+     * gesture / three-button navigation Back is a virtual key with no scan code,
+     * so it stays the one way to release the capture.
+     */
+    private boolean isKeyboardBackKey(KeyEvent event) {
+        if (event.getScanCode() == 0)
+            return false;
+        InputDevice device = InputDevice.getDevice(event.getDeviceId());
+        return device != null && !device.isVirtual()
+                && device.getKeyboardType() == InputDevice.KEYBOARD_TYPE_ALPHABETIC;
+    }
+
+    /**
      * Release capture for a non-mouse Android Back key and consume exactly the
      * matching DOWN/UP pair. Shared by the normal Activity and accessibility-key
      * paths so the setting behaves identically with interception enabled.
      */
     private boolean handlePointerCaptureBackKey(KeyEvent event) {
-        if (event.getKeyCode() != KeyEvent.KEYCODE_BACK || isMouseKeyEvent(event))
+        if (event.getKeyCode() != KeyEvent.KEYCODE_BACK || isMouseKeyEvent(event)
+                || isKeyboardBackKey(event))
             return false;
 
         if (event.getAction() == KeyEvent.ACTION_DOWN) {
@@ -1325,6 +1350,44 @@ public class MainActivity extends Activity
                 dx * scaleX, dy * scaleY);
     }
 
+    /*
+     * Bind hardware/system volume and media audio focus to the MUSIC stream while
+     * this window is focused. Without focus, short Linux UI sounds (volume ticks,
+     * key clicks) can be throttled or silenced by the audio policy; with
+     * STREAM_MUSIC + USAGE_MEDIA the volume keys adjust the media stream and the
+     * AAudio output keeps priority alongside music/video playback.
+     */
+    private void setupMediaAudio() {
+        setVolumeControlStream(AudioManager.STREAM_MUSIC);
+        mAudioManager = getSystemService(AudioManager.class);
+        if (mAudioManager == null)
+            return;
+
+        AudioAttributes attrs = new AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_MEDIA)
+                .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                .build();
+        mAudioFocusRequest = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                .setAudioAttributes(attrs)
+                .setWillPauseWhenDucked(false)
+                .setOnAudioFocusChangeListener(change ->
+                        Log.i(TAG, "audio focus change: " + change))
+                .build();
+    }
+
+    private void requestMediaAudioFocus() {
+        if (mAudioManager == null || mAudioFocusRequest == null)
+            return;
+        int result = mAudioManager.requestAudioFocus(mAudioFocusRequest);
+        if (result != AudioManager.AUDIOFOCUS_REQUEST_GRANTED)
+            Log.w(TAG, "media audio focus not granted: " + result);
+    }
+
+    private void abandonMediaAudioFocus() {
+        if (mAudioManager != null && mAudioFocusRequest != null)
+            mAudioManager.abandonAudioFocusRequest(mAudioFocusRequest);
+    }
+
     @Override
     protected void onResume() {
         super.onResume();
@@ -1335,6 +1398,8 @@ public class MainActivity extends Activity
             finish();
             return;
         }
+
+        requestMediaAudioFocus();
 
         // Show settings notification while in foreground, unless disabled in Settings.
         if (getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
@@ -1390,6 +1455,7 @@ public class MainActivity extends Activity
             pushRefreshRate();
             applyMicState();
             applyAudioLatency();
+            applyAudioKeepalive();
         }
 
         // ===== 重新读取触摸板设置 =====
@@ -1423,10 +1489,12 @@ public class MainActivity extends Activity
         if (dm != null)
             dm.unregisterDisplayListener(displayListener);
         mNative.stop();
+        abandonMediaAudioFocus();
     }
 
     @Override
     protected void onDestroy() {
+        abandonMediaAudioFocus();
         releasePointerCapture(false);
         if (mRegisteredSocket != null) {
             sWindowsBySocket.remove(mRegisteredSocket, this);
@@ -1481,6 +1549,11 @@ public class MainActivity extends Activity
         int speakerMs = prefs.getInt(KEY_SPEAKER_LATENCY_MS, 0);
         int micMs = prefs.getInt(KEY_MIC_LATENCY_MS, 0);
         mNative.setAudioLatency(speakerMs, micMs);
+    }
+
+    private void applyAudioKeepalive() {
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        mNative.setAudioKeepalive(prefs.getBoolean(KEY_AUDIO_KEEPALIVE, false));
     }
 
     private void applyMicState() {
@@ -1542,6 +1615,7 @@ public class MainActivity extends Activity
         pushRefreshRate();
         applyMicState();
         applyAudioLatency();
+        applyAudioKeepalive();
 
         // ===== 更新屏幕尺寸并重置平滑状态 =====
         updateTouchpadBounds(null);

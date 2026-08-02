@@ -1094,3 +1094,13 @@ Java_com_anland_consumer_Native_nativeSetAudioLatency(
         return;
     audio_set_latency(s->audio, speakerMs, micMs);
 }
+
+JNIEXPORT void JNICALL
+Java_com_anland_consumer_Native_nativeSetAudioKeepalive(
+    JNIEnv *env, jclass clazz, jlong handle, jboolean enabled)
+{
+    struct consumer_state *s = STATE(handle);
+    if (!s)
+        return;
+    audio_set_keepalive(s->audio, enabled == JNI_TRUE);
+}
