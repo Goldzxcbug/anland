@@ -828,12 +828,28 @@ public class MainActivity extends Activity
     }
 
     /**
+     * Whether a Back key comes from a real keyboard key rather than from Android's
+     * navigation. An external keyboard often reports its physical Esc as Back, and
+     * that key belongs to the desktop, not to the pointer-capture release. The
+     * gesture / three-button navigation Back is a virtual key with no scan code,
+     * so it stays the one way to release the capture.
+     */
+    private boolean isKeyboardBackKey(KeyEvent event) {
+        if (event.getScanCode() == 0)
+            return false;
+        InputDevice device = InputDevice.getDevice(event.getDeviceId());
+        return device != null && !device.isVirtual()
+                && device.getKeyboardType() == InputDevice.KEYBOARD_TYPE_ALPHABETIC;
+    }
+
+    /**
      * Release capture for a non-mouse Android Back key and consume exactly the
      * matching DOWN/UP pair. Shared by the normal Activity and accessibility-key
      * paths so the setting behaves identically with interception enabled.
      */
     private boolean handlePointerCaptureBackKey(KeyEvent event) {
-        if (event.getKeyCode() != KeyEvent.KEYCODE_BACK || isMouseKeyEvent(event))
+        if (event.getKeyCode() != KeyEvent.KEYCODE_BACK || isMouseKeyEvent(event)
+                || isKeyboardBackKey(event))
             return false;
 
         if (event.getAction() == KeyEvent.ACTION_DOWN) {
