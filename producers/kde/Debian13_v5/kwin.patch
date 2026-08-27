@@ -262,3 +262,33 @@ index 26d51b4..d7baa81 100644
      }
  
      KWin::WaylandServer *server = KWin::WaylandServer::create();
+diff --git a/src/wayland/transaction.cpp b/src/wayland/transaction.cpp
+--- a/src/wayland/transaction.cpp
++++ b/src/wayland/transaction.cpp
+@@ -18,5 +18,13 @@ namespace KWin
+ TransactionDmaBufLocker *TransactionDmaBufLocker::get(GraphicsBuffer *buffer)
+ {
++    // KWin 6.3 performs implicit dma-buf waiting through a per-buffer locker.
++    // The anland backend always composites with EGL, whose implicit sync waits
++    // before sampling the imported texture, so the locker duplicates that wait
++    // for high-rate mailbox clients. Explicit sync timelines remain untouched.
++    if (qEnvironmentVariableIntValue("ANLAND_SKIP_IMPLICIT_SYNC_WAIT") == 1) {
++        return nullptr;
++    }
++
+     static QHash<GraphicsBuffer *, TransactionDmaBufLocker *> lockers;
+     if (auto it = lockers.find(buffer); it != lockers.end()) {
+         return *it;
+diff --git a/src/scene/surfaceitem.cpp b/src/scene/surfaceitem.cpp
+--- a/src/scene/surfaceitem.cpp
++++ b/src/scene/surfaceitem.cpp
+@@ -114,2 +114,9 @@ void SurfaceItem::addDamage(const QRegion &region)
+     m_lastDamage = std::chrono::steady_clock::now();
++    // Mailbox clients commonly replace a fully damaged buffer hundreds of times
++    // before the next composite. The latest buffer still gets installed through
++    // bufferChanged; repeating damage mapping and repaint propagation is redundant.
++    const bool damageAlreadyPending = !region.isEmpty() && m_damage.contains(region.boundingRect());
++    if (damageAlreadyPending) {
++        return;
++    }
+     m_damage += region;

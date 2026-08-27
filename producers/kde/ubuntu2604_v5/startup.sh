@@ -14,6 +14,10 @@ unset DISPLAY
 export ANLAND_SOCKET=/run/display.sock
 export ANLAND=1
 export ANLAND_DRM_DEVICE=/dev/dri/renderD128
+# Anland always composites client dmabufs through EGL. Let the GPU's implicit
+# synchronization wait at sampling time instead of exporting and polling one
+# sync_file per high-rate Wayland mailbox commit in KWin's main thread.
+export ANLAND_SKIP_IMPLICIT_SYNC_WAIT=1
 export MESA_LOADER_DRIVER_OVERRIDE=kgsl GALLIUM_DRIVER=kgsl FD_FORCE_KGSL=1
 export QT_QPA_PLATFORM=wayland
 # Tell xdg-desktop-portal this is a KDE session, so it loads the kde backend and

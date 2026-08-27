@@ -142,6 +142,12 @@ main() {
     build_pkg xwayland "$xwl_patch"
     
     sed -i '/PULSE_SERVER=unix:\/tmp\/.pulse-socket/d' /etc/environment
+
+    # plasma-wayland.service imports this file before starting the compositor.
+    # Keep the fast path here as well as in startup.sh, which is used by the
+    # manual launch path.
+    sed -i '/^ANLAND_SKIP_IMPLICIT_SYNC_WAIT=/d' /etc/environment
+    printf '%s\n' 'ANLAND_SKIP_IMPLICIT_SYNC_WAIT=1' >> /etc/environment
     
     log "Done. Patched kwin and Xwayland built and installed."
     echo "Built packages are under: $WORKDIR/{kwin,xwayland}/"
