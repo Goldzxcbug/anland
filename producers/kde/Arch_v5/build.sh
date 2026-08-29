@@ -170,6 +170,10 @@ kwin_packages=("$PKGDEST_DIR"/kwin-"$VERSION"-*.pkg.tar.*)
 if [[ "$INSTALL" == '1' ]]; then
     log 'Installing the freshly built anland KWin package'
     install_packages "${kwin_packages[@]}"
+
+    sudo touch /etc/environment
+    sudo sed -i '/^ANLAND_SKIP_IMPLICIT_SYNC_WAIT=/d' /etc/environment
+    printf '%s\n' 'ANLAND_SKIP_IMPLICIT_SYNC_WAIT=1' | sudo tee -a /etc/environment >/dev/null
 fi
 shopt -u nullglob
 

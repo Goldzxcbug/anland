@@ -12,6 +12,13 @@
 
 ---
 
+## 用户文档
+
+- [Anland 使用指南](doc/UserManual/anland_guide_zh.md) - 安装 Anland，并通过 chroot 或 Droidspaces 连接支持 Anland 的 Wayland 桌面。
+- [Anland 设置使用说明](doc/UserManual/anland_settings_guide_zh.md) - 配置 Android 应用中的输入、显示、连接、音频与窗口行为。
+
+---
+
 ## 1. 角色
 
 | 角色 | 程序 | 职责 |

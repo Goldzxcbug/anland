@@ -34,6 +34,7 @@ export GALLIUM_DRIVER=kgsl
 export FD_FORCE_KGSL=1
 export MESA_VK_DEVICE_SELECT_FORCE_DEFAULT_DEVICE=1
 export FD_DEV_FEATURES=enable_tp_ubwc_flag_hint=1
+export ANLAND_SKIP_IMPLICIT_SYNC_WAIT=1
 export XCURSOR_THEME=breeze_cursors
 export XCURSOR_SIZE=24
 export QT_QPA_PLATFORM=wayland

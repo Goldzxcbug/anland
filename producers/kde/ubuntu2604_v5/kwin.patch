@@ -104,3 +104,51 @@ diff -ruN a/src/main_wayland.cpp b/src/main_wayland.cpp
      }
  
      KWin::WaylandServer *server = KWin::WaylandServer::create();
+diff -ruN a/src/wayland/transaction.cpp b/src/wayland/transaction.cpp
+--- a/src/wayland/transaction.cpp	2026-05-12 18:26:46.000000000 +0800
++++ b/src/wayland/transaction.cpp	2026-08-25 23:30:00.000000000 +0800
+@@ -267,6 +267,17 @@
+ void Transaction::watchDmaBuf(TransactionEntry *entry)
+ {
+ #if defined(Q_OS_LINUX)
++    // The anland backend always composites client buffers with EGL; it never
++    // scans them out directly. EGL's implicit dma-buf synchronization waits
++    // before the texture is sampled, so exporting a sync_file and installing a
++    // QSocketNotifier for every mailbox commit only duplicates that wait. On
++    // fast clients this otherwise adds poll/ioctl/close work to every commit and
++    // delays wl_buffer.release. Keep the generic KWin behavior unless the
++    // anland-only startup flag explicitly opts into this composited fast path.
++    if (qEnvironmentVariableIntValue("ANLAND_SKIP_IMPLICIT_SYNC_WAIT") == 1) {
++        return;
++    }
++
+     const DmaBufAttributes *attributes = entry->buffer->dmabufAttributes();
+     if (!attributes) {
+         return;
+diff -ruN a/src/scene/surfaceitem.cpp b/src/scene/surfaceitem.cpp
+--- a/src/scene/surfaceitem.cpp	2026-05-12 18:26:46.000000000 +0800
++++ b/src/scene/surfaceitem.cpp	2026-08-25 23:30:00.000000000 +0800
+@@ -133,15 +133,22 @@
+ void SurfaceItem::addDamage(const Region &region)
+ {
++    // Mailbox clients commonly replace a fully damaged buffer hundreds of times
++    // before the next composite. The latest buffer still gets installed through
++    // bufferChanged; repeating damage mapping and repaint propagation is redundant.
++    const bool damageAlreadyPending = !region.isEmpty() && m_damage.contains(region.boundingRect());
+     if (m_lastDamage) {
+         const auto diff = std::chrono::steady_clock::now() - *m_lastDamage;
+         m_lastDamageTimeDiffs.push_back(diff);
+         if (m_lastDamageTimeDiffs.size() > 100) {
+             m_lastDamageTimeDiffs.pop_front();
+         }
+         m_frameTimeEstimation = std::accumulate(m_lastDamageTimeDiffs.begin(), m_lastDamageTimeDiffs.end(), 0ns) / m_lastDamageTimeDiffs.size();
+     }
+     m_lastDamage = std::chrono::steady_clock::now();
+     m_damage += region;
+-
++    if (damageAlreadyPending) {
++        return;
++    }
++
+     const RectF sourceBox = m_bufferToSurfaceTransform.map(m_bufferSourceBox, m_bufferSize);
+     const qreal xScale = sourceBox.width() / m_destinationSize.width();

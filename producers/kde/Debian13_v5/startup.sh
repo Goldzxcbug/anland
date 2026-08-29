@@ -14,6 +14,7 @@ unset DISPLAY
 export ANLAND_SOCKET=/run/display.sock
 export ANLAND=1
 export ANLAND_DRM_DEVICE=/dev/dri/renderD128
+export ANLAND_SKIP_IMPLICIT_SYNC_WAIT=1
 export MESA_LOADER_DRIVER_OVERRIDE=kgsl GALLIUM_DRIVER=kgsl FD_FORCE_KGSL=1
 export QT_QPA_PLATFORM=wayland
 rm -f "$XDG_RUNTIME_DIR"/wayland-* 2>/dev/null
