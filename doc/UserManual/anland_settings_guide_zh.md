@@ -1,5 +1,7 @@
 # Anland 设置使用说明
 
+> [English](anland_settings_guide.md)
+
 本文对应 Anland Android 应用中的“设置”页面。文中的“桌面”均指 Anland 正在显示的 Linux 桌面，不是 Android 主屏幕。
 
 设置修改后会立即保存，不需要“保存”按钮；不过部分项目只能在建立桌面连接时读取。通常从设置返回 Anland 桌面时会重新连接并应用它们。

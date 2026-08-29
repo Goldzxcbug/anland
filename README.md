@@ -14,6 +14,13 @@
 
 ---
 
+## User documentation
+
+- [Anland User Guide](doc/UserManual/anland_guide.md) - install Anland and connect a supported Wayland desktop through chroot or Droidspaces.
+- [Anland Settings Guide](doc/UserManual/anland_settings_guide.md) - configure input, display, connection, audio, and window behavior in the Android app.
+
+---
+
 ## 1. Roles
 
 | Role | Binary | Responsibility |

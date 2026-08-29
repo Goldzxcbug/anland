@@ -8,6 +8,8 @@ keywords: anland, wayland, android, proot, chroot, droidspaces, kwin, mutter, kd
 
 # Anland 使用指南
 
+> [English](anland_guide.md)
+
 Anland 是一套面向 Android 的 Wayland 显示方案，不是 Linux 容器管理器。它让经过适配的 Linux Wayland 合成器把画面渲染到共享 GPU 缓冲区，再由 Android 端的 Anland 应用显示画面并转发触摸、键盘、鼠标、剪贴板、音频等数据。
 
 一条完整的 Anland 显示链路由三部分组成：
@@ -334,7 +336,7 @@ chroot 用户先在 Android Root 终端检查默认宿主 socket：
 su -c 'test -S /data/local/tmp/display_daemon.sock'
 ```
 
-如果不存在，检查 `anland-daemon` 模块是否启用以及设备是否已经重启。如果 socket 存在，确认 Anland 设置中的路径正确、**使用 root 连接（辅助程序）**已开启，并且 Root 授权没有被拒绝。
+如果不存在，检查 `anland-daemon` 模块是否启用以及设备是否已经重启。如果 socket 存在，确认 Anland 设置中的路径正确、**使用 root 连接**已开启，并且 Root 授权没有被拒绝。
 
 Droidspaces 用户不应检查或填写这个全局默认 socket。请确认：
 
