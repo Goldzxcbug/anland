@@ -1,0 +1,35 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - '*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    uses: ./.github/workflows/build.yml
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v7
+
+      - name: Package magisk module
+        # Magisk installs modules from a zip with module.prop at its root,
+        # so zip the artifact directory's contents (mirrors build_magisk_module.sh).
+        run: cd anland-daemon && zip -r ../anland-daemon.zip . && cd ..
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            anland-v5/anland-v5.apk
+            anland-daemon.zip
