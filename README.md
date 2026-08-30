@@ -1,6 +1,9 @@
 # Anland Display Protocol V3
 
-![Stone Badge](https://stone.professorlee.work/api/stone/superturtlee/anland)
+<p align="left">
+  <img src="doc/logo.png" width="140" alt="Anland logo" />
+  <img src="https://stone.professorlee.work/api/stone/superturtlee/anland" alt="Stone Badge" />
+</p>
 
 > A buffer‑sharing protocol that lets a Linux compositor (KWin / Weston) render its
 > desktop into GPU buffers that an Android surface presents, brokered by a small
