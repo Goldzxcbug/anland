@@ -22,6 +22,9 @@ def gitOutput = { List<String> cmd, String fallback ->
 
 // Short commit id of the source tree the APK was built from.
 def gitCommitId = gitOutput(['git', 'rev-parse', '--short', 'HEAD'], "unknown")
+// Most recent tag reachable from HEAD (e.g. "5.20"), used as the versionName
+// prefix so it tracks releases instead of a hardcoded number.
+def gitTag = gitOutput(['git', 'describe', '--tags', '--abbrev=0'], "unknown")
 // Number of commits reachable from HEAD, used as a monotonic versionCode.
 def gitCommitCount = gitOutput(['git', 'rev-list', '--count', 'HEAD'], "1") as Integer
 // "-dirty" when the working tree has uncommitted changes at build time.
@@ -40,7 +43,7 @@ android {
         minSdk 30
         targetSdk 36
         versionCode gitCommitCount
-        versionName "5.19-${gitCommitId}${gitDirty}"
+        versionName "${gitTag}-${gitCommitId}${gitDirty}"
 
         ndk {
             abiFilters 'arm64-v8a'
