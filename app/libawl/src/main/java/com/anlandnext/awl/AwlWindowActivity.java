@@ -809,6 +809,18 @@ public class AwlWindowActivity extends Activity {
         return chars;
     }
 
+    /* Step n code points backward / forward from idx (surrogate-pair safe) */
+    private static int cpBack(String s, int idx, int n) {
+        for (int i = 0; i < n && idx > 0; i++)
+            idx = snapBack(s, idx - 1);
+        return idx;
+    }
+    private static int cpFwd(String s, int idx, int n) {
+        for (int i = 0; i < n && idx < s.length(); i++)
+            idx = snap(s, idx + Character.charCount(s.codePointAt(idx)));
+        return idx;
+    }
+
     /** Snap an index to a code point boundary (forward: absorb the second half of a surrogate pair) */
     private static int snap(String s, int idx) {
         if (idx <= 0) return 0;
@@ -876,6 +888,14 @@ public class AwlWindowActivity extends Activity {
         public boolean commitText(CharSequence text, int newCursorPosition) {
             String t = text == null ? "" : text.toString();
             AwlClient.ime(id, AwlClient.IME_COMMIT, 0, 0, t);
+            /* keep the virtual editor in step: without this a commit-only
+             * session (English typing) leaves surText stale and the next
+             * backspace converts to a zero-byte delete (client-side no-op) */
+            if (!t.isEmpty()) {
+                int c = Math.min(surCursor, surText.length());
+                surText = surText.substring(0, c) + t + surText.substring(c);
+                surCursor = surAnchor = c + t.length();
+            }
             clearComposing();
             return true;
         }
@@ -902,16 +922,35 @@ public class AwlWindowActivity extends Activity {
 
         @Override
         public boolean deleteSurroundingText(int beforeLength, int afterLength) {
-            AwlClient.ime(id, AwlClient.IME_DELETE,
-                    bytesBefore(beforeLength), bytesAfter(afterLength), "");
+            deleteAround(beforeLength, afterLength, false);
             return true;
         }
 
         @Override
         public boolean deleteSurroundingTextInCodePoints(int beforeLength, int afterLength) {
-            AwlClient.ime(id, AwlClient.IME_DELETE,
-                    bytesBeforeCp(beforeLength), bytesAfterCp(afterLength), "");
+            deleteAround(beforeLength, afterLength, true);
             return true;
+        }
+
+        /* The editor must report the new selection after a successful delete
+         * (imm.updateSelection from notifyImeState). LatinIME re-issues a
+         * delete that produced no selection update — returning true while the
+         * state cache still shows the pre-delete editor makes it delete again,
+         * each retry eating another char until the field is empty. */
+        private void deleteAround(int beforeChars, int afterChars, boolean codePoints) {
+            AwlClient.ime(id, AwlClient.IME_DELETE,
+                    codePoints ? bytesBeforeCp(beforeChars) : bytesBefore(beforeChars),
+                    codePoints ? bytesAfterCp(afterChars) : bytesAfter(afterChars), "");
+            int c = Math.min(surCursor, surText.length());
+            int a = codePoints ? cpBack(surText, c, beforeChars)
+                               : snapBack(surText, Math.max(0, c - beforeChars));
+            int b = codePoints ? cpFwd(surText, c, afterChars)
+                               : snap(surText, Math.min(surText.length(), c + afterChars));
+            if (b > a) {
+                surText = surText.substring(0, a) + surText.substring(b);
+                surCursor = surAnchor = a;
+                notifyImeState();
+            }
         }
 
         @Override
