@@ -4,8 +4,8 @@
 # Host prerequisites the Makefile assumes but the runner lacks:
 #   - wayland-scanner 1.24 — built from the pinned third_party/wayland fork so
 #     the scanner version matches the cross-compiled libwayland sources
-#   - autotools — third_party/libffi is a git checkout (no configure script,
-#     `make libffi` runs autogen.sh)
+#   - libffi configure — the git submodule ships none (autogen fails on the
+#     runner's libtool 2.4.7); the v3.4.6 release tarball is overlaid instead
 name: build
 
 on:
@@ -32,11 +32,21 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Host build tools (scanner deps, libffi autotools)
+      - name: Host build tools (scanner deps)
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            meson ninja-build autoconf automake libtool texinfo pkg-config
+            meson ninja-build pkg-config
+
+      # libffi: overlay the v3.4.6 release tarball (same pin as the
+      # submodule) over third_party/libffi — it ships a generated configure,
+      # so `make libffi` skips autogen.sh. Ubuntu 24.04's libtool 2.4.7
+      # predates LT_SYS_SYMBOL_USCORE and cannot autogen the git checkout.
+      - name: libffi release tarball (pre-generated configure)
+        run: |
+          curl -fsSL https://github.com/libffi/libffi/releases/download/v3.4.6/libffi-3.4.6.tar.gz \
+            | tar xz --strip-components=1 -C third_party/libffi
+          test -x third_party/libffi/configure
 
       - name: wayland-scanner (host, from the pinned fork)
         run: |
@@ -47,6 +57,7 @@ jobs:
           echo "/tmp/wl-scanner" >> "$GITHUB_PATH"
 
       - name: Cache Android SDK components
+        id: sdk
         uses: actions/cache@v4
         with:
           path: |
@@ -85,6 +96,8 @@ jobs:
         with:
           name: anland-build
           path: |
+            build/waylandbridge
+            build/libawlshm.so
             build/anland-wayland.apk
             build/anland-awllib.aar
             build/module/anland-awl.zip
