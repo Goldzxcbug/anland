@@ -961,22 +961,10 @@ public class AwlWindowActivity extends Activity {
 
         @Override
         public boolean commitCorrection(CorrectionInfo correctionInfo) {
-            if (correctionInfo == null) return true;
-            /* offset = start of the old text (editor coordinates); delete the old text + commit the new */
-            int sel = editorSelStart();
-            int off = correctionInfo.getOffset();
-            String old = String.valueOf(correctionInfo.getOldText());
-            String et = editorText();
-            int a = snap(et, Math.max(0, Math.min(off, off + old.length())));
-            int b = snap(et, Math.min(et.length(), off + old.length()));
-            if (b > a) {
-                AwlClient.ime(id, AwlClient.IME_DELETE,
-                        utf8Len(et.substring(Math.min(a, sel), Math.min(b, sel))),
-                        utf8Len(et.substring(Math.max(a, sel), Math.max(b, sel))), "");
-            }
-            AwlClient.ime(id, AwlClient.IME_COMMIT, 0, 0,
-                    String.valueOf(correctionInfo.getNewText()));
-            clearComposing();
+            /* advisory only: the IME already delivered the corrected text via
+             * commitText (LatinIME sends both on autocorrect/auto-capitalize)
+             * — re-applying it here would duplicate the word. TextView also
+             * just records the CorrectionInfo span, no text change. */
             return true;
         }
 
@@ -999,7 +987,12 @@ public class AwlWindowActivity extends Activity {
                     utf8Len(et.substring(Math.max(a, c), Math.max(b, c))), "");
             AwlClient.ime(id, AwlClient.IME_PREEDIT,
                     utf8Len(region), utf8Len(region), region);
-            surCursor = surAnchor = toSurroundingIndex(a);
+            /* the field no longer holds the region (deleted above, resent as
+             * preedit) — strip it from the model too, or every query would
+             * report it twice (editorText = surText + compText) and the IME,
+             * seeing the stale copy after commit, re-applies its correction */
+            surText = surText.substring(0, a) + surText.substring(b);
+            surCursor = surAnchor = a;
             compText = region;
             compCursor = region.length();
             notifyImeState();
