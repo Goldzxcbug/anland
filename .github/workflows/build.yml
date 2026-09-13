@@ -54,7 +54,10 @@ jobs:
             -Dscanner=true -Dlibraries=false -Ddocumentation=false \
             -Dtests=false -Ddtd_validation=false
           ninja -C /tmp/wl-scanner
-          echo "/tmp/wl-scanner" >> "$GITHUB_PATH"
+          # meson builds it at src/wayland-scanner — install so cmake's
+          # find_program sees a stable path
+          sudo install -m755 /tmp/wl-scanner/src/wayland-scanner /usr/local/bin/wayland-scanner
+          wayland-scanner --version
 
       - name: Cache Android SDK components
         id: sdk
@@ -96,8 +99,6 @@ jobs:
         with:
           name: anland-build
           path: |
-            build/waylandbridge
-            build/libawlshm.so
             build/anland-wayland.apk
             build/anland-awllib.aar
             build/module/anland-awl.zip
