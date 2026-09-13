@@ -39,8 +39,8 @@
     <string name="keycode_unknown">键码 %1$d</string>
     <string name="scancode_unknown">扫描码 %1$d</string>
     <!-- Immersive mode -->
-    <string name="section_immersive">沉浸模式(实验性)</string>
-    <string name="immersive_switch">启用沉浸模式(实验性)</string>
+    <string name="section_immersive">沉浸模式</string>
+    <string name="immersive_switch">启用沉浸模式</string>
     <string name="immersive_hint">将触摸、键盘和鼠标等输入直接交给 Linux 桌面，避免 Android 系统手势干扰。需要 root。在下方设置切换按键：按一次进入，再按一次退出；切换到其他应用时会自动退出。</string>
     <string name="bind_immersive_key_button">绑定沉浸模式按键</string>
     <string name="immersive_entering">已进入沉浸模式：所有输入交给桌面，再按一次 %1$s 退出</string>

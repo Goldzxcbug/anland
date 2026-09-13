@@ -39,8 +39,8 @@
     <string name="keycode_unknown">키코드 %1$d</string>
     <string name="scancode_unknown">스캔 코드 %1$d</string>
     <!-- Immersive mode -->
-    <string name="section_immersive">몰입 모드 (실험적)</string>
-    <string name="immersive_switch">몰입 모드 사용 (실험적)</string>
+    <string name="section_immersive">몰입 모드</string>
+    <string name="immersive_switch">몰입 모드 사용</string>
     <string name="immersive_hint">터치, 키보드, 마우스 입력을 안드로이드 제스처를 거치지 않고 리눅스 데스크톱으로 직접 전송합니다. 루트 권한이 필요합니다. 아래에서 전환 키를 설정하세요: 한 번 누르면 진입하고, 다시 누르면 종료됩니다. 앱을 전환해도 이 모드는 종료됩니다.</string>
     <string name="bind_immersive_key_button">몰입 모드 키 바인딩</string>
     <string name="immersive_entering">몰입 모드: 모든 입력이 데스크톱으로 전달됩니다. %1$s 키를 다시 누르면 종료됩니다.</string>
