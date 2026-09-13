@@ -140,6 +140,36 @@ public class AwlWindowActivity extends Activity {
     private String compText = "";       /* mirror of the preedit we sent (inserted at surCursor) */
     private int compCursor;             /* char cursor inside the preedit */
 
+    /* Consumer hosting hooks (Awl.attachWindow(ctx, win, HostCallbacks)):
+     * fetched once per instance below; null = started by the daemon /
+     * attached without hooks. Fired on the main thread inside the matching
+     * lifecycle method; consumer exceptions are contained (logged, never
+     * propagated into the host). */
+    private Awl.HostCallbacks hostCbs;
+    private Awl.WlWindow hostWin;
+
+    /** bind hooks + clear the in-flight attach mark for this window */
+    private void bindHostEntry() {
+        Awl.hostArrived(id);
+        Awl.HostEntry he = Awl.hostEntry(id);
+        hostCbs = he != null ? he.cbs : null;
+        hostWin = he != null ? he.win : null;
+    }
+
+    private interface HostFire {
+        void fire(Awl.HostCallbacks cbs, Awl.WlWindow win, Activity activity);
+    }
+
+    private void fireHost(HostFire f) {
+        if (hostCbs != null) {
+            try {
+                f.fire(hostCbs, hostWin, this);
+            } catch (Throwable t) {
+                Log.e(TAG, "host lifecycle callback threw", t);
+            }
+        }
+    }
+
     /** Window events while resumed: a sibling window of this app destroyed
      *  (its Activity paused, ctrl already torn down at detach) → finish that
      *  instance; own window's destroy also arrives over ctrl (C_CLOSE) —
@@ -296,6 +326,8 @@ public class AwlWindowActivity extends Activity {
                 taskTitle = nt;
                 applyTaskDescription();
             }
+            bindHostEntry();
+            fireHost((cbs, win, act) -> cbs.onHostCreate(win, act));
             Log.i(TAG, "win re-bound to id=" + id);
         }
     }
@@ -371,6 +403,9 @@ public class AwlWindowActivity extends Activity {
         setContentView(root);
 
         setupFullscreen();   /* immersive */
+
+        bindHostEntry();
+        fireHost((cbs, win, act) -> cbs.onHostCreate(win, act));
     }
 
     /* Immersive fullscreen: hide status bar + navigation bar, swipe-revealed
@@ -492,6 +527,18 @@ public class AwlWindowActivity extends Activity {
     /* ---- Lifecycle → control-channel reports ---- */
 
     @Override
+    protected void onStart() {
+        super.onStart();
+        fireHost((cbs, win, act) -> cbs.onHostStart(win, act));
+    }
+
+    @Override
+    protected void onStop() {
+        fireHost((cbs, win, act) -> cbs.onHostStop(win, act));
+        super.onStop();
+    }
+
+    @Override
     protected void onResume() {
         super.onResume();
         setupFullscreen();   /* the system may reset immersive mode */
@@ -506,6 +553,7 @@ public class AwlWindowActivity extends Activity {
                 && sv.getHolder().getSurface() != null
                 && sv.getHolder().getSurface().isValid())
             sendSurface(sv.getHolder(), lastW, lastH);
+        fireHost((cbs, win, act) -> cbs.onHostResume(win, act));
         Log.i(TAG, "win " + id + " RESUME");
         /* capture state is daemon-owned: the SURFACE re-attach re-pushes
          * C_CAPTURE (a persistent constraint survives the pause) */
@@ -513,6 +561,7 @@ public class AwlWindowActivity extends Activity {
 
     @Override
     protected void onPause() {
+        fireHost((cbs, win, act) -> cbs.onHostPause(win, act));
         if (clipMgr != null)
             clipMgr.removePrimaryClipChangedListener(clipListener);
         setPointerCaptureMode(CAPTURE_NONE, 0, 0, 0, 0);   /* release + local mode reset (the daemon mirror survives; re-pushed on re-attach) */
@@ -1589,6 +1638,8 @@ public class AwlWindowActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        fireHost((cbs, win, act) -> cbs.onHostDestroy(win, act));
+        if (isFinishing()) Awl.hostGone(id);   /* keep the entry across re-creation */
         LIVE.remove(id);
         if (deathLinked) {
             AwlClient.unmonitorDeath(daemonDeath);

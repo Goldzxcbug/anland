@@ -1,5 +1,6 @@
 package com.anlandnext.awl;
 
+import android.app.Activity;
 import android.content.Context;
 import android.content.Intent;
 import android.net.Uri;
@@ -152,6 +153,8 @@ public final class Awl {
                 else if (code == AwlClient.E_ATTACHED) cb.onWindowAttached(id);
                 else if (code == AwlClient.E_DETACHED) cb.onWindowDetached(id);
             }
+            if (code == AwlClient.E_DESTROYED)
+                hostGone(id);   /* no host will ever come for it — drop the attach bookkeeping */
         });
     }
 
@@ -233,6 +236,43 @@ public final class Awl {
     /* ---- window hosting ---- */
 
     /**
+     * Hosting-lifecycle hooks — the consumer's own code run inside the
+     * hosting {@link AwlWindowActivity}'s lifecycle methods on the main
+     * thread, receiving the hosted window and the activity. All optional:
+     * pass null, or override only what you need. Exceptions thrown by a hook
+     * are caught and logged (they must not kill the host).
+     *
+     * <p>Typical automation: attach on window-created
+     * ({@link #registerCallback} → {@link #attachWindow}), close when the
+     * host dies (onHostDestroy → {@link #closeWindow}).</p>
+     */
+    public interface HostCallbacks {
+        default void onHostCreate(WlWindow window, Activity activity) {}
+        default void onHostStart(WlWindow window, Activity activity) {}
+        default void onHostResume(WlWindow window, Activity activity) {}
+        default void onHostPause(WlWindow window, Activity activity) {}
+        default void onHostStop(WlWindow window, Activity activity) {}
+        default void onHostDestroy(WlWindow window, Activity activity) {}
+    }
+
+    /** window id → (window snapshot, consumer hooks) for its hosting activity */
+    static final class HostEntry {
+        final WlWindow win;
+        final HostCallbacks cbs;
+        HostEntry(WlWindow win, HostCallbacks cbs) { this.win = win; this.cbs = cbs; }
+    }
+
+    /* attach serialization: startActivity for the same window twice before
+     * its activity comes up would create two tasks (documentLaunchMode
+     * resolves intoExisting per start, not across racing starts) — one
+     * process-wide lock + a per-window in-flight mark, cleared when the
+     * activity arrives / the window dies / the start fails. */
+    private static final Object ATTACH_LOCK = new Object();
+    private static final java.util.HashSet<Long> attachPending = new java.util.HashSet<>();
+    private static final java.util.concurrent.ConcurrentHashMap<Long, HostEntry> hostEntries =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
      * Show a wayland toplevel as a window of THIS app: starts the library's
      * {@link AwlWindowActivity} (merged into your manifest) in its own task
      * — Recents identity, process and binder credentials are yours, never
@@ -242,13 +282,57 @@ public final class Awl {
      * connection), otherwise the activity exits immediately.
      */
     public static void attachWindow(Context ctx, long id, String title) {
+        attachWindow(ctx, new WlWindow(id, false, title), null);
+    }
+
+    /** Same, with hosting-lifecycle callbacks (null = none). */
+    public static void attachWindow(Context ctx, long id, String title, HostCallbacks cbs) {
+        attachWindow(ctx, new WlWindow(id, false, title), cbs);
+    }
+
+    /** Same, taking the window from {@link #getWindows} / a created event. */
+    public static void attachWindow(Context ctx, WlWindow win, HostCallbacks cbs) {
+        if (ctx == null || win == null) return;
         Intent it = new Intent(ctx, AwlWindowActivity.class);
         it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
                 | Intent.FLAG_ACTIVITY_NEW_DOCUMENT);
-        it.setData(Uri.parse("anland://win/" + id));
-        it.putExtra("id", id);
-        if (title != null) it.putExtra("title", title);
-        ctx.startActivity(it);
+        it.setData(Uri.parse("anland://win/" + win.id));
+        it.putExtra("id", win.id);
+        if (win.title != null) it.putExtra("title", win.title);
+        synchronized (ATTACH_LOCK) {
+            if (!attachPending.add(win.id))
+                return;   /* an attach for this window is already launching */
+            if (cbs != null) hostEntries.put(win.id, new HostEntry(win, cbs));
+            else hostEntries.remove(win.id);   /* a re-attach without hooks clears stale ones */
+        }
+        try {
+            ctx.startActivity(it);
+        } catch (Exception e) {
+            attachFailed(win.id);
+            Log.e(TAG, "attachWindow failed", e);
+        }
+    }
+
+    private static void attachFailed(long id) {
+        synchronized (ATTACH_LOCK) { attachPending.remove(id); }
+        hostEntries.remove(id);
+    }
+
+    /** hosting activity came up for this window — clear the in-flight mark */
+    static void hostArrived(long id) {
+        synchronized (ATTACH_LOCK) { attachPending.remove(id); }
+    }
+
+    /** hooks for this window's host (null = daemon-started / none); kept
+     *  across activity re-creation, dropped when the host finishes for good */
+    static HostEntry hostEntry(long id) {
+        return hostEntries.get(id);
+    }
+
+    /** host finished / window destroyed — drop the attach bookkeeping */
+    static void hostGone(long id) {
+        synchronized (ATTACH_LOCK) { attachPending.remove(id); }
+        hostEntries.remove(id);
     }
 
     private Awl() { }

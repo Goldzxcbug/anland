@@ -33,10 +33,20 @@ public class MainActivity extends Activity {
     private TextView status;
     private TextView log;
     private int logLines;
+    private boolean autoAttach;   /* created → attachWindow (onHostDestroy → closeWindow) */
 
     private final Awl.Callback events = new Awl.Callback() {
         @Override public void onWindowCreated(long id, String title) {
             logLine("event: created " + id + " '" + title + "'");
+            if (autoAttach) {
+                logLine("auto: attach " + id + " (destroy-on-host-exit)");
+                Awl.attachWindow(MainActivity.this, id, title, new Awl.HostCallbacks() {
+                    @Override public void onHostDestroy(Awl.WlWindow w, android.app.Activity a) {
+                        logLine("auto: host " + w.id + " destroyed → closeWindow");
+                        Awl.closeWindow(w.id);
+                    }
+                });
+            }
             refresh();
         }
         @Override public void onWindowDestroyed(long id) {
@@ -76,6 +86,16 @@ public class MainActivity extends Activity {
         refreshBtn.setText("Refresh");
         refreshBtn.setOnClickListener(v -> refresh());
         btns.addView(refreshBtn, new LinearLayout.LayoutParams(0,
+                LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        Button autoBtn = new Button(this);
+        autoBtn.setText("Auto: off");
+        autoBtn.setOnClickListener(v -> {
+            autoAttach = !autoAttach;
+            autoBtn.setText("Auto: " + (autoAttach ? "on" : "off"));
+            logLine("auto-attach " + (autoAttach ? "on (created→attach, host-exit→close)"
+                                                : "off"));
+        });
+        btns.addView(autoBtn, new LinearLayout.LayoutParams(0,
                 LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
         root.addView(btns);
 
