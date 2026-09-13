@@ -1534,13 +1534,31 @@ public class AwlWindowActivity extends Activity {
      *  are swallowed (repeat is the client's own job under wayland;
      *  forwarding them would re-press a held key).
      *  Soft-keyboard/IME synthesized keys have scanCode=0 → map the keycode
-     *  to an evdev code. */
+     *  to an evdev code.
+     *
+     *  Backspace while the IME is open is delivered as an instant
+     *  press+release tap: LatinIME acts on the DEL ACTION_UP and consumes
+     *  it, so a forwarded press would never see its release — the client
+     *  then holds the key down and its own key repeat drains the field
+     *  (Android apps delete on ACTION_DOWN and never depend on the UP;
+     *  wayland receivers key off the release instead). Repeats each become
+     *  one more tap, so held-key auto-repeat still works. */
     @Override
     public boolean dispatchKeyEvent(KeyEvent ev) {
         int kc = ev.getKeyCode();
         if (kc == KeyEvent.KEYCODE_VOLUME_UP || kc == KeyEvent.KEYCODE_VOLUME_DOWN
                 || kc == KeyEvent.KEYCODE_VOLUME_MUTE)
             return super.dispatchKeyEvent(ev);
+        if (kc == KeyEvent.KEYCODE_DEL && imeWanted) {
+            if (ev.getAction() == KeyEvent.ACTION_DOWN) {
+                int bs = ev.getScanCode() != 0 ? ev.getScanCode() : fallbackSc(kc);
+                if (bs > 0) {
+                    AwlClient.input(id, KEY, bs, 0, 0, 1, 0, ev.getMetaState());
+                    AwlClient.input(id, KEY, bs, 0, 0, 0, 0, 0);
+                }
+            }
+            return true;   /* UP swallowed — already released with the tap */
+        }
         if (ev.getAction() == KeyEvent.ACTION_DOWN && ev.getRepeatCount() > 0)
             return true;   /* synthetic repeat — swallow (see above) */
         int sc = ev.getScanCode();
