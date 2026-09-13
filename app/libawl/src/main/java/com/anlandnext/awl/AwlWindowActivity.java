@@ -18,6 +18,7 @@ import android.view.PointerIcon;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.view.View;
+import android.view.Window;
 import android.view.WindowInsets;
 import android.view.inputmethod.BaseInputConnection;
 import android.view.inputmethod.CompletionInfo;
@@ -147,14 +148,6 @@ public class AwlWindowActivity extends Activity {
      * propagated into the host). */
     private Awl.HostCallbacks hostCbs;
     private Awl.WlWindow hostWin;
-
-    /** bind hooks + clear the in-flight attach mark for this window */
-    private void bindHostEntry() {
-        Awl.hostArrived(id);
-        Awl.HostEntry he = Awl.hostEntry(id);
-        hostCbs = he != null ? he.cbs : null;
-        hostWin = he != null ? he.win : null;
-    }
 
     private interface HostFire {
         void fire(Awl.HostCallbacks cbs, Awl.WlWindow win, Activity activity);
@@ -308,53 +301,125 @@ public class AwlWindowActivity extends Activity {
         super.onNewIntent(intent);
         /* defensive id switch when documentLaunchMode reuses this instance for the same data URI */
         long nid = intent.getLongExtra("id", id);
-        if (nid != id) {
+        if (nid != id)
+            bindWindowId(nid, intent.getStringExtra("title"), null, true);
+    }
+
+    /* ---- window binding ----
+     * Everything id-dependent. Two entry flavors:
+     *   fromRegistry  onCreate/onNewIntent (attachWindow / daemon am-start):
+     *                 hooks come from Awl's attach registry (hostEntry)
+     *   explicit      subclass late binding (hostWindow): hooks given inline
+     * A re-bind to a different window switches cleanly (the onNewIntent
+     * defensive path); firstBind additionally arms the daemon-death watch. */
+    private void bindWindowId(long newId, String title, Awl.HostCallbacks cbs,
+                              boolean fromRegistry) {
+        if (newId == id || newId < 0) return;
+        boolean firstBind = id < 0;
+        if (!firstBind) {   /* switching away from a bound window */
             if (attached) AwlClient.pause(id, host);   /* daemon detaches the old id */
             setPointerCaptureMode(CAPTURE_NONE, 0, 0, 0, 0);   /* the old window's constraint does not carry over */
             LIVE.remove(id);
-            id = nid;
-            host = HOST_SEQ.incrementAndGet();
-            ctrl = new CtrlBinder();
             attached = false;
-            lastW = lastH = 0;
-            surText = ""; surCursor = surAnchor = 0;
-            compText = ""; compCursor = 0;
-            imeWanted = false;
-            LIVE.put(id, this);
-            String nt = intent.getStringExtra("title");
-            if (nt != null && !nt.isEmpty()) {
-                taskTitle = nt;
-                applyTaskDescription();
-            }
-            bindHostEntry();
-            fireHost((cbs, win, act) -> cbs.onHostCreate(win, act));
-            Log.i(TAG, "win re-bound to id=" + id);
         }
-    }
-
-    @Override
-    protected void onCreate(Bundle savedInstanceState) {
-        super.onCreate(savedInstanceState);
-        id = getIntent().getLongExtra("id", -1);
-        if (id < 0) { finish(); return; }
+        id = newId;
         host = HOST_SEQ.incrementAndGet();
-
         ctrl = new CtrlBinder();
+        /* lastW/H keep the surface size (an Android-window property, not a
+         * wayland-window one): if surfaceChanged already fired while awaiting,
+         * they are exactly what the catch-up below needs — resetting them
+         * would deadlock the late bind (no further surfaceChanged comes for
+         * an unchanged size) */
+        surText = ""; surCursor = surAnchor = 0;
+        compText = ""; compCursor = 0;
+        imeWanted = false;
         LIVE.put(id, this);
-        imm = getSystemService(InputMethodManager.class);
-        clipMgr = getSystemService(ClipboardManager.class);
+
+        if (fromRegistry) {
+            Awl.hostArrived(id);
+            Awl.HostEntry he = Awl.hostEntry(id);
+            hostCbs = he != null ? he.cbs : null;
+            hostWin = he != null ? he.win : null;
+        } else {
+            hostWin = new Awl.WlWindow(id, true, title);
+            hostCbs = cbs;
+        }
 
         /* Recents shows the wayland window's real title (the UI itself has no title bar, only the task label) */
-        String title = getIntent().getStringExtra("title");
         if (title != null && !title.isEmpty()) {
             taskTitle = title;
             applyTaskDescription();
         }
 
-        /* Long-lived binder death monitoring: daemon gone (module restart / killed) → exit, no dead windows left behind */
-        deathLinked = AwlClient.monitorDeath(daemonDeath);
-        if (!deathLinked && !AwlClient.available()) {
-            Log.e(TAG, "win " + id + ": daemon unreachable -> finish");
+        if (firstBind) {
+            /* Long-lived binder death monitoring: daemon gone (module restart / killed) → exit, no dead windows left behind */
+            deathLinked = AwlClient.monitorDeath(daemonDeath);
+            if (!deathLinked && !AwlClient.available()) {
+                Log.e(TAG, "win " + id + ": daemon unreachable -> finish");
+                finish();
+                return;
+            }
+        } else {
+            Log.i(TAG, "win re-bound to id=" + id);
+        }
+
+        /* the surface may already be up (late binding: UI was built while
+         * awaiting, surfaceChanged recorded its size) — report it now;
+         * hosting then proceeds exactly like the started-with-id path */
+        if (!attached && lastW > 0 && sv != null
+                && sv.getHolder().getSurface() != null
+                && sv.getHolder().getSurface().isValid())
+            sendSurface(sv.getHolder(), lastW, lastH);
+
+        fireHost((c2, w2, a2) -> c2.onHostCreate(w2, a2));
+    }
+
+    /** Subclass opt-in for LATE BINDING: return true to keep this activity
+     *  alive when started WITHOUT a window id — the subclass then starts its
+     *  wayland app (onCreate) and calls {@link #hostWindow} when the window
+     *  appears (e.g. from {@link Awl.Callback#onWindowCreated}). super cannot
+     *  be deferred until then (the platform lifecycle waits for no async
+     *  event) — the bind happens inside the library instead, and hosting
+     *  proceeds identically afterwards. Default false keeps the legacy
+     *  behavior (no id → finish at once). */
+    protected boolean onAwaitWindow() { return false; }
+
+    /** Late-bind the hosted window (await mode only; main thread): bind THIS
+     *  activity to the window — task/identity = your app — install the
+     *  hosting callbacks (null = none) and, if the surface is already up,
+     *  report it to the daemon immediately. */
+    protected final void hostWindow(long windowId, String title, Awl.HostCallbacks cbs) {
+        bindWindowId(windowId, title, cbs, false);
+    }
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        /* the manifest theme belongs to THIS class's declaration — a SUBCLASS
+         * declared without a theme falls back to the app default (title bar
+         * and all). Kill the title programmatically so subclasses inherit
+         * the chrome-free look with zero manifest work. */
+        try {
+            requestWindowFeature(Window.FEATURE_NO_TITLE);
+        } catch (Exception e) {
+            Log.w(TAG, "FEATURE_NO_TITLE (content already set by a subclass?)", e);
+        }
+        imm = getSystemService(InputMethodManager.class);
+        clipMgr = getSystemService(ClipboardManager.class);
+
+        id = getIntent().getLongExtra("id", -1);
+        if (id >= 0) {
+            bindWindowId(id, getIntent().getStringExtra("title"), null, true);
+        } else if (onAwaitWindow()) {
+            /* awaiting mode: no daemon-death watch yet (armed at first bind);
+             * but with the daemon GONE there is nothing to wait for */
+            if (!AwlClient.available()) {
+                Log.e(TAG, "await: daemon unreachable -> finish");
+                finish();
+                return;
+            }
+            Log.i(TAG, "awaiting a wayland window (unbound)");
+        } else {
             finish();
             return;
         }
@@ -365,6 +430,13 @@ public class AwlWindowActivity extends Activity {
             @Override public void surfaceCreated(SurfaceHolder holder) { }
             @Override public void surfaceChanged(SurfaceHolder holder, int format,
                                                  int width, int height) {
+                if (id < 0) {
+                    /* still awaiting: remember the surface, report after bind */
+                    Log.i(TAG, "awaiting: surface ready " + width + "x" + height);
+                    lastW = width;
+                    lastH = height;
+                    return;
+                }
                 Log.i(TAG, "win " + id + " surface " + width + "x" + height);
                 if (!attached)
                     sendSurface(holder, width, height);
@@ -403,9 +475,6 @@ public class AwlWindowActivity extends Activity {
         setContentView(root);
 
         setupFullscreen();   /* immersive */
-
-        bindHostEntry();
-        fireHost((cbs, win, act) -> cbs.onHostCreate(win, act));
     }
 
     /* Immersive fullscreen: hide status bar + navigation bar, swipe-revealed
@@ -565,7 +634,7 @@ public class AwlWindowActivity extends Activity {
         if (clipMgr != null)
             clipMgr.removePrimaryClipChangedListener(clipListener);
         setPointerCaptureMode(CAPTURE_NONE, 0, 0, 0, 0);   /* release + local mode reset (the daemon mirror survives; re-pushed on re-attach) */
-        endPadStream();   /* the touchpad pointer stream may be interrupted by lifecycle: make up leave/button releases */
+        if (id >= 0) endPadStream();   /* the touchpad pointer stream may be interrupted by lifecycle: make up leave/button releases */
         /* treat as minimize: daemon full detach (rendering resources freed,
          * wayland window kept alive). Clear attached locally too —
          * onResume/surfaceChanged re-attach from there */
@@ -580,6 +649,7 @@ public class AwlWindowActivity extends Activity {
     @Override
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
+        if (id < 0) return;   /* awaiting: nothing to report focus for */
         AwlClient.focus(id, hasFocus);   /* focus notifies the wayland client (configure ACTIVATED) */
         if (hasFocus) {
             tryShowIme();        /* C_IME_SHOW may arrive before focus does (input state kept across re-attach) */
@@ -1441,6 +1511,7 @@ public class AwlWindowActivity extends Activity {
      * handleMouseEvent. */
     @Override
     public boolean dispatchTouchEvent(MotionEvent ev) {
+        if (id < 0) return super.dispatchTouchEvent(ev);   /* awaiting */
         if (isMouse(ev)) {
             int cls = ev.getClassification();
             if (cls == CLS_TWO_FINGER_SWIPE) {
@@ -1507,6 +1578,7 @@ public class AwlWindowActivity extends Activity {
      *  two streams never double-process). */
     @Override
     public boolean onGenericMotionEvent(MotionEvent ev) {
+        if (id < 0) return super.onGenericMotionEvent(ev);   /* awaiting */
         boolean capturedPad = captureMode != CAPTURE_NONE
                 && ev.isFromSource(InputDevice.SOURCE_TOUCHPAD);
         if (!isMouse(ev) && !capturedPad)
@@ -1587,6 +1659,7 @@ public class AwlWindowActivity extends Activity {
      *  one more tap, so held-key auto-repeat still works. */
     @Override
     public boolean dispatchKeyEvent(KeyEvent ev) {
+        if (id < 0) return super.dispatchKeyEvent(ev);   /* awaiting */
         int kc = ev.getKeyCode();
         if (kc == KeyEvent.KEYCODE_VOLUME_UP || kc == KeyEvent.KEYCODE_VOLUME_DOWN
                 || kc == KeyEvent.KEYCODE_VOLUME_MUTE)
@@ -1639,7 +1712,7 @@ public class AwlWindowActivity extends Activity {
     @Override
     protected void onDestroy() {
         fireHost((cbs, win, act) -> cbs.onHostDestroy(win, act));
-        if (isFinishing()) Awl.hostGone(id);   /* keep the entry across re-creation */
+        if (isFinishing() && id >= 0) Awl.hostGone(id);   /* keep the entry across re-creation */
         LIVE.remove(id);
         if (deathLinked) {
             AwlClient.unmonitorDeath(daemonDeath);

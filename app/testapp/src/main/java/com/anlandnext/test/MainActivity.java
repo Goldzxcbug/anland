@@ -2,6 +2,7 @@ package com.anlandnext.test;
 
 import android.app.Activity;
 import android.graphics.Color;
+import android.content.Intent;
 import android.os.Bundle;
 import android.view.Gravity;
 import android.view.View;
@@ -96,6 +97,14 @@ public class MainActivity extends Activity {
                                                 : "off"));
         });
         btns.addView(autoBtn, new LinearLayout.LayoutParams(0,
+                LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        Button embedBtn = new Button(this);
+        embedBtn.setText("Embed");
+        embedBtn.setOnClickListener(v -> {
+            logLine("embed: starting EmbedActivity (late-bind demo)");
+            startActivity(new Intent(this, EmbedActivity.class));
+        });
+        btns.addView(embedBtn, new LinearLayout.LayoutParams(0,
                 LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
         root.addView(btns);
 
