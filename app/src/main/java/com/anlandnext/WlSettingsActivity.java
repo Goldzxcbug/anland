@@ -150,6 +150,27 @@ public class WlSettingsActivity extends Activity {
                         checkedId == 7 ? 2 : checkedId == 6 ? 1 : 0));
         root.addView(scaleRg);
 
+        /* ---- Auto attach (daemon config auto_attach: on = the daemon am-starts
+         *      the host window the moment a wayland window is created; off =
+         *      the window waits for a binder SURFACE from its app — the
+         *      third-party path. Effective for windows created from now on.) */
+        android.widget.Space gap24 = new android.widget.Space(this);
+        gap24.setMinimumHeight(64);
+        root.addView(gap24);
+
+        TextView autoTip = new TextView(this);
+        autoTip.setText(R.string.auto_attach_tip);
+        root.addView(autoTip);
+
+        android.widget.Switch autoSw = new android.widget.Switch(this);
+        autoSw.setText(R.string.auto_attach);
+        int gotAuto = WlBinder.configGet("auto_attach");
+        autoSw.setChecked(gotAuto == 1);   /* daemon down / unknown → off */
+        /* listener AFTER the initial state: opening the page must not fire a
+         * write back to the daemon */
+        autoSw.setOnCheckedChangeListener((b, on) -> WlBinder.configSet("auto_attach", on ? 1 : 0));
+        root.addView(autoSw);
+
         /* ---- Initial window size (first-frame configure placeholder; #33,
          *      daemon config init_w/init_h — new windows only) ---- */
         android.widget.Space gap3 = new android.widget.Space(this);

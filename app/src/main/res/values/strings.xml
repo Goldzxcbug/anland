@@ -24,6 +24,7 @@
     <string name="scale_mode_tip">Window scaling (when a fixed-size window is resized, applies immediately):</string>
     <string name="auto_attach_tip">Auto attach (daemon launches the host window automatically when a wayland window is created; off = the window waits for a binder SURFACE from its app):</string>
     <string name="auto_attach">Auto attach new windows</string>
+    <string name="scale_mode_stretch">Stretch (fill the window, aspect may distort)</string>
     <string name="scale_mode_fit">Fit (uniform scale, centered, black bars)</string>
     <string name="scale_mode_center">Original size (1:1, centered, no scaling)</string>
     <string name="init_size_tip">Initial window size (first-frame placeholder before Android sizes the window, applies to new windows):</string>
