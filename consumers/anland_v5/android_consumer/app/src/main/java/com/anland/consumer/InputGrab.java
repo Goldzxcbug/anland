@@ -72,7 +72,6 @@ final class InputGrab implements InputGrabTransport {
 
     // DEVICE.aux[4] flags
     static final int DEV_GRABBED    = 1;
-    static final int DEV_MULTITOUCH = 2;
     static final int DEV_CLICKPAD   = 4;
 
     /** Broadcast device id used by the helper's "records were dropped" marker. */
@@ -218,21 +217,15 @@ final class InputGrab implements InputGrabTransport {
     static final int BUS_HOST = 0x19;
     static final int BUS_SPI = 0x1c;
 
-    /**
-     * Whether this node is one a session could sensibly take.
-     *
-     * <p>Power, volume and the other dedicated button nodes are not. They belong
-     * to Android's own wake and volume paths, and a session that grabbed one
-     * could only take the device's own controls away — so the settings page
-     * leaves them out entirely. A row that can never be ticked is noise, and a
-     * row that <em>can</em> be ticked but should not be is a trap.
-     */
-    static boolean isSelectable(DiscoveredDevice device) {
-        if (device.watchOnly)
-            return false;
-        // A node that reports keys but has no letters is a button cluster, not a
-        // keyboard, however the kernel classifies it.
+    /** Real input devices remain visible even when Android must keep them. */
+    static boolean isVisible(DiscoveredDevice device) {
+        // Dedicated power/volume nodes and consumer-control button clusters are
+        // still omitted; a protected touchscreen is a real device, not a cluster.
         return device.cls != CLASS_KEYBOARD || device.alphaKeys;
+    }
+
+    static boolean isSelectable(DiscoveredDevice device) {
+        return isVisible(device) && !device.watchOnly;
     }
 
     /**
@@ -322,8 +315,12 @@ final class InputGrab implements InputGrabTransport {
         String helper = context.getApplicationInfo().nativeLibraryDir + "/libinputgrab.so";
         SuCommand.CommandResult result =
                 new SuCommand.SuRunner().run(helper + " --list", DISCOVERY_TIMEOUT_MS);
-        if (!result.isClean())
+        if (!result.isClean()) {
+            Log.w(TAG, "input discovery failed: exit=" + result.exitCode
+                    + " timeout=" + result.timedOut + " truncated=" + result.truncated
+                    + " unavailable=" + result.unavailable + " stderr=" + result.stderr);
             return null;
+        }
         return parseDeviceList(result.stdout);
     }
 

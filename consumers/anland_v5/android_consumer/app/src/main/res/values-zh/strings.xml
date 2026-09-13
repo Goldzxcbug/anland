@@ -13,7 +13,7 @@
     <!-- Settings home: category rows and back navigation -->
     <string name="nav_back">‹ 返回</string>
     <string name="cat_keyboard_title">键盘与按键</string>
-    <string name="cat_keyboard_subtitle">按键绑定、沉浸模式、无障碍与扩展按键栏</string>
+    <string name="cat_keyboard_subtitle">按键绑定、无障碍与扩展按键栏</string>
     <string name="cat_touchpad_title">触摸板与鼠标</string>
     <string name="cat_touchpad_subtitle">触摸板模式、指针捕获与灵敏度</string>
     <string name="cat_connection_subtitle">套接字、root、麦克风、摄像头与音频延迟</string>
@@ -81,6 +81,7 @@
     <string name="immersive_inputs_found">Gold 占用的设备会显示，但无法选择。</string>
     <string name="immersive_inputs_unknown">无法确认 Gold 占用了哪些设备，因此没有标记任何设备为已占用。这里没有任何设备可以确定是空闲的。</string>
     <string name="immersive_inputs_occupied">✕ %1$s — 由 Gold 占用</string>
+    <string name="immersive_inputs_system_power">✕ %1$s — 为保留电源键控制，交由安卓处理</string>
     <string name="device_class_keyboard">键盘</string>
     <string name="device_class_keys">按键节点</string>
     <string name="device_class_mouse">鼠标</string>

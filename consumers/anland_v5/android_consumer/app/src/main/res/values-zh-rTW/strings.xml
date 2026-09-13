@@ -13,7 +13,7 @@
     <!-- Settings home: category rows and back navigation -->
     <string name="nav_back">‹ 返回</string>
     <string name="cat_keyboard_title">鍵盤與按鍵</string>
-    <string name="cat_keyboard_subtitle">按鍵綁定、沉浸模式、無障礙與擴充按鍵列</string>
+    <string name="cat_keyboard_subtitle">按鍵綁定、無障礙與擴充按鍵列</string>
     <string name="cat_touchpad_title">觸控板與滑鼠</string>
     <string name="cat_touchpad_subtitle">觸控板模式、指標擷取與靈敏度</string>
     <string name="cat_connection_subtitle">socket、root、麥克風、相機與音訊延遲</string>
@@ -49,6 +49,7 @@
     <string name="immersive_failed">無法進入沉浸模式：root 遭拒或無法使用</string>
     <string name="immersive_no_devices">無法進入沉浸模式：沒有可接管的輸入裝置</string>
     <string name="immersive_interrupted">沉浸模式已結束，輸入已交還 Android</string>
+    <string name="immersive_inputs_system_power">✕ %1$s — 為保留電源鍵控制，交由 Android 處理</string>
     <string name="immersive_entering_mode">已進入沉浸模式：%1$s</string>
     <string name="immersive_bus_entering">已進入沉浸模式（用 Gold 的鍵盤）：鍵盤輸入轉送到桌面，觸控與滑鼠仍歸 Android。再按一次 %1$s 離開。</string>
     <string name="immersive_gold_unknown">無法確認 Gold 佔用了哪些裝置，將在不去迴避的情況下啟動</string>

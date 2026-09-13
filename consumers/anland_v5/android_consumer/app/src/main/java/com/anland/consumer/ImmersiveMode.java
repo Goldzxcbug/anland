@@ -59,25 +59,20 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
 
     // evdev event types / codes (linux/input-event-codes.h).
     private static final int EV_SYN = 0x00, EV_KEY = 0x01, EV_REL = 0x02, EV_ABS = 0x03;
-    private static final int SYN_REPORT = 0, SYN_DROPPED = 3;
-    private static final int ABS_X = 0x00, ABS_Y = 0x01;
-    private static final int ABS_MT_SLOT = 0x2f;
-    private static final int ABS_MT_POSITION_X = 0x35, ABS_MT_POSITION_Y = 0x36;
-    private static final int ABS_MT_TRACKING_ID = 0x39;
+    private static final int SYN_REPORT = 0, SYN_MT_REPORT = 2, SYN_DROPPED = 3;
     private static final int REL_X = 0x00, REL_Y = 0x01, REL_HWHEEL = 0x06;
     private static final int REL_WHEEL = 0x08;
     private static final int REL_WHEEL_HI_RES = 0x0b, REL_HWHEEL_HI_RES = 0x0c;
     private static final int BTN_FIRST = 0x110, BTN_LAST = 0x117;   // BTN_LEFT..BTN_TASK
     private static final int BTN_LEFT = 0x110;
     private static final int BTN_TOOL_FIRST = 0x140, BTN_TOOL_LAST = 0x14f;
-    private static final int BTN_TOUCH = 0x14a;
     private static final int KEY_CODE_LIMIT = 0x300;
     /** One wheel detent, matching the ±1 AXIS_VSCROLL the captured-mouse path sees. */
     private static final float WHEEL_STEP = 10f;
     private static final float HI_RES_PER_DETENT = 120f;
 
     /** MotionEvent tops out at 16 pointers, and so does every panel worth caring about. */
-    private static final int MAX_SLOTS = 16;
+    private static final int MAX_SLOTS = EvdevTouchState.MAX_CONTACTS;
     /** Matches IGRAB_MAX_DEVICES in jni/input_grab.h. */
     private static final int MAX_DEVICES = 32;
 
@@ -99,6 +94,8 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
          * like a real touch, so touchpad mode keeps working.
          */
         void onGrabbedTouch(MotionEvent ev);
+        /** Release the previous touchscreen stream before its new owner sends input. */
+        void onTouchscreenGrabChanged(boolean grabbed);
         /** A {@link Touchpad} wired to the host's cursor, for a grabbed physical pad. */
         Touchpad newGrabbedPad();
         /** Relative cursor motion in view pixels, with the sensitivity setting applied. */
@@ -114,8 +111,6 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
     private static final class Dev {
         int devIdx;
         int cls;
-        boolean grabbed;
-        boolean multitouch;
         /** One button under the whole pad, so BTN_LEFT alone just means "clicked". */
         boolean clickpad;
         int minX, maxX, minY, maxY;
@@ -140,25 +135,13 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
          */
         int contactFrames;
 
-        // Multi-touch protocol B: one contact per slot, alive while its tracking
-        // id is >= 0. The slot index doubles as the MotionEvent pointer id, which
-        // keeps ids stable for as long as the finger stays down.
-        final int[] trackingId = new int[MAX_SLOTS];
-        final float[] x = new float[MAX_SLOTS];
-        final float[] y = new float[MAX_SLOTS];
-        int curSlot = 0;
-        boolean sawTrackingId = false;
-
-        // Single-touch fallback for panels with no MT axes (BTN_TOUCH + ABS_X/Y).
-        // stValid is set by actual ABS_X/Y data, never by the BTN_TOUCH hint
-        // alone: a multitouch chip that only reports "someone is touching" must
-        // not produce a phantom contact at stale coordinates.
-        boolean stTouch = false;
-        boolean stValid = false;
-        float stX, stY;
+        final EvdevTouchState touch = new EvdevTouchState();
+        boolean droppingFrame;
 
         /** Contacts currently reported to the host, in pointer-index order. */
         final int[] active = new int[MAX_SLOTS];
+        final long[] activeGeneration = new long[MAX_SLOTS];
+        final float[] lastX = new float[MAX_SLOTS], lastY = new float[MAX_SLOTS];
         int activeCount = 0;
         long downTime = 0;
         boolean absDirty = false;
@@ -170,10 +153,6 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
 
         /** Clickpad press latch: release exactly the button that was pressed. */
         int latchedButton = 0;
-
-        Dev() {
-            Arrays.fill(trackingId, -1);
-        }
     }
 
     private final Host host;
@@ -457,8 +436,6 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
         Dev d = new Dev();
         d.devIdx = dev;
         d.cls = cls;
-        d.grabbed = (flags & InputGrab.DEV_GRABBED) != 0;
-        d.multitouch = (flags & InputGrab.DEV_MULTITOUCH) != 0;
         d.clickpad = (flags & InputGrab.DEV_CLICKPAD) != 0;
         d.minX = minX;
         d.maxX = maxX;
@@ -480,6 +457,8 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
             d.pad.setInputBounds(minX, minY, maxX - minX, maxY - minY);
         }
         devs[dev] = d;
+        if ((flags & InputGrab.DEV_GRABBED) != 0 && cls == InputGrab.CLASS_TOUCHSCREEN)
+            host.onTouchscreenGrabChanged(true);
     }
 
     @Override
@@ -499,7 +478,8 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
         active = false;
         starting = false;
         stats.removeCallbacks(statsTick);
-        releaseEverything(true);
+        releaseEverything();
+        host.onTouchscreenGrabChanged(false);
         Arrays.fill(devs, null);
         host.onImmersiveChanged(false);
         if (!wasRunning)
@@ -549,7 +529,7 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
             // may already be up, so let go of all of it rather than strand a key
             // or a contact on the desktop.
             if (type == EV_SYN && code == SYN_DROPPED)
-                releaseEverything(false);
+                dropInputFrame();
             return;
         }
         if (devIdx < 0 || devIdx >= devs.length)
@@ -557,13 +537,22 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
         Dev d = devs[devIdx];
         if (d == null)
             return;
+        if (d.droppingFrame) {
+            if (type == EV_SYN && code == SYN_REPORT)
+                d.droppingFrame = false;
+            return;
+        }
 
         switch (type) {
             case EV_SYN:
                 if (code == SYN_REPORT)
                     endFrame(d);
+                else if (code == SYN_MT_REPORT) {
+                    d.touch.endContact();
+                    d.absDirty = true;
+                }
                 else if (code == SYN_DROPPED)
-                    releaseEverything(false);
+                    dropInputFrame();
                 break;
             case EV_KEY:
                 handleKeyEvent(d, code, value);
@@ -572,7 +561,8 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
                 handleRelEvent(d, code, value);
                 break;
             case EV_ABS:
-                handleAbsEvent(d, code, value);
+                if (d.cls == InputGrab.CLASS_TOUCHSCREEN || d.cls == InputGrab.CLASS_TOUCHPAD)
+                    d.absDirty |= d.touch.abs(code, value);
                 break;
             default:
                 break;   // EV_MSC scan codes, EV_LED, EV_SW: nothing to forward
@@ -584,10 +574,7 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
             return;   // auto-repeat: the compositor makes its own from the keymap
         boolean pressed = value != 0;
 
-        if (code == BTN_TOUCH) {
-            // Only meaningful for the single-touch fallback; protocol B devices
-            // track contacts by slot instead.
-            d.stTouch = pressed;
+        if (d.touch.key(code, pressed)) {
             d.absDirty = true;
             return;
         }
@@ -640,7 +627,7 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
 
     /** A throwaway event holding the pad's current contacts, for clickpadButton(). */
     private MotionEvent buildPadProbe(Dev d) {
-        int n = gatherContacts(d, probeSlots);
+        int n = d.touch.gather(probeSlots);
         if (n <= 0)
             return null;
         return buildMotionEvent(d, MotionEvent.ACTION_MOVE, -1, probeSlots, n,
@@ -672,41 +659,6 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
         }
     }
 
-    private void handleAbsEvent(Dev d, int code, int value) {
-        if (d.cls != InputGrab.CLASS_TOUCHSCREEN && d.cls != InputGrab.CLASS_TOUCHPAD)
-            return;   // a gamepad's sticks are not contacts
-        switch (code) {
-            case ABS_MT_SLOT:
-                d.curSlot = (value >= 0 && value < MAX_SLOTS) ? value : MAX_SLOTS - 1;
-                break;
-            case ABS_MT_TRACKING_ID:
-                d.sawTrackingId = true;
-                d.trackingId[d.curSlot] = value;
-                d.absDirty = true;
-                break;
-            case ABS_MT_POSITION_X:
-                d.x[d.curSlot] = value;
-                d.absDirty = true;
-                break;
-            case ABS_MT_POSITION_Y:
-                d.y[d.curSlot] = value;
-                d.absDirty = true;
-                break;
-            case ABS_X:
-                d.stX = value;
-                d.stValid = true;
-                d.absDirty = true;
-                break;
-            case ABS_Y:
-                d.stY = value;
-                d.stValid = true;
-                d.absDirty = true;
-                break;
-            default:
-                break;
-        }
-    }
-
     /** SYN_REPORT: the frame is complete, so turn it into app input. */
     private void endFrame(Dev d) {
         if (d.relX != 0f || d.relY != 0f) {
@@ -722,8 +674,9 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
             host.sendMouseScroll(1, d.hwheel * WHEEL_STEP);
             d.hwheel = 0f;
         }
-        if (d.absDirty) {
+        if (d.absDirty || d.touch.isProtocolA()) {
             d.absDirty = false;
+            d.touch.endFrame();
             resolveTwin(d);
             if (!d.dup)
                 dispatchContacts(d);
@@ -767,40 +720,13 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
     }
 
     /**
-     * Slots holding a live contact, in ascending order (== pointer index order).
-     *
-     * Protocol B devices are tracked by slot; their BTN_TOUCH is only a "someone
-     * is touching" hint and produces no contact on its own — a chip that reports
-     * the hint without MT data (a dock's pass-through) must not turn into a
-     * phantom contact at stale coordinates. The single-touch fallback needs
-     * real ABS_X/Y data; the hint alone is never enough, regardless of what the
-     * device's capability flags claim.
-     */
-    private int gatherContacts(Dev d, int[] out) {
-        int n = 0;
-        if (d.sawTrackingId) {
-            for (int s = 0; s < MAX_SLOTS; s++) {
-                if (d.trackingId[s] >= 0)
-                    out[n++] = s;
-            }
-        } else if (d.stTouch && d.stValid) {
-            // Device without usable MT data: one contact, wherever the last
-            // position was.
-            d.x[0] = d.stX;
-            d.y[0] = d.stY;
-            out[n++] = 0;
-        }
-        return n;
-    }
-
-    /**
      * Turn the new contact set into the MotionEvent sequence a real touchscreen
      * would have produced: releases first, then a move for whatever stayed down,
      * then the new contacts. That is the order Android's own input reader uses,
      * and it is what keeps the pointer indices valid inside each event.
      */
     private void dispatchContacts(Dev d) {
-        int nDesired = gatherContacts(d, desiredSlots);
+        int nDesired = d.touch.gather(desiredSlots);
         if (nDesired > 0)
             d.contactFrames++;
         long now = SystemClock.uptimeMillis();
@@ -808,7 +734,9 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
         // 1. contacts that lifted, one event each, highest index first so the
         //    removal below never disturbs an index still to be visited.
         for (int i = d.activeCount - 1; i >= 0; i--) {
-            if (contains(desiredSlots, nDesired, d.active[i]))
+            int slot = d.active[i];
+            if (contains(desiredSlots, nDesired, slot)
+                    && d.activeGeneration[slot] == d.touch.generation[slot])
                 continue;
             int action = d.activeCount == 1
                     ? MotionEvent.ACTION_UP : MotionEvent.ACTION_POINTER_UP;
@@ -830,6 +758,7 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
                 break;
             int insert = d.activeCount++;
             d.active[insert] = slot;
+            d.activeGeneration[slot] = d.touch.generation[slot];
             if (d.activeCount == 1) {
                 d.downTime = now;
                 emit(d, MotionEvent.ACTION_DOWN, -1, d.active, 1, now);
@@ -837,6 +766,11 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
                 emit(d, MotionEvent.ACTION_POINTER_DOWN, insert, d.active,
                         d.activeCount, now);
             }
+        }
+        for (int i = 0; i < d.activeCount; i++) {
+            int slot = d.active[i];
+            d.lastX[slot] = d.touch.x[slot];
+            d.lastY[slot] = d.touch.y[slot];
         }
     }
 
@@ -881,7 +815,12 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
             int slot = slots[i];
             props[i].id = slot;
             props[i].toolType = MotionEvent.TOOL_TYPE_FINGER;
-            mapContact(d, slot);
+            boolean releasing = action == MotionEvent.ACTION_UP
+                    || action == MotionEvent.ACTION_POINTER_UP || action == MotionEvent.ACTION_CANCEL;
+            boolean replaced = releasing
+                    && d.activeGeneration[slot] != d.touch.generation[slot];
+            mapContact(d, replaced ? d.lastX[slot] : d.touch.x[slot],
+                    replaced ? d.lastY[slot] : d.touch.y[slot]);
             coords[i].clear();
             coords[i].x = mapped[0];
             coords[i].y = mapped[1];
@@ -910,9 +849,7 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
      * coordinates stay as they are and {@link Touchpad#setInputBounds} does the
      * normalising.
      */
-    private void mapContact(Dev d, int slot) {
-        float rawX = d.x[slot];
-        float rawY = d.y[slot];
+    private void mapContact(Dev d, float rawX, float rawY) {
         if (d.cls != InputGrab.CLASS_TOUCHSCREEN
                 || d.maxX <= d.minX || d.maxY <= d.minY) {
             mapped[0] = rawX;
@@ -945,13 +882,8 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
      * keys. A missed release would otherwise stay stuck on the desktop with no
      * input left to clear it.
      *
-     * @param forgetContacts true when the session is over. On a mid-session
-     *        resync the per-slot tracking state is kept instead, because a finger
-     *        still on the glass will not have its tracking id announced again —
-     *        keeping it lets the next frame bring the contact back as a fresh
-     *        press rather than losing it until the user lifts.
      */
-    private void releaseEverything(boolean forgetContacts) {
+    private void releaseEverything() {
         long now = SystemClock.uptimeMillis();
         for (Dev d : devs) {
             if (d == null)
@@ -960,11 +892,7 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
                 emit(d, MotionEvent.ACTION_CANCEL, -1, d.active, d.activeCount, now);
                 d.activeCount = 0;
             }
-            if (forgetContacts) {
-                Arrays.fill(d.trackingId, -1);
-                d.stTouch = false;
-                d.stValid = false;
-            }
+            d.touch.clear();
             d.absDirty = false;
             d.relX = d.relY = d.wheel = d.hwheel = 0f;
             d.latchedButton = 0;
@@ -979,6 +907,16 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
                 host.sendMouseButton(code, false);
             else
                 host.sendKey(1, code);
+        }
+    }
+
+    private void dropInputFrame() {
+        releaseEverything();
+        // The rest of a SYN_DROPPED frame is incomplete. In particular, keeping
+        // its old tracking ids could turn a lost UP into a permanent drag.
+        for (Dev d : devs) {
+            if (d != null)
+                d.droppingFrame = true;
         }
     }
 

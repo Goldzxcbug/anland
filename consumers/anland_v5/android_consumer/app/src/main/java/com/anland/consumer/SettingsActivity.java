@@ -646,23 +646,27 @@ public class SettingsActivity extends Activity {
         // Power, volume and the other button nodes are not offered at all: they
         // belong to Android's own wake and volume paths, and a row nobody should
         // ever tick is worse than no row.
-        List<InputGrab.DiscoveredDevice> selectable = new ArrayList<>();
+        List<InputGrab.DiscoveredDevice> visible = new ArrayList<>();
         for (InputGrab.DiscoveredDevice device : devices) {
-            if (InputGrab.isSelectable(device))
-                selectable.add(device);
+            if (InputGrab.isVisible(device))
+                visible.add(device);
         }
-        if (selectable.isEmpty()) {
+        if (visible.isEmpty()) {
             status.setText(R.string.immersive_inputs_none);
             return;
         }
 
-        for (InputGrab.DiscoveredDevice device : selectable) {
+        for (InputGrab.DiscoveredDevice device : visible) {
             boolean held = occupied.contains(device.node);
             CheckBox row = new CheckBox(this);
             String label = device.node + "  ·  " + device.name
                 + "  ·  " + deviceTypeLabel(device)
                 + "  ·  " + deviceBusLabel(device);
-            if (held) {
+            if (!InputGrab.isSelectable(device)) {
+                row.setText(getString(R.string.immersive_inputs_system_power, label));
+                row.setChecked(false);
+                row.setEnabled(false);
+            } else if (held) {
                 // Gold's. Deliberately not ticked: a tick reads as "you selected
                 // this", which is the opposite of what the row means. It is
                 // marked as unavailable instead.

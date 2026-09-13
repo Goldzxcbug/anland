@@ -29,10 +29,10 @@
  *      (or EOF, which the kernel guarantees when the app dies) releases
  *      everything. The app only heartbeats while its main thread is running, so
  *      an ANR frees the input too.
- *   5. Pure Android hardware-button nodes, and every non-keyboard node that
- *      reports Power, are watched but never grabbed. That preserves Android's
- *      lock/wake path even on panels that expose KEY_POWER alongside contacts.
- *      Full keyboards remain grabbable because their ordinary keys cannot leak.
+ *   5. Android hardware-button nodes stay with Android. A touchscreen that also
+ *      reports Power can be grabbed only while a separate built-in power-button
+ *      node remains available to Android. Otherwise it is listed as watch-only,
+ *      with its real device class preserved.
  */
 #define _GNU_SOURCE
 #include <android/log.h>
@@ -87,6 +87,8 @@ struct dev_entry {
     int  announced;  /* the app has received this entry's DEVICE record */
     int  alpha;      /* a full keyboard, not just a node that happens to have keys */
     int  watch_only; /* classified as tracked-but-never-grabbed */
+    int  power;      /* advertises KEY_POWER or KEY_POWER2 */
+    int  power_button; /* a separate built-in, key-only power-button node */
     unsigned int bus; /* bustype: how the device is attached, e.g. USB / Bluetooth */
     int  multitouch;
     int  clickpad;   /* one button under the pad: BTN_LEFT alone means "a click" */
@@ -96,6 +98,7 @@ struct dev_entry {
 
 static struct dev_entry g_devs[IGRAB_MAX_DEVICES];
 static int g_ndevs = 0;
+static int g_has_power_button = 0;
 static volatile sig_atomic_t g_quit = 0;
 
 static void on_signal(int sig)
@@ -309,11 +312,7 @@ static int any_key_bit(const unsigned long *key)
     return 0;
 }
 
-/* A full keyboard is allowed to advertise KEY_POWER: many docks expose that
- * capability on their ordinary keyboard node while the tablet's real power
- * switch is a separate node. Non-keyboard nodes have no safe way to split one
- * evdev fd after EVIOCGRAB, so a Power-bearing panel/mouse/controller stays
- * watch-only and Android retains its lock/wake path. */
+/* Full keyboards may advertise KEY_POWER alongside their ordinary keys. */
 static int has_alpha_keys(const unsigned long *key)
 {
     static const int letters[] = {
@@ -370,13 +369,43 @@ static int has_only_physical_android_keys(const unsigned long *key)
     return any;
 }
 
-static void read_abs_range(int fd, int axis, int *min, int *max)
+static int query_input(int fd, unsigned long request, void *data)
+{
+    int result;
+    do {
+        result = ioctl(fd, request, data);
+    } while (result < 0 && errno == EINTR);
+    return result;
+}
+
+static int read_capabilities(int fd, const char *path, int type, void *bits, size_t size)
+{
+    if (query_input(fd, EVIOCGBIT(type, size), bits) >= 0)
+        return 0;
+    LOGE("%s: EVIOCGBIT(%d) failed: %s", path, type, strerror(errno));
+    return -1;
+}
+
+static void read_abs_range(int fd, const char *path, int axis, int *min, int *max)
 {
     struct input_absinfo info;
-    if (ioctl(fd, EVIOCGABS(axis), &info) == 0 && info.maximum > info.minimum) {
-        *min = info.minimum;
-        *max = info.maximum;
+    if (query_input(fd, EVIOCGABS(axis), &info) < 0) {
+        LOGE("%s: EVIOCGABS(%#x) failed: %s", path, axis, strerror(errno));
+        return;
     }
+    if (info.maximum <= info.minimum) {
+        LOGE("%s: invalid axis %#x range %d..%d", path, axis,
+             info.minimum, info.maximum);
+        return;
+    }
+    *min = info.minimum;
+    *max = info.maximum;
+}
+
+static int is_builtin_bus(unsigned int bus)
+{
+    return bus == 0 || bus == BUS_HOST || bus == BUS_I8042
+            || bus == BUS_I2C || bus == BUS_SPI;
 }
 
 /*
@@ -389,35 +418,44 @@ static void read_abs_range(int fd, int axis, int *min, int *max)
 static int inspect_device(const char *path, struct dev_entry *out, int do_grab)
 {
     int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
-    if (fd < 0)
+    if (fd < 0) {
+        LOGE("open(%s) failed: %s", path, strerror(errno));
         return -1;
+    }
 
-    unsigned long ev[NBITS(EV_MAX)];
-    unsigned long key[NBITS(KEY_MAX)];
-    unsigned long abs[NBITS(ABS_MAX)];
-    unsigned long rel[NBITS(REL_MAX)];
-    unsigned long prop[NBITS(INPUT_PROP_MAX)];
+    unsigned long ev[NBITS(EV_MAX + 1)];
+    unsigned long key[NBITS(KEY_MAX + 1)];
+    unsigned long abs[NBITS(ABS_MAX + 1)];
+    unsigned long rel[NBITS(REL_MAX + 1)];
+    unsigned long prop[NBITS(INPUT_PROP_MAX + 1)];
     memset(ev, 0, sizeof(ev));
     memset(key, 0, sizeof(key));
     memset(abs, 0, sizeof(abs));
     memset(rel, 0, sizeof(rel));
     memset(prop, 0, sizeof(prop));
 
-    if (ioctl(fd, EVIOCGBIT(0, sizeof(ev)), ev) < 0) {
+    if (read_capabilities(fd, path, 0, ev, sizeof(ev)) < 0
+            || (TEST_BIT(EV_KEY, ev)
+                && read_capabilities(fd, path, EV_KEY, key, sizeof(key)) < 0)
+            || (TEST_BIT(EV_ABS, ev)
+                && read_capabilities(fd, path, EV_ABS, abs, sizeof(abs)) < 0)
+            || (TEST_BIT(EV_REL, ev)
+                && read_capabilities(fd, path, EV_REL, rel, sizeof(rel)) < 0)) {
         close(fd);
         return -1;
     }
-    if (TEST_BIT(EV_KEY, ev))
-        ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(key)), key);
-    if (TEST_BIT(EV_ABS, ev))
-        ioctl(fd, EVIOCGBIT(EV_ABS, sizeof(abs)), abs);
-    if (TEST_BIT(EV_REL, ev))
-        ioctl(fd, EVIOCGBIT(EV_REL, sizeof(rel)), rel);
-    ioctl(fd, EVIOCGPROP(sizeof(prop)), prop);
+    /* Older drivers may not expose properties; contact capabilities still let
+     * us classify them. Required capability queries above must not silently
+     * turn a failed touch-axis query into an apparently valid button node. */
+    if (query_input(fd, EVIOCGPROP(sizeof(prop)), prop) < 0) {
+        LOGI("%s: input properties unavailable (%s); using contact capabilities",
+             path, strerror(errno));
+        memset(prop, 0, sizeof(prop));
+    }
 
     memset(out, 0, sizeof(*out));
     out->fd = fd;
-    if (ioctl(fd, EVIOCGNAME(sizeof(out->name)), out->name) < 0)
+    if (query_input(fd, EVIOCGNAME(sizeof(out->name)), out->name) < 0)
         out->name[0] = '\0';
     out->name[sizeof(out->name) - 1] = '\0';
 
@@ -439,41 +477,35 @@ static int inspect_device(const char *path, struct dev_entry *out, int do_grab)
     int pointer = TEST_BIT(INPUT_PROP_POINTER, prop);
     int touch   = TEST_BIT(BTN_TOUCH, key);
     int click   = TEST_BIT(BTN_LEFT, key);
-    int pen     = TEST_BIT(BTN_TOOL_PEN, key) || TEST_BIT(BTN_STYLUS, key);
+    int pen     = TEST_BIT(BTN_TOOL_PEN, key) || TEST_BIT(BTN_STYLUS, key)
+            || TEST_BIT(BTN_TOOL_RUBBER, key);
+    int finger  = TEST_BIT(BTN_TOOL_FINGER, key);
     int alpha   = has_alpha_keys(key);
     int power   = has_power_key(key);
     out->alpha = alpha;
+    out->power = power;
 
     /* How the device is attached. The same keyboard can be offered over more
      * than one transport, and which one it is tells the user which node is the
      * one they are actually typing on. */
     struct input_id id;
-    if (ioctl(fd, EVIOCGID, &id) == 0)
+    int have_id = query_input(fd, EVIOCGID, &id) == 0;
+    if (have_id)
         out->bus = id.bustype;
     int keys    = any_key_bit(key);
+    out->power_button = power && !alpha && have_id && is_builtin_bus(out->bus)
+            && !TEST_BIT(EV_ABS, ev) && !TEST_BIT(EV_REL, ev);
 
-    /* A stylus digitizer overlaps the panel; forwarding it as a second finger
-     * only confuses the gesture engine, and its barrel keys are useless here. */
-    if (pen) {
+    /* Skip a pen-only digitizer, but keep nodes that also carry finger contacts.
+     * Shared pen/touch nodes are decoded by tool type on the app side. */
+    if (pen && !mt && !finger) {
         close(fd);
         return -1;
     }
 
-    /* A single EVIOCGRAB applies to the whole node. Do not take a touchscreen,
-     * touchpad, mouse or consumer-control node that carries Power: forwarding
-     * its KEY_POWER to the desktop cannot make Android lock the device, so the
-     * ACTION_SCREEN_OFF safety receiver would never run. Full keyboards retain
-     * the existing exception above because their ordinary keys must not leak. */
-    if (power && !alpha) {
-        out->cls = IGRAB_CLASS_KEYBOARD;
-        out->grabbed = 0;
-        out->watch_only = 1;
-        return 0;
-    }
-
     /* Contacts, not axes: a gamepad also reports ABS_X/ABS_Y, and its sticks
      * must not be mistaken for a finger. */
-    int contacts = mt || (abs_xy && (direct || pointer || touch));
+    int contacts = mt || (abs_xy && (direct || pointer || touch || finger));
 
     if (contacts) {
         /* The property bits say it outright when they are set. Panels that set
@@ -488,17 +520,6 @@ static int inspect_device(const char *path, struct dev_entry *out, int do_grab)
     } else if (rel_xy) {
         out->cls = IGRAB_CLASS_MOUSE;
     } else if (keys) {
-        /* Physical Android buttons must remain available to Android while
-         * immersive mode is active. Keep these fds open watch-only so the bound
-         * toggle key can still release the session, but do not EVIOCGRAB them.
-         * Non-keyboard Power nodes returned above; this path protects the rest
-         * of the dedicated Android button devices. */
-        if (has_only_physical_android_keys(key)) {
-            out->cls = IGRAB_CLASS_KEYBOARD;
-            out->grabbed = 0;
-            out->watch_only = 1;
-            return 0;
-        }
         out->cls = IGRAB_CLASS_KEYBOARD;
     } else {
         close(fd);
@@ -514,24 +535,33 @@ static int inspect_device(const char *path, struct dev_entry *out, int do_grab)
             || (click && !TEST_BIT(BTN_RIGHT, key));
     if (out->cls == IGRAB_CLASS_TOUCHSCREEN || out->cls == IGRAB_CLASS_TOUCHPAD) {
         if (mt) {
-            read_abs_range(fd, ABS_MT_POSITION_X, &out->min_x, &out->max_x);
-            read_abs_range(fd, ABS_MT_POSITION_Y, &out->min_y, &out->max_y);
+            read_abs_range(fd, path, ABS_MT_POSITION_X, &out->min_x, &out->max_x);
+            read_abs_range(fd, path, ABS_MT_POSITION_Y, &out->min_y, &out->max_y);
         }
         /* Single-touch panels only have ABS_X/ABS_Y; multitouch ones still use
          * them as a fallback when the MT axes report nothing usable. */
-        if (out->max_x <= out->min_x)
-            read_abs_range(fd, ABS_X, &out->min_x, &out->max_x);
-        if (out->max_y <= out->min_y)
-            read_abs_range(fd, ABS_Y, &out->min_y, &out->max_y);
+        if (out->max_x <= out->min_x && TEST_BIT(ABS_X, abs))
+            read_abs_range(fd, path, ABS_X, &out->min_x, &out->max_x);
+        if (out->max_y <= out->min_y && TEST_BIT(ABS_Y, abs))
+            read_abs_range(fd, path, ABS_Y, &out->min_y, &out->max_y);
         if (out->max_x <= out->min_x || out->max_y <= out->min_y) {
+            LOGE("%s '%s': no usable touch coordinate range", path, out->name);
             close(fd);
             return -1;
         }
     }
 
-    if (!do_grab) {
-        /* Enumeration only (--list). The caller still owns the fd and must close
-         * it; nothing here takes the node away from anyone. */
+    /* Some panels advertise KEY_POWER for screen-off gestures. That does not
+     * make them keyboards. They can be taken while a separate built-in power
+     * button stays with Android; otherwise retain their class and report the
+     * restriction so Settings can explain it instead of hiding the panel. */
+    out->watch_only = (power && !alpha
+            && !(out->cls == IGRAB_CLASS_TOUCHSCREEN && g_has_power_button))
+            || (out->cls == IGRAB_CLASS_KEYBOARD && has_only_physical_android_keys(key));
+
+    if (!do_grab || out->watch_only) {
+        /* Enumeration or a protected node. The caller owns this fd, but Android
+         * keeps receiving its events. */
         out->grabbed = 0;
         return 0;
     }
@@ -539,7 +569,7 @@ static int inspect_device(const char *path, struct dev_entry *out, int do_grab)
     if (ioctl(fd, EVIOCGRAB, 1) < 0) {
         /* Someone else already owns it exclusively. Watching it would double up
          * with Android's own delivery, so let it go entirely. */
-        LOGE("grab '%s' failed: %s", out->name, strerror(errno));
+        LOGE("grab %s '%s' failed: %s", path, out->name, strerror(errno));
         close(fd);
         return -1;
     }
@@ -627,10 +657,43 @@ static int node_list_contains(const struct node_list *list, const char *name)
     return 0;
 }
 
+/* Look for a separate built-in power button before deciding whether a panel's
+ * gesture KEY_POWER is a reason to leave it alone. Selection limits grabs, but
+ * an unselected power button still protects Android. Explicit exclusions are
+ * respected even during this read-only probe (Gold may own those devices).
+ * USB, Bluetooth and virtual power keys cannot stand in for the physical button.
+ */
+static void refresh_power_button(void)
+{
+    g_has_power_button = 0;
+    DIR *dir = opendir("/dev/input");
+    if (!dir)
+        return;
+
+    struct dirent *ent;
+    while ((ent = readdir(dir)) != NULL) {
+        if (strncmp(ent->d_name, "event", 5) != 0
+                || node_list_contains(&g_excluded, ent->d_name))
+            continue;
+        char path[300];
+        snprintf(path, sizeof(path), "/dev/input/%s", ent->d_name);
+        struct dev_entry entry;
+        if (inspect_device(path, &entry, 0) < 0)
+            continue;
+        int power_button = entry.power_button;
+        close(entry.fd);
+        if (power_button) {
+            g_has_power_button = 1;
+            break;
+        }
+    }
+    closedir(dir);
+}
+
 /*
- * Whether a node may be touched at all. Decided from the name, before the node
- * is opened: an excluded node is never opened, never inspected, never grabbed,
- * never announced, and never takes a device slot.
+ * Whether a node belongs in the session. Excluded nodes are never opened or
+ * inspected, including by the power-button probe. Unselected nodes may be
+ * probed but are never grabbed, announced or assigned a device slot.
  *
  * An empty selection means "auto" -- take whatever is capable, as before.
  */
@@ -688,6 +751,7 @@ static void drop_inspected(struct dev_entry *entry)
  */
 static int list_devices(void)
 {
+    refresh_power_button();
     DIR *dir = opendir("/dev/input");
     if (!dir) {
         LOGE("opendir(/dev/input): %s", strerror(errno));
@@ -733,6 +797,7 @@ static int list_devices(void)
 
 static int scan_devices(void)
 {
+    refresh_power_button();
     DIR *dir = opendir("/dev/input");
     if (!dir) {
         LOGE("opendir(/dev/input): %s", strerror(errno));
@@ -866,11 +931,22 @@ static int has_unannounced_devices(void)
  * start, a DEVICE record announces them to the app, and the toggle key is
  * watched on them like on everything else.
  */
-static void scan_new_devices(void)
+static int scan_new_devices(void)
 {
+    refresh_power_button();
+    if (!g_has_power_button) {
+        for (int i = 0; i < g_ndevs; i++) {
+            const struct dev_entry *entry = &g_devs[i];
+            if (entry->fd >= 0 && entry->grabbed && entry->power && !entry->alpha
+                    && entry->cls == IGRAB_CLASS_TOUCHSCREEN) {
+                LOGE("power-button path disappeared; releasing '%s'", entry->name);
+                return -1;
+            }
+        }
+    }
     DIR *dir = opendir("/dev/input");
     if (!dir)
-        return;
+        return 0;
 
     struct dirent *ent;
     while ((ent = readdir(dir)) != NULL) {
@@ -906,6 +982,7 @@ static void scan_new_devices(void)
              de.grabbed ? "GRABBED (awaiting DEVICE)" : "watch-only (awaiting DEVICE)");
     }
     closedir(dir);
+    return 0;
 }
 
 static int send_device_list(int sock, int grabbed)
@@ -1162,7 +1239,10 @@ int main(int argc, char **argv)
          * locally until announce_pending_devices() has put its DEVICE record on
          * the stream, so Android and the desktop can never both own it. */
         if (now_ms() - last_scan > RESCAN_INTERVAL_MS) {
-            scan_new_devices();
+            if (scan_new_devices() < 0) {
+                reason = IGRAB_BYE_ERROR;
+                break;
+            }
             last_scan = now_ms();
         }
 

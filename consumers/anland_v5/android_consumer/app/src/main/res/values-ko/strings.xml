@@ -13,7 +13,7 @@
     <!-- Settings home: category rows and back navigation -->
     <string name="nav_back">‹ 뒤로</string>
     <string name="cat_keyboard_title">키보드 및 키</string>
-    <string name="cat_keyboard_subtitle">키 바인딩, 몰입 모드, 접근성 및 추가 키 바</string>
+    <string name="cat_keyboard_subtitle">키 바인딩, 접근성 및 추가 키 바</string>
     <string name="cat_touchpad_title">터치패드 및 마우스</string>
     <string name="cat_touchpad_subtitle">터치패드 모드, 포인터 캡처 및 감도</string>
     <string name="cat_connection_subtitle">소켓, 루트, 마이크, 카메라 및 오디오 지연시간</string>
@@ -49,6 +49,7 @@
     <string name="immersive_failed">몰입 모드를 시작할 수 없습니다: 루트 권한이 거부되었거나 사용할 수 없습니다</string>
     <string name="immersive_no_devices">몰입 모드를 시작할 수 없습니다: 입력 장치를 가져올 수 없습니다</string>
     <string name="immersive_interrupted">몰입 모드가 종료되어 입력이 안드로이드로 반환되었습니다</string>
+    <string name="immersive_inputs_system_power">✕ %1$s — 전원 버튼 제어를 유지하기 위해 Android에서 처리합니다</string>
     <string name="immersive_entering_mode">몰입 모드 켜짐: %1$s</string>
     <string name="immersive_bus_entering">몰입 모드 켜짐 (Gold 키보드): 키 입력은 데스크톱으로, 터치와 마우스는 안드로이드에 남습니다. %1$s 키를 다시 누르면 종료됩니다.</string>
     <string name="immersive_gold_unknown">Gold가 점유한 장치를 확인할 수 없어, 비켜주지 않고 시작합니다</string>

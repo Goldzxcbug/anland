@@ -79,6 +79,16 @@ public class MainActivity extends Activity
     static final String EXTRA_WINDOW_NAME = "window_name";
     // This window's own native transport instance (its own consumer_state handle).
     private Native mNative;
+    private final TouchLedger forwardedTouches = new TouchLedger(new TouchLedger.Sender() {
+        @Override public void touch(int action, int id, float x, float y) {
+            if (mNative != null)
+                mNative.sendTouch(action, x, y, id);
+        }
+        @Override public void frame() {
+            if (mNative != null)
+                mNative.sendTouchFrame();
+        }
+    });
     // Media audio focus for this window (volume keys + playback priority).
     private AudioManager mAudioManager;
     private AudioFocusRequest mAudioFocusRequest;
@@ -216,6 +226,7 @@ public class MainActivity extends Activity
     // enables it in Settings and presses the key they bound to it.
     private ImmersiveInputController immersive;
     private boolean immersiveActive = false;
+    private boolean touchscreenGrabbed;
     // Cached display rotation. A grabbed touchscreen reports in the panel's own
     // fixed frame, so the rotation has to be undone before its coordinates mean
     // anything on screen; reading it per contact would be wasteful.
@@ -296,6 +307,7 @@ public class MainActivity extends Activity
         if (!hasFocus && immersive != null) {
             immersive.stop();
             releaseAllForwardedKeys();
+            releaseScreenTouches();
         }
     }
 
@@ -1614,6 +1626,7 @@ public class MainActivity extends Activity
         // released has to be lifted, or the desktop holds it until the user
         // presses that key again.
         releaseAllForwardedKeys();
+        releaseScreenTouches();
         clearPointerCaptureBackTracking();
         releasePointerCapture(false);
         NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
@@ -1633,6 +1646,7 @@ public class MainActivity extends Activity
         // released has to be lifted, or the desktop holds it until the user
         // presses that key again.
         releaseAllForwardedKeys();
+        releaseScreenTouches();
         releasePointerCapture(false);
         if (mRegisteredSocket != null) {
             sWindowsBySocket.remove(mRegisteredSocket, this);
@@ -1748,6 +1762,7 @@ public class MainActivity extends Activity
         surfaceReady = true;
         // Same ordering guarantee as onResume: camera service settled before connect.
         applyCameraState();
+        releaseScreenTouches();
         mNative.stop();
         applyConnectionConfig();
         startNative(holder.getSurface());
@@ -1770,6 +1785,7 @@ public class MainActivity extends Activity
         // released has to be lifted, or the desktop holds it until the user
         // presses that key again.
         releaseAllForwardedKeys();
+        releaseScreenTouches();
         releasePointerCapture(false);
         mNative.stop();
     }
@@ -2084,6 +2100,22 @@ public class MainActivity extends Activity
         }
     }
 
+    @Override
+    public void onTouchscreenGrabChanged(boolean grabbed) {
+        if (touchscreenGrabbed == grabbed)
+            return;
+        // The Android contact ids and the helper's slots belong to different
+        // streams. End the old stream before accepting any of the new one.
+        releaseScreenTouches();
+        touchscreenGrabbed = grabbed;
+    }
+
+    private void releaseScreenTouches() {
+        forwardedTouches.releaseAll();
+        if (screenTouchpad != null)
+            screenTouchpad.cancel();
+    }
+
     /**
      * A {@link Touchpad} for a grabbed physical pad. Its recognized motion is the
      * cursor here (emitMotion), unlike Android's captured pad, whose movement
@@ -2187,6 +2219,8 @@ public class MainActivity extends Activity
     // ================================================================
     @Override
     public boolean onTouchEvent(MotionEvent event) {
+        if (touchscreenGrabbed && event.isFromSource(InputDevice.SOURCE_TOUCHSCREEN))
+            return true; // Android may still dispatch the tail queued before EVIOCGRAB.
         boolean mouseEvent = isMouseEvent(event);
         if (mouseEvent && event.getActionMasked() == MotionEvent.ACTION_DOWN
                 && pointerCaptureWanted() && mRoot != null
@@ -2566,7 +2600,6 @@ public class MainActivity extends Activity
         return true;
     }
 
-    // 原有 handleTouchEvent 一字未改
     private boolean handleTouchEvent(MotionEvent event) {
         int action = event.getActionMasked();
         int pointerIdx = event.getActionIndex();
@@ -2574,33 +2607,33 @@ public class MainActivity extends Activity
     
         switch (action) {
             case MotionEvent.ACTION_DOWN:
+                forwardedTouches.releaseAll();
+                // fall through
             case MotionEvent.ACTION_POINTER_DOWN:
                 float[] downCoords = convertToNativeCoords(event.getX(pointerIdx), event.getY(pointerIdx));
-                mNative.sendTouch(0, downCoords[0], downCoords[1], pointerId);
-                mNative.sendTouchFrame();
+                forwardedTouches.send(0, pointerId, downCoords[0], downCoords[1]);
+                forwardedTouches.frame();
                 return true;
             
             case MotionEvent.ACTION_UP:
             case MotionEvent.ACTION_POINTER_UP:
                 float[] upCoords = convertToNativeCoords(event.getX(pointerIdx), event.getY(pointerIdx));
-                mNative.sendTouch(1, upCoords[0], upCoords[1], pointerId);
-                mNative.sendTouchFrame();
+                forwardedTouches.send(1, pointerId, upCoords[0], upCoords[1]);
+                if (action == MotionEvent.ACTION_UP)
+                    forwardedTouches.releaseAll();
+                forwardedTouches.frame();
                 return true;
             
             case MotionEvent.ACTION_MOVE:
                 for (int i = 0; i < event.getPointerCount(); i++) {
                     float[] moveCoords = convertToNativeCoords(event.getX(i), event.getY(i));
-                    mNative.sendTouch(2, moveCoords[0], moveCoords[1], event.getPointerId(i));
+                    forwardedTouches.send(2, event.getPointerId(i), moveCoords[0], moveCoords[1]);
                 }
-                mNative.sendTouchFrame();
+                forwardedTouches.frame();
                 return true;
             
             case MotionEvent.ACTION_CANCEL:
-                for (int i = 0; i < event.getPointerCount(); i++) {
-                    float[] cancelCoords = convertToNativeCoords(event.getX(i), event.getY(i));
-                    mNative.sendTouch(1, cancelCoords[0], cancelCoords[1], event.getPointerId(i));
-                }
-                mNative.sendTouchFrame();
+                forwardedTouches.releaseAll();
                 return true;
         }
         return false;

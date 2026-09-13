@@ -15,7 +15,7 @@
     <!-- Settings home: category rows and back navigation -->
     <string name="nav_back">‹ Back</string>
     <string name="cat_keyboard_title">Keyboard &amp; Keys</string>
-    <string name="cat_keyboard_subtitle">Key binding, immersive mode, accessibility &amp; extra keys bar</string>
+    <string name="cat_keyboard_subtitle">Key binding, accessibility &amp; extra keys bar</string>
     <string name="cat_touchpad_title">Touchpad &amp; Mouse</string>
     <string name="cat_touchpad_subtitle">Touchpad mode, pointer capture &amp; sensitivity</string>
     <string name="cat_connection_subtitle">Socket, root, mic, camera &amp; audio latency</string>
@@ -87,6 +87,7 @@
     <string name="immersive_inputs_found">Gold’s occupied devices are shown but cannot be selected.</string>
     <string name="immersive_inputs_unknown">Could not check which devices Gold holds, so none are marked as taken. Nothing here is known to be free.</string>
     <string name="immersive_inputs_occupied">✕ %1$s — held by Gold</string>
+    <string name="immersive_inputs_system_power">✕ %1$s — kept with Android to preserve power button control</string>
     <string name="device_class_keyboard">Keyboard</string>
     <string name="device_class_keys">Button node</string>
     <string name="device_class_mouse">Mouse</string>

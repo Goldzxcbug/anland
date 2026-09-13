@@ -93,6 +93,28 @@ public class InputGrabDiscoveryTest {
         assertFalse(InputGrab.isSelectable(buttonNode("event1", "pmic_pwrkey")));
         assertFalse(InputGrab.isSelectable(buttonNode("event2", "pmic_resin")));
         assertFalse(InputGrab.isSelectable(buttonNode("event3", "pogo_wakeup")));
+        assertFalse(InputGrab.isVisible(buttonNode("event0", "gpio-keys")));
+    }
+
+    @Test
+    public void protectedTouchscreenIsVisibleWithItsRealClass() {
+        List<InputGrab.DiscoveredDevice> devices = InputGrab.parseDeviceList(
+                line("event4", "touchpanel", InputGrab.CLASS_TOUCHSCREEN,
+                        InputGrab.BUS_I2C, "w"));
+        assertEquals(1, devices.size());
+        InputGrab.DiscoveredDevice panel = devices.get(0);
+        assertEquals(InputGrab.CLASS_TOUCHSCREEN, panel.cls);
+        assertTrue(InputGrab.isVisible(panel));
+        assertFalse(InputGrab.isSelectable(panel));
+    }
+
+    @Test
+    public void gesturePanelWithIndependentPowerButtonIsSelectable() {
+        InputGrab.DiscoveredDevice panel = InputGrab.parseDeviceList(
+                line("event4", "touchpanel", InputGrab.CLASS_TOUCHSCREEN,
+                        InputGrab.BUS_I2C, "-")).get(0);
+        assertTrue(InputGrab.isVisible(panel));
+        assertTrue(InputGrab.isSelectable(panel));
     }
 
     @Test
