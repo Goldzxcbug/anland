@@ -82,8 +82,12 @@
 struct dev_entry {
     int  fd;
     int  cls;        /* IGRAB_CLASS_* */
-    int  grabbed;    /* 0 => watched only (toggle detection), events not forwarded */
+    int  grabbed;    /* 0 =>
+                        watched only (toggle detection), events not forwarded */
     int  announced;  /* the app has received this entry's DEVICE record */
+    int  alpha;      /* a full keyboard, not just a node that happens to have keys */
+    int  watch_only; /* classified as tracked-but-never-grabbed */
+    unsigned int bus; /* bustype: how the device is attached, e.g. USB / Bluetooth */
     int  multitouch;
     int  clickpad;   /* one button under the pad: BTN_LEFT alone means "a click" */
     int  min_x, max_x, min_y, max_y;
@@ -382,7 +386,7 @@ static void read_abs_range(int fd, int axis, int *min, int *max)
  * Classification is by capability bits, never by event number: the numbering
  * shifts as soon as a keyboard or dock is attached.
  */
-static int inspect_device(const char *path, struct dev_entry *out)
+static int inspect_device(const char *path, struct dev_entry *out, int do_grab)
 {
     int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
     if (fd < 0)
@@ -417,6 +421,17 @@ static int inspect_device(const char *path, struct dev_entry *out)
         out->name[0] = '\0';
     out->name[sizeof(out->name) - 1] = '\0';
 
+    /* Gold's own virtual keyboard is Gold's output, never a device to take.
+     * Grabbing it would steal the very events this feature exists to observe,
+     * and taking it while Gold also holds the physical keyboard would remap
+     * everything twice. Skipped before classification, so it is not offered in
+     * --list either: a row the user must never tick is a trap, not a choice. */
+    static const char gold_prefix[] = "Gold Keyboardremaps";
+    if (strncmp(out->name, gold_prefix, sizeof(gold_prefix) - 1) == 0) {
+        close(fd);
+        return -1;
+    }
+
     int mt      = TEST_BIT(ABS_MT_POSITION_X, abs) && TEST_BIT(ABS_MT_POSITION_Y, abs);
     int abs_xy  = TEST_BIT(ABS_X, abs) && TEST_BIT(ABS_Y, abs);
     int rel_xy  = TEST_BIT(REL_X, rel) && TEST_BIT(REL_Y, rel);
@@ -427,6 +442,14 @@ static int inspect_device(const char *path, struct dev_entry *out)
     int pen     = TEST_BIT(BTN_TOOL_PEN, key) || TEST_BIT(BTN_STYLUS, key);
     int alpha   = has_alpha_keys(key);
     int power   = has_power_key(key);
+    out->alpha = alpha;
+
+    /* How the device is attached. The same keyboard can be offered over more
+     * than one transport, and which one it is tells the user which node is the
+     * one they are actually typing on. */
+    struct input_id id;
+    if (ioctl(fd, EVIOCGID, &id) == 0)
+        out->bus = id.bustype;
     int keys    = any_key_bit(key);
 
     /* A stylus digitizer overlaps the panel; forwarding it as a second finger
@@ -444,6 +467,7 @@ static int inspect_device(const char *path, struct dev_entry *out)
     if (power && !alpha) {
         out->cls = IGRAB_CLASS_KEYBOARD;
         out->grabbed = 0;
+        out->watch_only = 1;
         return 0;
     }
 
@@ -472,6 +496,7 @@ static int inspect_device(const char *path, struct dev_entry *out)
         if (has_only_physical_android_keys(key)) {
             out->cls = IGRAB_CLASS_KEYBOARD;
             out->grabbed = 0;
+            out->watch_only = 1;
             return 0;
         }
         out->cls = IGRAB_CLASS_KEYBOARD;
@@ -504,6 +529,13 @@ static int inspect_device(const char *path, struct dev_entry *out)
         }
     }
 
+    if (!do_grab) {
+        /* Enumeration only (--list). The caller still owns the fd and must close
+         * it; nothing here takes the node away from anyone. */
+        out->grabbed = 0;
+        return 0;
+    }
+
     if (ioctl(fd, EVIOCGRAB, 1) < 0) {
         /* Someone else already owns it exclusively. Watching it would double up
          * with Android's own delivery, so let it go entirely. */
@@ -512,6 +544,190 @@ static int inspect_device(const char *path, struct dev_entry *out)
         return -1;
     }
     out->grabbed = 1;
+    return 0;
+}
+
+/* ---------------- node names the caller asked to keep or leave alone -------- */
+
+#define IGRAB_NODE_NAME_MAX 16
+#define IGRAB_MAX_NODE_ARG 32
+
+struct node_list {
+    char names[IGRAB_MAX_NODE_ARG][IGRAB_NODE_NAME_MAX];
+    int count;
+};
+
+static struct node_list g_selected;   /* nodes= ...; empty means "auto" */
+static struct node_list g_excluded;   /* exclude= ... */
+
+/*
+ * "event" followed by digits. The strict form is the grammar Gold itself emits
+ * and admits no leading zeros beyond the bare "event0"; the loose form is what a
+ * preference saved by an older build may contain, so "event01" is still legal
+ * there.
+ */
+static int valid_node_name(const char *name, int strict)
+{
+    if (strncmp(name, "event", 5) != 0)
+        return 0;
+    const char *digits = name + 5;
+    if (*digits == '\0')
+        return 0;
+    if (strict && digits[0] == '0')
+        return digits[1] == '\0';
+    for (const char *p = digits; *p != '\0'; p++) {
+        if (*p < '0' || *p > '9')
+            return 0;
+    }
+    return 1;
+}
+
+/*
+ * Parses a comma separated node list. Returns 0 on success, -1 when the argument
+ * is not one we are willing to act on: an empty list means "not given", and a
+ * repeated name is refused rather than silently collapsed.
+ */
+static int parse_node_argument(const char *value, struct node_list *out, int strict)
+{
+    out->count = 0;
+    if (value == NULL || *value == '\0')
+        return 0;
+
+    const char *cursor = value;
+    for (;;) {
+        const char *comma = strchr(cursor, ',');
+        size_t length = comma ? (size_t)(comma - cursor) : strlen(cursor);
+        if (length == 0 || length >= IGRAB_NODE_NAME_MAX)
+            return -1;
+        char name[IGRAB_NODE_NAME_MAX];
+        memcpy(name, cursor, length);
+        name[length] = '\0';
+
+        if (!valid_node_name(name, strict) || out->count >= IGRAB_MAX_NODE_ARG)
+            return -1;
+        for (int i = 0; i < out->count; i++) {
+            if (strcmp(out->names[i], name) == 0)
+                return -1;
+        }
+        memcpy(out->names[out->count], name, length + 1);
+        out->count++;
+
+        if (comma == NULL)
+            return 0;
+        cursor = comma + 1;
+    }
+}
+
+static int node_list_contains(const struct node_list *list, const char *name)
+{
+    for (int i = 0; i < list->count; i++) {
+        if (strcmp(list->names[i], name) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+/*
+ * Whether a node may be touched at all. Decided from the name, before the node
+ * is opened: an excluded node is never opened, never inspected, never grabbed,
+ * never announced, and never takes a device slot.
+ *
+ * An empty selection means "auto" -- take whatever is capable, as before.
+ */
+static int node_is_allowed(const char *name)
+{
+    if (node_list_contains(&g_excluded, name))
+        return 0;
+    if (g_selected.count > 0 && !node_list_contains(&g_selected, name))
+        return 0;
+    return 1;
+}
+
+/*
+ * Whether a node is one of the input devices a session actually wants: a
+ * keyboard, a pointer, a touch surface.
+ *
+ * A node that merely carries a few buttons -- a powerkey, a headset jack, or the
+ * media strip a modern keyboard exposes as its own HID collection -- is not one.
+ * Grabbing it would take the device's own volume and brightness keys away from
+ * Android for the whole session and give nothing back: those keys are not
+ * something a desktop wants forwarded while the user is trying to change the
+ * volume of the tablet in their hands.
+ *
+ * Consulted only when the caller named no nodes of its own; an explicit
+ * selection is the caller's business, not this function's.
+ */
+static int node_is_common_input(const struct dev_entry *entry)
+{
+    if (entry->watch_only)
+        return 0;
+    /* Classified as a keyboard but carrying no letters: a button cluster. */
+    if (entry->cls == IGRAB_CLASS_KEYBOARD && !entry->alpha)
+        return 0;
+    return 1;
+}
+
+/* Give back a node inspect_device opened (and maybe grabbed) that we decided
+ * not to keep. Releasing the grab before closing shortens the window in which
+ * Android cannot see the device. */
+static void drop_inspected(struct dev_entry *entry)
+{
+    if (entry->fd < 0)
+        return;
+    if (entry->grabbed)
+        ioctl(entry->fd, EVIOCGRAB, 0);
+    close(entry->fd);
+    entry->fd = -1;
+    entry->grabbed = 0;
+}
+
+/*
+ * Enumerates every input node and prints one line each. Nothing is grabbed and
+ * the caller's selection is ignored: Settings has to be able to show a node even
+ * when a session has been told to leave it alone.
+ */
+static int list_devices(void)
+{
+    DIR *dir = opendir("/dev/input");
+    if (!dir) {
+        LOGE("opendir(/dev/input): %s", strerror(errno));
+        return 1;
+    }
+
+    struct dirent *ent;
+    while ((ent = readdir(dir)) != NULL) {
+        if (strncmp(ent->d_name, "event", 5) != 0)
+            continue;
+        char path[300];
+        snprintf(path, sizeof(path), "/dev/input/%s", ent->d_name);
+
+        struct dev_entry entry;
+        if (inspect_device(path, &entry, 0) < 0)
+            continue;
+        /* node, human name, class, bustype, flags. The app splits on tabs, and
+         * the helper ships inside the same APK as the app that reads it, so the
+         * two are always the same version and there is no older shape to keep
+         * working with.
+         *
+         * The flags are what stop the list from lying: without them every node
+         * that merely carries a few keys reports the same class as a real
+         * keyboard, and "gpio-keys" would be offered as a keyboard alongside the
+         * one the user actually types on.
+         *   a = has a full set of letter keys (a keyboard, not a button node)
+         *   w = classified watch-only, so a session never grabs it */
+        char flags[3];
+        int next = 0;
+        if (entry.alpha)
+            flags[next++] = 'a';
+        if (entry.watch_only)
+            flags[next++] = 'w';
+        flags[next] = '\0';
+        printf("%s\t%s\t%d\t%04x\t%s\n", ent->d_name, entry.name, entry.cls,
+               entry.bus, next == 0 ? "-" : flags);
+        fflush(stdout);
+        close(entry.fd);
+    }
+    closedir(dir);
     return 0;
 }
 
@@ -528,10 +744,20 @@ static int scan_devices(void)
     while ((ent = readdir(dir)) != NULL && g_ndevs < IGRAB_MAX_DEVICES) {
         if (strncmp(ent->d_name, "event", 5) != 0)
             continue;
+        /* Decided from the name, before the node is opened, so a node we were
+         * told to leave alone costs nothing and takes no slot. */
+        if (!node_is_allowed(ent->d_name))
+            continue;
         char path[300];
         snprintf(path, sizeof(path), "/dev/input/%s", ent->d_name);
-        if (inspect_device(path, &g_devs[g_ndevs]) < 0)
+        if (inspect_device(path, &g_devs[g_ndevs], 1) < 0)
             continue;
+        if (g_selected.count == 0 && !node_is_common_input(&g_devs[g_ndevs])) {
+            /* Auto-selection does not want it. Closing releases any grab
+             * inspect_device took, and nothing was announced or slotted. */
+            drop_inspected(&g_devs[g_ndevs]);
+            continue;
+        }
         LOGI("%s '%s' class=%d %s", path, g_devs[g_ndevs].name,
              g_devs[g_ndevs].cls, g_devs[g_ndevs].grabbed ? "GRABBED" : "watch-only");
         if (g_devs[g_ndevs].grabbed)
@@ -650,6 +876,10 @@ static void scan_new_devices(void)
     while ((ent = readdir(dir)) != NULL) {
         if (strncmp(ent->d_name, "event", 5) != 0)
             continue;
+        /* Same rule as the initial scan: a node the caller left out is never
+         * opened, so a device plugged in later cannot slip past the selection. */
+        if (!node_is_allowed(ent->d_name))
+            continue;
         char path[300];
         snprintf(path, sizeof(path), "/dev/input/%s", ent->d_name);
         int rdev = node_identity(path);
@@ -661,8 +891,14 @@ static void scan_new_devices(void)
             break;
 
         struct dev_entry de;
-        if (inspect_device(path, &de) < 0)
+        if (inspect_device(path, &de, 1) < 0)
             continue;   /* uninteresting, ungrabbable, or already grabbed by us */
+        if (g_selected.count == 0 && !node_is_common_input(&de)) {
+            /* Same rule as the initial scan: a device plugged in later must not
+             * slip past it. Nothing was slotted or announced yet. */
+            drop_inspected(&de);
+            continue;
+        }
         g_devs[idx] = de;
         if (idx == g_ndevs)
             g_ndevs++;
@@ -777,8 +1013,14 @@ static int pump_device(int sock, int idx, int toggle)
 
 int main(int argc, char **argv)
 {
+    /* Enumeration mode: no socket, no toggle, and nothing grabbed. Used by
+     * Settings, which has to list every node without disturbing a session. */
+    if (argc >= 2 && strcmp(argv[1], "--list") == 0)
+        return list_devices();
+
     if (argc < 3) {
-        LOGE("usage: %s <bridge_socket> <toggle_scancode>", argv[0]);
+        LOGE("usage: %s <bridge_socket> <toggle_scancode> [nodes=...] [exclude=...]",
+             argv[0]);
         return 1;
     }
 
@@ -789,6 +1031,25 @@ int main(int argc, char **argv)
     if (toggle <= 0 || toggle > KEY_MAX) {
         LOGE("refusing to grab without a valid toggle scancode (%d)", toggle);
         return 2;
+    }
+
+    /* Everything past the toggle is a keyword argument. Unknown ones are
+     * ignored so a newer app can talk to an older helper built before they
+     * existed. A malformed list is refused outright: silently dropping a bad
+     * exclusion would hand a node to this session that the caller believes it
+     * kept away. */
+    for (int i = 3; i < argc; i++) {
+        if (strncmp(argv[i], "nodes=", 6) == 0) {
+            if (parse_node_argument(argv[i] + 6, &g_selected, 0) != 0) {
+                LOGE("refusing invalid nodes argument: %s", argv[i] + 6);
+                return 2;
+            }
+        } else if (strncmp(argv[i], "exclude=", 8) == 0) {
+            if (parse_node_argument(argv[i] + 8, &g_excluded, 1) != 0) {
+                LOGE("refusing invalid exclude argument: %s", argv[i] + 8);
+                return 2;
+            }
+        }
     }
 
     signal(SIGPIPE, SIG_IGN);

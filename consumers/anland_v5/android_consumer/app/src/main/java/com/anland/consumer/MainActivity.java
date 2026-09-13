@@ -101,7 +101,6 @@ public class MainActivity extends Activity
     private static final String KEY_BACK_OPENS_EXTRA_KEYS = "back_opens_extra_keys";
     private static final String KEY_EXTRA_KEYS_LAYOUT = "extra_keys_layout";
     // Linux input-event-codes.h: KEY_BACK (the browser-back key).
-    private static final int EVDEV_BROWSER_BACK = 158;
     // When on, the IME and extra-keys bar float over the display instead of
     // shrinking it: the bar rides up with the keyboard but the surface keeps
     // its full size. See relayout() and buildExtraKeysBar().
@@ -215,7 +214,7 @@ public class MainActivity extends Activity
     // reaches Android at all, and their events are replayed onto the desktop
     // through the same paths as the on-screen ones. Off unless the user both
     // enables it in Settings and presses the key they bound to it.
-    private ImmersiveMode immersive;
+    private ImmersiveInputController immersive;
     private boolean immersiveActive = false;
     // Cached display rotation. A grabbed touchscreen reports in the panel's own
     // fixed frame, so the rotation has to be undone before its coordinates mean
@@ -271,12 +270,9 @@ public class MainActivity extends Activity
     @Override
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
-        if (!isSocketFile(resolveSocketPath())) {
-            //exit
-            android.widget.Toast.makeText(this, "Deamon Down",
-                    android.widget.Toast.LENGTH_SHORT).show();
-            finish();
-        }
+        // Off the main thread: this callback fires for every dialog and app
+        // switch, and the rooted probe can block on su.
+        probeDaemonAsync();
         if (hasFocus) {
             // Become the accessibility-key target and the focused instance, so real
             // camera frames route to this window (others get blank frames).
@@ -297,8 +293,10 @@ public class MainActivity extends Activity
         // Losing focus means something else is on screen (a system dialog, a
         // call). Holding an exclusive grab on every input device through that
         // would leave the user with nothing to answer it with.
-        if (!hasFocus && immersive != null)
+        if (!hasFocus && immersive != null) {
             immersive.stop();
+            releaseAllForwardedKeys();
+        }
     }
 
     private void pushRefreshRate() {
@@ -382,23 +380,85 @@ public class MainActivity extends Activity
         }
     }
 
+    /** How long a rooted socket probe may take before it is abandoned. */
+    private static final long SU_PROBE_TIMEOUT_MS = 3000L;
+
     // Probe the socket from root context via the bundled helper's "test" mode.
-    // Exit 0 means the path exists and is a unix socket; anything else (including
-    // su being unavailable / denied, which throws) counts as "no socket".
-    private boolean isSocketFileRoot(String path) {
+    // Exit 0 means the path exists and is a unix socket; a clean non-zero exit
+    // means it is gone.
+    //
+    // A probe that cannot answer -- su slow, refused, or waiting on a permission
+    // prompt -- is *not* the same as a socket that is gone, which is why this
+    // answers in three states rather than two. Treating "could not tell" as
+    // "gone" closes a window that was working perfectly.
+    private Boolean probeSocketRoot(String path) {
         String helperPath = getApplicationInfo().nativeLibraryDir + "/libfdhelper.so";
         Process p = null;
         try {
-            p = new ProcessBuilder("su", "-c", helperPath + " " + path + " test")
+            // `path` is not ours: it comes from the saved preference, which is
+            // editable, or from the launch Intent, which any app can send to
+            // this exported activity. Quoted, or a path containing a shell
+            // metacharacter is a command run as root.
+            p = new ProcessBuilder("su", "-c",
+                    SuCommand.shellQuote(helperPath) + " " + SuCommand.shellQuote(path)
+                            + " test")
                     .redirectErrorStream(true)
                     .start();
-            return p.waitFor() == 0;
+            // Bounded on purpose. Unbounded, a wedged su pins whichever thread
+            // called this for as long as it likes.
+            if (!p.waitFor(SU_PROBE_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS))
+                return null;
+            return p.exitValue() == 0;
         } catch (Exception e) {
             Log.w(TAG, "root socket probe failed: " + e);
-            return false;
+            return null;
         } finally {
             if (p != null) p.destroy();
         }
+    }
+
+    /** Whether the path is a socket, with "could not tell" folded into "no". */
+    private boolean isSocketFileRoot(String path) {
+        return Boolean.TRUE.equals(probeSocketRoot(path));
+    }
+
+    /** Guards against probes piling up while focus flips back and forth. */
+    private volatile boolean socketProbeInFlight;
+
+    /**
+     * Checks the daemon socket without blocking the UI thread, and closes this
+     * window only on a definite answer.
+     *
+     * <p>Called from {@link #onWindowFocusChanged}, which fires for every dialog,
+     * gesture and app switch. The rooted probe shells out to {@code su} and can
+     * take seconds, or wait on a permission prompt forever; on the main thread
+     * that is an ANR, and a probe that merely failed to answer would close a
+     * window whose daemon is fine. The answer only ever closes the window, so
+     * arriving late costs nothing.
+     */
+    private void probeDaemonAsync() {
+        if (socketProbeInFlight)
+            return;
+        socketProbeInFlight = true;
+        final String path = resolveSocketPath();
+        final boolean useRoot = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                .getBoolean(KEY_USE_ROOT, true);
+        Thread worker = new Thread(() -> {
+            final Boolean present = useRoot ? probeSocketRoot(path)
+                    : Boolean.valueOf(isSocketFileLocal(path));
+            runOnUiThread(() -> {
+                socketProbeInFlight = false;
+                if (isFinishing() || isDestroyed())
+                    return;
+                if (present != null && !present) {
+                    android.widget.Toast.makeText(this, "Deamon Down",
+                            android.widget.Toast.LENGTH_SHORT).show();
+                    finish();
+                }
+            });
+        }, "anland-socket-probe");
+        worker.setDaemon(true);
+        worker.start();
     }
 
     // (Re)register this window under its current socket in sWindowsBySocket. A
@@ -597,7 +657,7 @@ public class MainActivity extends Activity
         updateDisplayRotation();
         // Never starts a session by itself: the user has to enable it in Settings
         // and press the key they bound to it.
-        immersive = new ImmersiveMode(this);
+        immersive = new ImmersiveInputController(this);
 
         // Requesting capture before the window is attached is a no-op. The post
         // below covers the initial attach; onWindowFocusChanged() retries after a
@@ -1528,6 +1588,15 @@ public class MainActivity extends Activity
         autoStretch = prefs.getBoolean(KEY_AUTO_STRETCH, true);
         relayout();
 
+        // Warm the occupancy cache off the critical path, so the immersive
+        // toggle never has to wait on an su round trip to know what Gold holds.
+        if (immersive != null) {
+            immersive.refreshGoldStatus();
+            // Only the source that takes no devices may do this, and only when
+            // the user asked for it; the controller decides.
+            immersive.enterAutomatically();
+        }
+
         // The socket pref may have been edited in Settings; keep our dedup key current.
         registerWindow();
     }
@@ -1541,6 +1610,10 @@ public class MainActivity extends Activity
         // A session must never outlive the foreground: leaving the input devices
         // grabbed for a window the user has left is how a tablet gets bricked.
         if (immersive != null) immersive.stop();
+        // Before the pipeline stops: a key this window forwarded and never saw
+        // released has to be lifted, or the desktop holds it until the user
+        // presses that key again.
+        releaseAllForwardedKeys();
         clearPointerCaptureBackTracking();
         releasePointerCapture(false);
         NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
@@ -1556,6 +1629,10 @@ public class MainActivity extends Activity
     protected void onDestroy() {
         abandonMediaAudioFocus();
         if (immersive != null) immersive.stop();
+        // Before the pipeline stops: a key this window forwarded and never saw
+        // released has to be lifted, or the desktop holds it until the user
+        // presses that key again.
+        releaseAllForwardedKeys();
         releasePointerCapture(false);
         if (mRegisteredSocket != null) {
             sWindowsBySocket.remove(mRegisteredSocket, this);
@@ -1689,6 +1766,10 @@ public class MainActivity extends Activity
     public void surfaceDestroyed(SurfaceHolder holder) {
         surfaceReady = false;
         if (immersive != null) immersive.stop();
+        // Before the pipeline stops: a key this window forwarded and never saw
+        // released has to be lifted, or the desktop holds it until the user
+        // presses that key again.
+        releaseAllForwardedKeys();
         releasePointerCapture(false);
         mNative.stop();
     }
@@ -2045,6 +2126,10 @@ public class MainActivity extends Activity
     @Override
     public void onImmersiveChanged(boolean active) {
         immersiveActive = active;
+        // This is the one place both sources report a session starting or
+        // ending, so it is where Gold is told to switch profiles and back.
+        if (immersive != null)
+            immersive.onSessionActiveChanged(active);
         if (active) {
             // The pointer is grabbed at the evdev level for the whole session, so
             // Android's capture is dropped for its duration. The user's "capture
@@ -2180,8 +2265,15 @@ public class MainActivity extends Activity
         return super.onGenericMotionEvent(event);
     }
 
-    @Override
-    public boolean onKeyDown(int keyCode, KeyEvent event) {
+    /**
+     * The source-aware part of every key decision, in the one order all three
+     * ingresses must use. Keeping it in one place is what makes the Activity and
+     * the accessibility service behave identically — with interception on, the
+     * service eats keys before the window ever sees them.
+     *
+     * @return true when the event was consumed
+     */
+    private boolean handleSourceAwareKey(KeyEvent event) {
         // First: the immersive toggle is the way out of a session that has taken
         // every input device, so nothing else may consume it.
         if (immersive != null && immersive.handleKey(event))
@@ -2191,9 +2283,18 @@ public class MainActivity extends Activity
         // Mouse Back is already forwarded as BTN_SIDE from the MotionEvent path.
         // Swallow Android's duplicate KEYCODE_BACK so it neither releases capture
         // nor toggles the extra-keys bar.
-        if (keyCode == KeyEvent.KEYCODE_BACK && isMouseKeyEvent(event))
+        if (event.getKeyCode() == KeyEvent.KEYCODE_BACK && isMouseKeyEvent(event))
             return true;
         if (handleSoftKeyboardToggleKey(event))
+            return true;
+        // Android's own keys are settled before the Gold bus sees anything, and
+        // the bus before the generic forwarding below.
+        return immersive != null && immersive.routeBusKey(event);
+    }
+
+    @Override
+    public boolean onKeyDown(int keyCode, KeyEvent event) {
+        if (handleSourceAwareKey(event))
             return true;
         if (event.getRepeatCount() > 0)
             return true;
@@ -2230,16 +2331,9 @@ public class MainActivity extends Activity
     // Called from KeyInterceptor (accessibility service) to handle keys that
     // the normal onKeyDown/onKeyUp might miss (e.g. Fn combos).
     public boolean handleAccessibilityKey(KeyEvent event) {
-        // With interception on, KeyInterceptor consumes keys before the window
-        // ever sees them, so the immersive toggle has to be recognised here too —
-        // the two features are wanted by exactly the same users.
-        if (immersive != null && immersive.handleKey(event))
-            return true;
-        if (handlePointerCaptureBackKey(event))
-            return true;
-        if (event.getKeyCode() == KeyEvent.KEYCODE_BACK && isMouseKeyEvent(event))
-            return true;
-        if (handleSoftKeyboardToggleKey(event))
+        // The same decision boundary as the Activity paths: with interception on
+        // this is the only ingress, and the two must not diverge.
+        if (handleSourceAwareKey(event))
             return true;
         if (event.getRepeatCount() > 0)
             return true;
@@ -2255,40 +2349,47 @@ public class MainActivity extends Activity
         return forwardKeyToLinux(event, false);
     }
 
-    private boolean forwardKeyToLinux(KeyEvent event, boolean convertBackToEscape) {
-        int keyCode = event.getKeyCode();
-        int action = event.getAction() == KeyEvent.ACTION_DOWN ? 0 : 1;
-        int evdev = -1;
+    /**
+     * evdev codes this window forwarded through the ordinary path and has not
+     * released.
+     *
+     * <p>The immersive sessions keep ledgers of their own, and those cover only
+     * their own keys. Nothing covered this path, so a key forwarded here and
+     * still held when the window went away stayed held on the desktop -- until
+     * the user pressed and released that same key again.
+     */
+    private final java.util.LinkedHashSet<Integer> forwardedKeys =
+            new java.util.LinkedHashSet<>();
 
-        if (convertBackToEscape
-                && (keyCode == KeyEvent.KEYCODE_BACK
-                    || event.getScanCode() == EVDEV_BROWSER_BACK))
-            evdev = KeyCodeMapper.getScanCode(KeyEvent.KEYCODE_ESCAPE);
-
-        // Reserved Android keys may carry vendor scan codes that Linux does not
-        // recognize, so prefer their explicit evdev mapping.
-        if (evdev == -1 && shouldPreferMappedKey(keyCode))
-            evdev = KeyCodeMapper.getScanCode(keyCode);
-
-        if (evdev == -1 && event.getScanCode() != 0)
-            evdev = event.getScanCode();
-
-        if (evdev == -1)
-            evdev = KeyCodeMapper.getScanCode(keyCode);
-
-        if (evdev == -1)
-            return false;
-
-        mNative.sendKey(action, evdev);
-        return true;
+    /**
+     * Releases every key this window forwarded and never saw released, in
+     * reverse press order so a modifier is lifted after the key it modified.
+     *
+     * <p>Called everywhere the window stops being the one the user is typing
+     * into, for the same reason the mouse buttons are.
+     */
+    private void releaseAllForwardedKeys() {
+        if (forwardedKeys.isEmpty())
+            return;
+        if (mNative != null) {
+            java.util.List<Integer> held = new java.util.ArrayList<>(forwardedKeys);
+            for (int index = held.size() - 1; index >= 0; index--)
+                mNative.sendKey(1, held.get(index));
+        }
+        forwardedKeys.clear();
     }
 
-    private static boolean shouldPreferMappedKey(int keyCode) {
-        return keyCode == KeyEvent.KEYCODE_META_LEFT
-                || keyCode == KeyEvent.KEYCODE_META_RIGHT
-                || keyCode == KeyEvent.KEYCODE_SEARCH
-                || keyCode == KeyEvent.KEYCODE_ASSIST
-                || (keyCode >= KeyEvent.KEYCODE_F13 && keyCode <= KeyEvent.KEYCODE_F24);
+    private boolean forwardKeyToLinux(KeyEvent event, boolean convertBackToEscape) {
+        int evdev = KeyResolver.resolveEvdevCode(event.getKeyCode(), event.getScanCode(),
+                convertBackToEscape);
+        if (evdev < 0)
+            return false;
+        if (event.getAction() == KeyEvent.ACTION_DOWN)
+            forwardedKeys.add(evdev);
+        else
+            forwardedKeys.remove(evdev);
+        mNative.sendKey(event.getAction() == KeyEvent.ACTION_DOWN ? 0 : 1, evdev);
+        return true;
     }
 
     public boolean isAccessibilityInterceptEnabled() {
@@ -2298,13 +2399,7 @@ public class MainActivity extends Activity
 
     @Override
     public boolean onKeyUp(int keyCode, KeyEvent event) {
-        if (immersive != null && immersive.handleKey(event))
-            return true;
-        if (handlePointerCaptureBackKey(event))
-            return true;
-        if (keyCode == KeyEvent.KEYCODE_BACK && isMouseKeyEvent(event))
-            return true;
-        if (handleSoftKeyboardToggleKey(event))
+        if (handleSourceAwareKey(event))
             return true;
         forwardKeyToLinux(event);
         return true;
@@ -2391,6 +2486,19 @@ public class MainActivity extends Activity
                 mNative.sendMouseButton(btn[1], false);
         }
         savedBS = 0;
+    }
+
+    /**
+     * Releases keys this window forwarded, for callers that end interception
+     * without a lifecycle transition to hang it off.
+     *
+     * <p>The accessibility service can stop -- the switch turned off, the
+     * activity going away, the system reclaiming it -- between a key's press and
+     * its release. Nothing else lifts a key in that window, so the desktop holds
+     * it down until the user presses that same key again.
+     */
+    public void releaseForwardedKeys() {
+        releaseAllForwardedKeys();
     }
 
     private boolean isMouseEvent(MotionEvent event) {

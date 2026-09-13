@@ -16,7 +16,12 @@ public class KeyInterceptor extends AccessibilityService {
     private static final String PREFS_NAME = "anland_settings";
     private static final String KEY_ACCESSIBILITY_ENABLED = "accessibility_key_intercept";
 
-    LinkedHashSet<Integer> pressedKeys = new LinkedHashSet<>();
+    /**
+     * Keys this service consumed, keyed by device as well as key code. A plain
+     * key-code set would let a release from one keyboard lift the same key held
+     * on another, and would mistake a different device's press for a repeat.
+     */
+    LinkedHashSet<GoldKeyLedger.Identity> pressedKeys = new LinkedHashSet<>();
 
     private static final Handler handler = new Handler(Looper.getMainLooper());
     private static KeyInterceptor self;
@@ -53,11 +58,28 @@ public class KeyInterceptor extends AccessibilityService {
         if (onlyIfEnabledAutomatically && !launchedAutomatically)
             return;
 
+        // Before dropping the record of what was pressed: the keys themselves
+        // are held on the desktop, and this is the last chance to lift them.
+        releaseHeldKeys();
+
         if (self != null) {
             self.disableSelf();
             self.pressedKeys.clear();
             self = null;
         }
+    }
+
+    /**
+     * Asks the window to release whatever it forwarded on this service's behalf.
+     *
+     * <p>The service tracks which keys it consumed, but the evdev codes it
+     * forwarded live with the window, which is the only place that can send the
+     * releases back.
+     */
+    private static void releaseHeldKeys() {
+        MainActivity instance = getMainActivity();
+        if (instance != null)
+            instance.releaseForwardedKeys();
     }
 
     public static boolean isLaunched() {
@@ -69,6 +91,10 @@ public class KeyInterceptor extends AccessibilityService {
     private static void disableImmediately() {
         if (self == null) return;
         android.util.Log.d("KeyInterceptor", "disabling interception service");
+        // Turning the filter flag off stops further events arriving, so any key
+        // still held has to be let go now rather than on its release, which will
+        // never come through here.
+        releaseHeldKeys();
         AccessibilityServiceInfo info = self.getServiceInfo();
         info.flags &= ~AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS;
         self.setServiceInfo(info);
@@ -106,23 +132,29 @@ public class KeyInterceptor extends AccessibilityService {
         if (instance == null)
             return false;
 
-        // Only intercept keys when the activity is in foreground and has focus
-        if (!instance.hasWindowFocus())
-            return false;
-
-        int keyCode = event.getKeyCode();
+        GoldKeyLedger.Identity identity = identityOf(event);
         boolean releaseTrackedKey = event.getAction() == KeyEvent.ACTION_UP
-                && pressedKeys.contains(keyCode);
+                && pressedKeys.contains(identity);
+
+        // Keys are only intercepted while the activity is in front and focused.
+        // A release for a key already consumed is the exception: the press was
+        // forwarded, so dropping the release would leave that key held on the
+        // desktop with nothing left to lift it.
+        if (!releaseTrackedKey && !instance.hasWindowFocus())
+            return false;
         boolean intercept = instance.isAccessibilityInterceptEnabled();
 
         boolean ret = false;
+        // A key whose DOWN was consumed still gets its UP routed, even if
+        // interception has been switched off in the meantime: otherwise the
+        // release would be lost and the desktop would hold the key down.
         if (intercept || releaseTrackedKey)
             ret = instance.handleAccessibilityKey(event);
 
         if (intercept && ret && event.getAction() == KeyEvent.ACTION_DOWN)
-            pressedKeys.add(keyCode);
+            pressedKeys.add(identity);
         else if (event.getAction() == KeyEvent.ACTION_UP)
-            pressedKeys.remove(keyCode);
+            pressedKeys.remove(identity);
 
         recheck();
 
@@ -134,6 +166,11 @@ public class KeyInterceptor extends AccessibilityService {
 
     @Override
     public void onInterrupt() {}
+
+    private static GoldKeyLedger.Identity identityOf(KeyEvent event) {
+        return new GoldKeyLedger.Identity(event.getDeviceId(), event.getKeyCode(),
+                event.getScanCode());
+    }
 
     private static MainActivity getMainActivity() {
         // MainActivity is the only activity; we can locate it via the global

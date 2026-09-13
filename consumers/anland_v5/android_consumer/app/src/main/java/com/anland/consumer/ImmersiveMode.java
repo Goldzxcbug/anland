@@ -48,7 +48,7 @@ import java.util.Arrays;
  * keyguard needs the touchscreen, so the grab ends the moment the screen turns
  * off (see {@link #registerScreenOff}).
  */
-final class ImmersiveMode implements InputGrab.Listener {
+final class ImmersiveMode implements InputGrabTransport.Listener {
     private static final String TAG = "Anland";
     private static final String PREFS_NAME = "anland_settings";
 
@@ -178,7 +178,8 @@ final class ImmersiveMode implements InputGrab.Listener {
 
     private final Host host;
     private final Context ctx;
-    private final InputGrab grab;
+    /** The direct transport; the bus source takes nothing and has its own class. */
+    private final InputGrabTransport grab;
     private final Dev[] devs = new Dev[MAX_DEVICES];
 
     /** Held keys and buttons, so a session can never leave one stuck on the desktop. */
@@ -246,7 +247,7 @@ final class ImmersiveMode implements InputGrab.Listener {
     ImmersiveMode(Host host) {
         this.host = host;
         this.ctx = host.context();
-        this.grab = new InputGrab(ctx, this);
+        this.grab = InputGrab.FACTORY.create(ctx, this);
         for (int i = 0; i < MAX_SLOTS; i++) {
             props[i] = new MotionEvent.PointerProperties();
             props[i].toolType = MotionEvent.TOOL_TYPE_FINGER;
@@ -274,6 +275,14 @@ final class ImmersiveMode implements InputGrab.Listener {
      * obvious thing to bind on a tablet — and the helper compares evdev codes,
      * not Android key codes.
      */
+    /**
+     * The bound key's name, for the "press X again to leave" line. Shared with
+     * the uinput-bus source, which is toggled by the same key.
+     */
+    String boundKeyName() {
+        return KeyCodeMapper.keyName(ctx, prefs().getInt(KEY_KEYCODE, -1), boundScanCode());
+    }
+
     private int boundScanCode() {
         SharedPreferences p = prefs();
         int scan = p.getInt(KEY_SCANCODE, -1);
@@ -283,12 +292,17 @@ final class ImmersiveMode implements InputGrab.Listener {
         return keycode == -1 ? -1 : KeyCodeMapper.getScanCode(keycode);
     }
 
-    private void suppressToggleTail() {
+    /**
+     * Swallow the rest of the toggle press, up to its release. Shared with the
+     * uinput-bus source so the release cannot leak to the desktop whichever
+     * source was toggled.
+     */
+    void suppressToggleTail() {
         suppressToggleUntilUp = true;
         suppressToggleDeadlineMs = SystemClock.uptimeMillis() + TOGGLE_SUPPRESS_MS;
     }
 
-    private boolean consumeSuppressedToggle(KeyEvent event) {
+    boolean consumeSuppressedToggle(KeyEvent event) {
         if (!suppressToggleUntilUp)
             return false;
         if (SystemClock.uptimeMillis() > suppressToggleDeadlineMs) {
@@ -304,13 +318,14 @@ final class ImmersiveMode implements InputGrab.Listener {
     }
 
     /**
-     * Consume the bound key. Called from both key paths — the accessibility
-     * service eats keys before the window when interception is on, so neither
-     * path alone sees every press.
+     * Whether this event is the bound immersive key, without acting on it.
      *
-     * @return true when the event was the toggle key and must go no further.
+     * <p>Recognition lives here, but the decision of what a press means does
+     * not: {@link ImmersiveInputController} owns that, because the same key has
+     * to start whichever source is configured. Splitting them any other way
+     * would leave two copies of the same rule to drift apart.
      */
-    boolean handleKey(KeyEvent event) {
+    boolean isBoundToggle(KeyEvent event) {
         if (!isEnabled())
             return false;
         SharedPreferences p = prefs();
@@ -326,29 +341,29 @@ final class ImmersiveMode implements InputGrab.Listener {
         // and the helper is what ends a session no matter what happens to this
         // process. Rather than swallow the key to no purpose, leave it alone;
         // Settings flags such a binding where the user can see it.
-        if (boundScanCode() <= 0)
-            return false;
-        if (consumeSuppressedToggle(event))
-            return true;
-
-        if (event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0)
-            toggle();
-        // Swallow the release too, so the key never reaches the desktop or the
-        // soft-keyboard toggle bound to the same code.
-        return true;
+        return boundScanCode() > 0;
     }
 
-    private void toggle() {
-        if (active || starting) {
-            userExitPending = true;
-            suppressToggleTail();
-            stop();
-        } else {
-            start();
-        }
+    /**
+     * Ends the session because the user asked to. Separate from {@link #stop}
+     * so the closing toast can tell a deliberate exit from an interruption; the
+     * controller uses it for the toggle too, since it starts sessions itself.
+     */
+    void requestStop() {
+        userExitPending = true;
+        suppressToggleTail();
+        stop();
     }
 
-    private void start() {
+    /**
+     * Starts a session, optionally restricted to a set of nodes and told which
+     * ones to keep away from.
+     *
+     * @param selectedNodes nodes to take, or null for auto-selection
+     * @param excludedNodes nodes Gold has confirmed it holds, or null
+     */
+    void startWith(java.util.Collection<String> selectedNodes,
+                   java.util.Collection<String> excludedNodes) {
         int scan = boundScanCode();
         if (scan <= 0) {
             // Without an evdev code the helper cannot recognise the key that ends
@@ -358,7 +373,7 @@ final class ImmersiveMode implements InputGrab.Listener {
         }
         starting = true;
         userExitPending = false;
-        if (!grab.start(scan)) {
+        if (!grab.start(scan, selectedNodes, excludedNodes)) {
             starting = false;
             toast(ctx.getString(R.string.immersive_failed));
             return;
@@ -368,10 +383,10 @@ final class ImmersiveMode implements InputGrab.Listener {
         statsEvents = 0;
         java.util.Arrays.fill(statsPerDev, 0);
         stats.postDelayed(statsTick, 500);
-        // Announced up front, and with the way out, because once the grab lands
-        // the on-screen UI is unreachable by design.
-        toast(ctx.getString(R.string.immersive_entering,
-                KeyCodeMapper.keyName(ctx, prefs().getInt(KEY_KEYCODE, -1), scan)));
+        // Not announced from here: the controller knows which source the user
+        // picked and says so once, for whichever halves it started. Two sources
+        // each announcing themselves is how the combined mode ended up showing
+        // two toasts on one key press.
         host.onImmersiveChanged(true);
     }
 
