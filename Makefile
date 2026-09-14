@@ -132,15 +132,13 @@ module: native
 	mkdir -p "$$MOD"
 	cp module/module.prop module/sepolicy.rule module/service.sh \
 	   module/customize.sh module/plat_service_contexts.anland "$$MOD/"
-	cp LICENSE LICENSE-COMMUNITY.txt LICENSE-CONTRIBUTOR.txt \
-	   LICENSE-COMMERCIAL.txt "$$MOD/"
+	cp LICENSE "$$MOD/"
 	cp "$(OUT)/waylandbridge" "$$MOD/"
 	chmod 755 "$$MOD/waylandbridge" "$$MOD/service.sh" "$$MOD/customize.sh"
 	(cd "$$MOD" && zip -qr "$(OUT)/module/anland-awl.zip" \
 	  module.prop sepolicy.rule service.sh customize.sh \
 	  plat_service_contexts.anland waylandbridge \
-	  LICENSE LICENSE-COMMUNITY.txt LICENSE-CONTRIBUTOR.txt \
-	  LICENSE-COMMERCIAL.txt)
+	  LICENSE)
 	echo "OK: $(OUT)/module/anland-awl.zip"
 
 # ---------------- One-time bootstrap: cross-compile libffi ----------------

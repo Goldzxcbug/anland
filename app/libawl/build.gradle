@@ -13,7 +13,7 @@ android {
     ndkVersion '29.0.13113456'
 
     defaultConfig {
-        minSdk 29
+        minSdk 28
         externalNativeBuild {
             cmake {
                 arguments '-DANDROID_STL=none'

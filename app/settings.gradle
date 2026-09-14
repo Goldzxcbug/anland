@@ -16,4 +16,3 @@ dependencyResolutionManagement {
 // test harness APK).
 rootProject.name = "anland-wayland"
 include ':libawl'
-include ':testapp'
