@@ -157,7 +157,7 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
 
     private final Host host;
     private final Context ctx;
-    /** The direct transport; the bus source takes nothing and has its own class. */
+    /** One exclusive raw-event transport for physical nodes and Gold output. */
     private final InputGrabTransport grab;
     private final Dev[] devs = new Dev[MAX_DEVICES];
 
@@ -255,8 +255,7 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
      * not Android key codes.
      */
     /**
-     * The bound key's name, for the "press X again to leave" line. Shared with
-     * the uinput-bus source, which is toggled by the same key.
+     * The bound key's name, for the "press X again to leave" line.
      */
     String boundKeyName() {
         return KeyCodeMapper.keyName(ctx, prefs().getInt(KEY_KEYCODE, -1), boundScanCode());
@@ -272,9 +271,7 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
     }
 
     /**
-     * Swallow the rest of the toggle press, up to its release. Shared with the
-     * uinput-bus source so the release cannot leak to the desktop whichever
-     * source was toggled.
+     * Swallow the rest of the toggle press, up to its release.
      */
     void suppressToggleTail() {
         suppressToggleUntilUp = true;
@@ -341,21 +338,24 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
      * @param selectedNodes nodes to take, or null for auto-selection
      * @param excludedNodes nodes Gold has confirmed it holds, or null
      */
-    void startWith(java.util.Collection<String> selectedNodes,
-                   java.util.Collection<String> excludedNodes) {
-        int scan = boundScanCode();
-        if (scan <= 0) {
+    boolean startWith(java.util.Collection<String> selectedNodes,
+                      java.util.Collection<String> excludedNodes,
+                      ImmersiveInputSource source) {
+        if (active || starting)
+            return false;
+        int scan = Math.max(0, boundScanCode());
+        if (scan == 0 && !source.allowsUnboundToggle()) {
             // Without an evdev code the helper cannot recognise the key that ends
             // the session, and it refuses to grab anything blind.
             toast(ctx.getString(R.string.immersive_no_scancode));
-            return;
+            return false;
         }
         starting = true;
         userExitPending = false;
-        if (!grab.start(scan, selectedNodes, excludedNodes)) {
+        if (!grab.start(scan, selectedNodes, excludedNodes, source)) {
             starting = false;
             toast(ctx.getString(R.string.immersive_failed));
-            return;
+            return false;
         }
         registerScreenOff();
         statsLastAt = 0L;
@@ -367,6 +367,7 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
         // each announcing themselves is how the combined mode ended up showing
         // two toasts on one key press.
         host.onImmersiveChanged(true);
+        return true;
     }
 
     /** End the session. Safe to call at any time, including when not running. */

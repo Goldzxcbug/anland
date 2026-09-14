@@ -6,42 +6,24 @@ import java.util.LinkedHashSet;
 import java.util.Set;
 
 /**
- * Where immersive mode gets its input from. The two sources are mutually
- * exclusive: a session is running one or the other, never both.
- *
- * <p>{@link #DIRECT_EVENT_NODES} is the original behaviour — Anland's root helper
- * takes the physical nodes under {@code EVIOCGRAB} and replays them.
- *
- * <p>{@link #EXISTING_UINPUT_BUS} takes nothing at all. Gold keeps its grabs, and
- * Anland only consumes the {@code KeyEvent}s that Gold's own uinput keyboard
- * already delivers to the foreground window.
+ * All sources use the root helper's exclusive evdev stream. Gold sources take
+ * Gold's remapped output; Gold keeps its physical devices and mapping profiles.
  */
 enum ImmersiveInputSource {
     DIRECT_EVENT_NODES("direct_event_nodes"),
     EXISTING_UINPUT_BUS("existing_uinput_bus"),
-    /**
-     * Both at once. They contend for nothing: the direct session takes physical
-     * nodes, the bus session takes none and only listens to what Gold's own
-     * keyboard already delivers. The node sets are kept disjoint — Gold claims
-     * every keyboard, so the direct half only ever ends up with pointers and
-     * touch — and each carries the input the other cannot.
-     */
+    /** Physical pointers/touch plus Gold's remapped keyboard output. */
     DIRECT_PLUS_GOLD_KEYBOARD("direct_plus_gold_keyboard");
 
     /**
-     * Whether this source takes physical nodes itself.
-     *
-     * <p>Note what this does <em>not</em> say: the bus source is not exclusive
-     * with it. Only {@link #EXISTING_UINPUT_BUS} declines to grab anything.
+     * Whether this source includes physical nodes in addition to Gold output.
      */
     boolean takesDevices() {
         return this != EXISTING_UINPUT_BUS;
     }
 
     /**
-     * Whether this source forwards Gold's keyboard. Everything except plain
-     * direct does; direct on its own leaves the keyboard to the ordinary
-     * forwarding path.
+     * Whether the helper exclusively reads Gold's output nodes.
      */
     boolean listensToGoldKeyboard() {
         return this != DIRECT_EVENT_NODES;
@@ -57,7 +39,19 @@ enum ImmersiveInputSource {
      * and then doing nothing with it.
      */
     boolean isAvailable(android.content.Context context) {
-        return !listensToGoldKeyboard() || GoldUinputBusSession.goldKeyboardPresent(context);
+        return !listensToGoldKeyboard() || GoldKeyboard.goldKeyboardPresent(context);
+    }
+
+    String helperArgument() {
+        switch (this) {
+            case EXISTING_UINPUT_BUS: return "source=gold";
+            case DIRECT_PLUS_GOLD_KEYBOARD: return "source=combined";
+            default: return "source=physical";
+        }
+    }
+
+    boolean allowsUnboundToggle() {
+        return this == EXISTING_UINPUT_BUS;
     }
 
     static final String KEY_PREFERENCE = "immersive_input_source";

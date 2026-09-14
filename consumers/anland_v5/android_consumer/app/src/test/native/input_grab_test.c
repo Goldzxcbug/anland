@@ -10,6 +10,7 @@
 
 static int fake_open(const char *path, int flags, ...);
 static int fake_close(int fd);
+static ssize_t fake_read(int fd, void *buffer, size_t size);
 static int fake_ioctl(int fd, unsigned long request, ...);
 static DIR *fake_opendir(const char *path);
 static struct dirent *fake_readdir(DIR *dir);
@@ -17,6 +18,7 @@ static int fake_closedir(DIR *dir);
 
 #define open fake_open
 #define close fake_close
+#define read fake_read
 #define ioctl fake_ioctl
 #define opendir fake_opendir
 #define readdir fake_readdir
@@ -25,6 +27,7 @@ static int fake_closedir(DIR *dir);
 #include "../../main/jni/input_grab.c"
 #undef open
 #undef close
+#undef read
 #undef ioctl
 #undef opendir
 #undef readdir
@@ -39,6 +42,12 @@ struct fake_device {
     unsigned long prop[NBITS(INPUT_PROP_MAX + 1)];
     struct input_absinfo ranges[ABS_MAX + 1];
     unsigned int bus;
+    unsigned int vendor, product;
+    char name[80];
+    unsigned long held[NBITS(KEY_MAX + 1)];
+    struct input_event events[8];
+    size_t event_count, event_cursor;
+    int grab_error;
     int present, opens, grabs, grabbed;
     int open_error, fail_nr, interrupt_once;
 };
@@ -82,6 +91,10 @@ static void reset(int count)
     memset(&g_excluded, 0, sizeof(g_excluded));
     device_count = count;
     g_has_power_button = 0;
+    g_source = SOURCE_PHYSICAL;
+    g_pending_len = 0;
+    g_need_resync = 0;
+    g_drops = 0;
     for (int i = 0; i < count; i++) {
         devices[i].present = 1;
         devices[i].bus = BUS_HOST;
@@ -152,7 +165,13 @@ static int fake_ioctl(int fd, unsigned long request, ...)
     va_list args;
     va_start(args, request);
     if (request == EVIOCGRAB) {
-        device->grabbed = va_arg(args, int) != 0;
+        int grabbing = va_arg(args, int) != 0;
+        if (grabbing && device->grab_error) {
+            va_end(args);
+            errno = device->grab_error;
+            return -1;
+        }
+        device->grabbed = grabbing;
         handles[handle].grabbed = device->grabbed;
         device->grabs += device->grabbed;
         va_end(args);
@@ -196,10 +215,18 @@ static int fake_ioctl(int fd, unsigned long request, ...)
     case 0x02:
         memset(data, 0, size);
         ((struct input_id *)data)->bustype = device->bus;
+        ((struct input_id *)data)->vendor = device->vendor;
+        ((struct input_id *)data)->product = device->product;
         return 0;
     case 0x06:
-        snprintf(data, size, "Test input %d", handles[handle].device);
+        if (device->name[0])
+            snprintf(data, size, "%s", device->name);
+        else
+            snprintf(data, size, "Test input %d", handles[handle].device);
         return 0;
+    case 0x18:
+        memcpy(data, device->held, size);
+        return (int)size;
     case 0x09:
         memcpy(data, device->prop, size);
         return (int)size;
@@ -207,6 +234,22 @@ static int fake_ioctl(int fd, unsigned long request, ...)
         assert(0);
         return -1;
     }
+}
+
+static ssize_t fake_read(int fd, void *buffer, size_t size)
+{
+    assert(fd >= 100 && fd < 100 + handle_count);
+    struct fake_device *device = &devices[handles[fd - 100].device];
+    if (device->event_cursor == device->event_count) {
+        errno = EAGAIN;
+        return -1;
+    }
+    size_t count = device->event_count - device->event_cursor;
+    if (count > size / sizeof(struct input_event))
+        count = size / sizeof(struct input_event);
+    memcpy(buffer, device->events + device->event_cursor, count * sizeof(struct input_event));
+    device->event_cursor += count;
+    return (ssize_t)(count * sizeof(struct input_event));
 }
 
 static DIR *fake_opendir(const char *path)
@@ -400,6 +443,119 @@ static void test_query_failures_and_legacy_fallbacks(void)
     fake_close(entry.fd);
 }
 
+static void gold_keyboard(int index)
+{
+    key(index, KEY_A);
+    key(index, KEY_Z);
+    key(index, KEY_SPACE);
+    key(index, KEY_LEFTMETA);
+    devices[index].bus = BUS_USB;
+    devices[index].vendor = GOLD_VENDOR;
+    devices[index].product = GOLD_PRODUCT;
+    snprintf(devices[index].name, sizeof(devices[index].name), "%s event9", GOLD_NAME_PREFIX);
+}
+
+static void gold_capture_scopes(void)
+{
+    reset(3);
+    key(0, KEY_A); key(0, KEY_Z); key(0, KEY_SPACE);
+    gold_keyboard(1);
+    panel(2, 1);
+    g_source = SOURCE_GOLD;
+    assert(scan_devices() == 1);
+    assert(has_gold_output());
+    assert(g_ndevs == 1 && g_devs[0].gold && g_devs[0].grabbed);
+    assert(!devices[0].grabbed && devices[1].grabbed && !devices[2].grabbed);
+    release_all();
+    assert(!devices[1].grabbed); // Android owns the output again after exit.
+
+    reset(3);
+    key(0, KEY_A); key(0, KEY_Z); key(0, KEY_SPACE);
+    gold_keyboard(1);
+    panel(2, 1);
+    g_source = SOURCE_COMBINED;
+    assert(parse_node_argument("event2", &g_selected, 0) == 0);
+    assert(scan_devices() == 2);
+    assert(!devices[0].grabbed && devices[1].grabbed && devices[2].grabbed);
+
+    reset(1);
+    gold_keyboard(0);
+    assert(scan_devices() == 0); // Plain physical mode still leaves Gold alone.
+    g_source = SOURCE_GOLD;
+    devices[0].product = 0x3869;
+    assert(scan_devices() == 0); // A matching name cannot substitute for the ids.
+    devices[0].product = GOLD_PRODUCT;
+    devices[0].grab_error = EBUSY;
+    assert(scan_devices() == 0 && !has_gold_output());
+
+    reset(2);
+    gold_keyboard(0); gold_keyboard(1);
+    g_source = SOURCE_GOLD;
+    assert(parse_node_argument("event1", &g_selected, 0) == 0);
+    assert(scan_devices() == 1);
+    assert(!devices[0].grabbed && devices[1].grabbed);
+
+    reset(1);
+    gold_keyboard(0);
+    memset(devices[0].key, 0, sizeof(devices[0].key));
+    key(0, KEY_VOLUMEUP);
+    g_source = SOURCE_GOLD;
+    assert(scan_devices() == 1); // Gold's remapped output is not a physical hardware button.
+    assert(!g_devs[0].watch_only);
+}
+
+static void gold_waits_for_android_release(void)
+{
+    reset(1);
+    gold_keyboard(0);
+    g_source = SOURCE_GOLD;
+    set_bit(devices[0].held, KEY_LEFTMETA);
+    assert(scan_devices() == 0);
+    assert(pending_gold() && has_gold_output());
+    assert(!devices[0].grabbed);
+
+    memset(devices[0].held, 0, sizeof(devices[0].held));
+    devices[0].events[0] = (struct input_event){.type = EV_KEY, .code = KEY_LEFTMETA, .value = 0};
+    devices[0].events[1] = (struct input_event){.type = EV_SYN, .code = SYN_REPORT};
+    devices[0].event_count = 2;
+    g_devs[0].announced = 1;
+    int stream[2];
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, stream) == 0);
+    assert(pump_device(stream[0], 0, KEY_F12) == 1);
+    assert(devices[0].grabbed && !pending_gold() && !g_devs[0].announced);
+    char byte;
+    assert(recv(stream[1], &byte, 1, MSG_DONTWAIT) == -1 && errno == EAGAIN);
+    close(stream[0]); close(stream[1]);
+}
+
+static void gold_raw_meta_reaches_the_stream(void)
+{
+    reset(1);
+    gold_keyboard(0);
+    g_source = SOURCE_GOLD;
+    assert(scan_devices() == 1);
+    g_devs[0].announced = 1;
+    devices[0].events[0] = (struct input_event){.type = EV_KEY, .code = KEY_LEFTMETA, .value = 1};
+    devices[0].events[1] = (struct input_event){.type = EV_SYN, .code = SYN_REPORT};
+    devices[0].events[2] = (struct input_event){.type = EV_KEY, .code = KEY_LEFTMETA, .value = 0};
+    devices[0].events[3] = (struct input_event){.type = EV_SYN, .code = SYN_REPORT};
+    devices[0].event_count = 4;
+    int stream[2];
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, stream) == 0);
+    int result = pump_device(stream[0], 0, KEY_F12);
+    if (result != 1)
+        fprintf(stderr, "raw stream failed: result=%d errno=%d cursor=%zu\n",
+                result, errno, devices[0].event_cursor);
+    assert(result == 1);
+    struct igrab_rec records[4];
+    assert(read(stream[1], records, sizeof(records)) == (ssize_t)sizeof(records));
+    assert(records[0].rtype == IGRAB_REC_EVENT && records[0].etype == EV_KEY);
+    assert(records[0].code == KEY_LEFTMETA && records[0].value == 1);
+    assert(records[2].code == KEY_LEFTMETA && records[2].value == 0);
+    assert(records[1].etype == EV_SYN && records[3].etype == EV_SYN);
+    close(stream[0]); close(stream[1]);
+}
+
 int main(void)
 {
     test_power_panel_keeps_its_identity();
@@ -410,6 +566,10 @@ int main(void)
     test_query_failures_and_legacy_fallbacks();
     test_ordinary_devices_keep_their_policy();
     release_all();
-    puts("input-grab native regressions passed (7 groups)");
+    gold_capture_scopes();
+    gold_waits_for_android_release();
+    gold_raw_meta_reaches_the_stream();
+    release_all();
+    puts("input-grab native regressions passed (10 groups)");
     return 0;
 }

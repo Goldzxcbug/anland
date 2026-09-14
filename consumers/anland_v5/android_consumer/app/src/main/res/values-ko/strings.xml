@@ -51,7 +51,7 @@
     <string name="immersive_interrupted">몰입 모드가 종료되어 입력이 안드로이드로 반환되었습니다</string>
     <string name="immersive_inputs_system_power">✕ %1$s — 전원 버튼 제어를 유지하기 위해 Android에서 처리합니다</string>
     <string name="immersive_entering_mode">몰입 모드 켜짐: %1$s</string>
-    <string name="immersive_bus_entering">몰입 모드 켜짐 (Gold 키보드): 키 입력은 데스크톱으로, 터치와 마우스는 안드로이드에 남습니다. %1$s 키를 다시 누르면 종료됩니다.</string>
+
     <string name="immersive_gold_unknown">Gold가 점유한 장치를 확인할 수 없어, 비켜주지 않고 시작합니다</string>
     <string name="immersive_selection_invalid">저장된 장치 선택이 올바르지 않습니다. 몰입 입력 설정에서 수정하세요</string>
     <string name="immersive_selection_filtered">선택한 장치를 모두 Gold가 점유하고 있어 가져올 장치가 없습니다</string>
@@ -63,21 +63,21 @@
     <string name="section_immersive_inputs_source">입력 소스</string>
     <string name="section_immersive_inputs_direct">가져올 event 노드</string>
     <string name="section_immersive_inputs_scope">적용 범위</string>
-    <string name="immersive_inputs_use_bus">Gold 키보드를 사용 (장치를 가로채지 않음)</string>
+
     <string name="immersive_inputs_direct_blurb">현재: Anland가 물리 event 노드를 직접 가져오며, 가져오는 동안 안드로이드는 이 장치들을 볼 수 없습니다. root가 필요합니다.</string>
-    <string name="immersive_inputs_bus_hint">현재: Anland는 아무것도 건드리지 않고, Gold 키보드가 이 창에 전달한 키만 받아 넘깁니다.</string>
-    <string name="immersive_inputs_combined_hint">현재: Anland가 포인터와 터치를 가져오고, Gold 키보드의 키도 함께 전달합니다. 키보드 자체는 Gold가 계속 보유합니다.</string>
-    <string name="immersive_inputs_bus_scope">Gold가 실행 중이어야 하고 안드로이드가 그 키보드를 볼 수 있어야 합니다. 전면 창에 도달한 키보드 이벤트만 전달됩니다 — 터치, 마우스, 휠, 제스처, 원시 event 노드와 잠금 화면은 포함되지 않습니다.</string>
+    <string name="immersive_inputs_bus_hint">Gold가 키를 재매핑하고 Anland가 그 출력을 독점하여 데스크톱으로 직접 전달합니다.</string>
+    <string name="immersive_inputs_combined_hint">Anland가 터치, 포인터와 Gold가 재매핑한 키보드 출력을 함께 가져옵니다.</string>
+    <string name="immersive_inputs_bus_scope">루트 권한과 Gold Keyboard Remaps 모듈이 필요합니다. 세션 중 Meta 및 시스템 단축키를 포함한 모든 재매핑된 키가 데스크톱으로 전달됩니다. 터치, 마우스 및 Android 제스처는 계속 사용할 수 있습니다. 앱을 떠나거나 화면을 잠그면 키보드를 반환합니다.</string>
     <string name="immersive_inputs_direct_hint">아래에서 선택한 장치만 가져옵니다. Gold가 점유 중임을 확인한 장치는 표시되지만 선택할 수 없습니다.</string>
     <string name="immersive_inputs_auto">장치 자동 선택</string>
     <string-array name="immersive_source_options">
         <item>Anland 가 장치를 직접接管 (direct)</item>
-        <item>Gold Keyboard Remaps 모듈의 키보드 사용 (장치를 점유하지 않음)</item>
-        <item>직접 연결 + Gold Keyboard Remaps 모듈 키보드</item>
+        <item>Gold 키보드를 데스크톱으로 직접 전달</item>
+        <item>터치 및 포인터 직접 연결 + Gold 키보드</item>
     </string-array>
     <string name="immersive_source_unavailable">Gold Keyboard Remaps 모듈이 필요합니다. 설치되어 있지 않거나 실행 중이 아닙니다.</string>
     <string name="immersive_auto_enter">몰입 모드 자동 진입</string>
-    <string name="immersive_auto_enter_hint">이 소스는 장치를 가져오지 않으므로 앱이 다시 뜰 때 스스로 시작할 수 있습니다. 메시지도, 화면 변화도 없습니다. 터치와 안드로이드 제스처는 그대로 동작합니다.</string>
+    <string name="immersive_auto_enter_hint">앱이 포그라운드로 돌아오면 Gold 키보드를 데스크톱으로 자동 전달합니다. 터치와 Android 제스처는 계속 사용할 수 있습니다.</string>
     <string name="immersive_inputs_loading">장치 확인 중…</string>
     <string name="immersive_inputs_found">Gold가 점유한 장치는 표시되지만 선택할 수 없습니다.</string>
     <string name="immersive_inputs_unknown">Gold가 점유한 장치를 확인할 수 없어 어느 것도 점유로 표시하지 않았습니다. 여기에서 비어 있다고 확인된 장치는 없습니다.</string>

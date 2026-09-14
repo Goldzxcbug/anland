@@ -377,7 +377,7 @@ public class SettingsActivity extends Activity {
         Spinner sourcePicker = new Spinner(this);
         // Which sources need the Gold module, resolved once: it is a device
         // lookup, not a preference read.
-        final boolean goldAvailable = GoldUinputBusSession.goldKeyboardPresent(this);
+        final boolean goldAvailable = GoldKeyboard.goldKeyboardPresent(this);
         final boolean[] sourceUsable = new boolean[sources.length];
         for (int index = 0; index < sources.length; index++)
             sourceUsable[index] = sources[index].isAvailable(this);
@@ -453,7 +453,7 @@ public class SettingsActivity extends Activity {
         });
 
         setContent(root);
-        // Only the direct source has nodes to choose between; the bus takes none.
+        // Gold output is discovered by identity; only physical nodes need a picker.
         if (source == ImmersiveInputSource.EXISTING_UINPUT_BUS) {
             Switch autoEnter = new Switch(this);
             autoEnter.setText(R.string.immersive_auto_enter);

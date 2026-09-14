@@ -21,7 +21,30 @@ public class KeyInterceptor extends AccessibilityService {
      * key-code set would let a release from one keyboard lift the same key held
      * on another, and would mistake a different device's press for a repeat.
      */
-    LinkedHashSet<GoldKeyLedger.Identity> pressedKeys = new LinkedHashSet<>();
+    LinkedHashSet<KeyIdentity> pressedKeys = new LinkedHashSet<>();
+
+    private static final class KeyIdentity {
+        final int deviceId, keyCode, scanCode;
+
+        KeyIdentity(int deviceId, int keyCode, int scanCode) {
+            this.deviceId = deviceId;
+            this.keyCode = keyCode;
+            this.scanCode = scanCode;
+        }
+
+        @Override
+        public boolean equals(Object other) {
+            if (!(other instanceof KeyIdentity))
+                return false;
+            KeyIdentity key = (KeyIdentity) other;
+            return deviceId == key.deviceId && keyCode == key.keyCode && scanCode == key.scanCode;
+        }
+
+        @Override
+        public int hashCode() {
+            return (deviceId * 31 + keyCode) * 31 + scanCode;
+        }
+    }
 
     private static final Handler handler = new Handler(Looper.getMainLooper());
     private static KeyInterceptor self;
@@ -132,7 +155,7 @@ public class KeyInterceptor extends AccessibilityService {
         if (instance == null)
             return false;
 
-        GoldKeyLedger.Identity identity = identityOf(event);
+        KeyIdentity identity = identityOf(event);
         boolean releaseTrackedKey = event.getAction() == KeyEvent.ACTION_UP
                 && pressedKeys.contains(identity);
 
@@ -167,8 +190,8 @@ public class KeyInterceptor extends AccessibilityService {
     @Override
     public void onInterrupt() {}
 
-    private static GoldKeyLedger.Identity identityOf(KeyEvent event) {
-        return new GoldKeyLedger.Identity(event.getDeviceId(), event.getKeyCode(),
+    private static KeyIdentity identityOf(KeyEvent event) {
+        return new KeyIdentity(event.getDeviceId(), event.getKeyCode(),
                 event.getScanCode());
     }
 

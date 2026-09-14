@@ -6,9 +6,7 @@ import java.util.Collection;
 
 /**
  * One immersive input-capture transport. This is the seam between the session
- * controller and how the input is actually taken: the direct transport grabs
- * physical nodes through the root helper, and the uinput-bus transport takes
- * nothing at all.
+ * controller and the root helper which grabs physical nodes or Gold output.
  *
  * <p>Implementations are single-use. Callers create a fresh transport for every
  * attempt and wait for {@link Listener#onEnded} before replacing it.
@@ -66,6 +64,12 @@ interface InputGrabTransport {
     default boolean start(int toggleScanCode, Collection<String> selectedNodes,
                           Collection<String> excludedNodes) {
         return start(toggleScanCode, selectedNodes);
+    }
+
+    default boolean start(int toggleScanCode, Collection<String> selectedNodes,
+                          Collection<String> excludedNodes, ImmersiveInputSource source) {
+        return source == ImmersiveInputSource.DIRECT_EVENT_NODES
+                && start(toggleScanCode, selectedNodes, excludedNodes);
     }
 
     void stop();

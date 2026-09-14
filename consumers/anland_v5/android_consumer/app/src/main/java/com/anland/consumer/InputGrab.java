@@ -377,9 +377,17 @@ final class InputGrab implements InputGrabTransport {
     @Override
     public boolean start(int toggleScanCode, Collection<String> selectedNodes,
                          Collection<String> excludedNodes) {
+        return start(toggleScanCode, selectedNodes, excludedNodes,
+                ImmersiveInputSource.DIRECT_EVENT_NODES);
+    }
+
+    @Override
+    public boolean start(int toggleScanCode, Collection<String> selectedNodes,
+                         Collection<String> excludedNodes, ImmersiveInputSource source) {
         if (running)
             return true;
-        if (toggleScanCode <= 0)
+        if (source == null || toggleScanCode < 0
+                || (toggleScanCode == 0 && !source.allowsUnboundToggle()))
             return false;
 
         // Built here, not in the worker: an unusable node list has to fail the
@@ -422,7 +430,7 @@ final class InputGrab implements InputGrabTransport {
         final String helper = context.getApplicationInfo().nativeLibraryDir
                 + "/libinputgrab.so";
         Thread worker = new Thread(() -> run(helper, socketName, toggleScanCode, token,
-                nodesArgument, excludeArgument), "anland-inputgrab");
+                nodesArgument, excludeArgument, source.helperArgument()), "anland-inputgrab");
         worker.setDaemon(true);
         worker.start();
         return true;
@@ -459,7 +467,8 @@ final class InputGrab implements InputGrabTransport {
     // ---- worker ----------------------------------------------------------
 
     private void run(String helperPath, String socketName, int toggleScanCode,
-                     String token, String nodesArgument, String excludeArgument) {
+                     String token, String nodesArgument, String excludeArgument,
+                     String sourceArgument) {
         int reason = REASON_NO_ROOT;
         Process p = null;
         try {
@@ -469,7 +478,8 @@ final class InputGrab implements InputGrabTransport {
             // session with no selection still produces the original command.
             StringBuilder command = new StringBuilder();
             command.append(helperPath).append(' ').append(socketName).append(' ')
-                    .append(toggleScanCode).append(" igrabtoken=").append(token);
+                    .append(toggleScanCode).append(" igrabtoken=").append(token)
+                    .append(' ').append(sourceArgument);
             if (!nodesArgument.isEmpty())
                 command.append(' ').append(nodesArgument);
             if (!excludeArgument.isEmpty())

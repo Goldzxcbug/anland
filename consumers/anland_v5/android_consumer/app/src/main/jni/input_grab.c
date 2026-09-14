@@ -74,6 +74,13 @@
 /* Poll slice; also how often the timeout above is re-checked. */
 #define POLL_SLICE_MS 250
 
+#define GOLD_NAME_PREFIX "Gold Keyboardremaps"
+#define GOLD_VENDOR 0xffff
+#define GOLD_PRODUCT 0xffff
+enum input_source { SOURCE_PHYSICAL, SOURCE_GOLD, SOURCE_COMBINED };
+static enum input_source g_source = SOURCE_PHYSICAL;
+static int selected_physical_node(const char *path);
+
 #define BITS_PER_LONG  (8 * (int)sizeof(unsigned long))
 #define NBITS(x)       ((((x) - 1) / BITS_PER_LONG) + 1)
 #define TEST_BIT(bit, arr) \
@@ -84,6 +91,8 @@ struct dev_entry {
     int  cls;        /* IGRAB_CLASS_* */
     int  grabbed;    /* 0 =>
                         watched only (toggle detection), events not forwarded */
+    int  gold;
+    int  waiting_idle; /* finish Android's held keys before taking Gold output */
     int  announced;  /* the app has received this entry's DEVICE record */
     int  alpha;      /* a full keyboard, not just a node that happens to have keys */
     int  watch_only; /* classified as tracked-but-never-grabbed */
@@ -159,6 +168,22 @@ static void release_all(void)
         g_devs[i].fd = -1;
     }
     g_ndevs = 0;
+}
+
+static int pending_gold(void)
+{
+    for (int i = 0; i < g_ndevs; i++)
+        if (g_devs[i].fd >= 0 && g_devs[i].waiting_idle)
+            return 1;
+    return 0;
+}
+
+static int has_gold_output(void)
+{
+    for (int i = 0; i < g_ndevs; i++)
+        if (g_devs[i].fd >= 0 && g_devs[i].gold)
+            return 1;
+    return 0;
 }
 
 /* ---------------- record transport ---------------- */
@@ -408,13 +433,23 @@ static int is_builtin_bus(unsigned int bus)
             || bus == BUS_I2C || bus == BUS_SPI;
 }
 
-/*
- * Open one /dev/input node and decide what it is. Returns 0 when the node was
- * taken (entry filled in, fd owned by the caller), -1 when it was skipped.
- *
- * Classification is by capability bits, never by event number: the numbering
- * shifts as soon as a keyboard or dock is attached.
- */
+/* Preserve Android's matching key releases before switching the output owner. */
+static int grab_idle_gold(struct dev_entry *entry)
+{
+    unsigned long held[NBITS(KEY_MAX + 1)] = {0};
+    if (query_input(entry->fd, EVIOCGKEY(sizeof(held)), held) < 0)
+        return -1;
+    for (size_t i = 0; i < sizeof(held) / sizeof(held[0]); i++)
+        if (held[i])
+            return 0;
+    if (ioctl(entry->fd, EVIOCGRAB, 1) < 0)
+        return -1;
+    entry->grabbed = 1;
+    entry->waiting_idle = 0;
+    return 1;
+}
+
+/* Classify by capabilities and identity, then take only the requested source. */
 static int inspect_device(const char *path, struct dev_entry *out, int do_grab)
 {
     int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
@@ -459,17 +494,6 @@ static int inspect_device(const char *path, struct dev_entry *out, int do_grab)
         out->name[0] = '\0';
     out->name[sizeof(out->name) - 1] = '\0';
 
-    /* Gold's own virtual keyboard is Gold's output, never a device to take.
-     * Grabbing it would steal the very events this feature exists to observe,
-     * and taking it while Gold also holds the physical keyboard would remap
-     * everything twice. Skipped before classification, so it is not offered in
-     * --list either: a row the user must never tick is a trap, not a choice. */
-    static const char gold_prefix[] = "Gold Keyboardremaps";
-    if (strncmp(out->name, gold_prefix, sizeof(gold_prefix) - 1) == 0) {
-        close(fd);
-        return -1;
-    }
-
     int mt      = TEST_BIT(ABS_MT_POSITION_X, abs) && TEST_BIT(ABS_MT_POSITION_Y, abs);
     int abs_xy  = TEST_BIT(ABS_X, abs) && TEST_BIT(ABS_Y, abs);
     int rel_xy  = TEST_BIT(REL_X, rel) && TEST_BIT(REL_Y, rel);
@@ -492,6 +516,12 @@ static int inspect_device(const char *path, struct dev_entry *out, int do_grab)
     int have_id = query_input(fd, EVIOCGID, &id) == 0;
     if (have_id)
         out->bus = id.bustype;
+    out->gold = have_id && id.vendor == GOLD_VENDOR && id.product == GOLD_PRODUCT &&
+            strncmp(out->name, GOLD_NAME_PREFIX, sizeof(GOLD_NAME_PREFIX) - 1) == 0;
+    if (out->gold && g_source == SOURCE_PHYSICAL) {
+        close(fd);
+        return -1;
+    }
     int keys    = any_key_bit(key);
     out->power_button = power && !alpha && have_id && is_builtin_bus(out->bus)
             && !TEST_BIT(EV_ABS, ev) && !TEST_BIT(EV_REL, ev);
@@ -555,15 +585,34 @@ static int inspect_device(const char *path, struct dev_entry *out, int do_grab)
      * make them keyboards. They can be taken while a separate built-in power
      * button stays with Android; otherwise retain their class and report the
      * restriction so Settings can explain it instead of hiding the panel. */
-    out->watch_only = (power && !alpha
+    out->watch_only = !out->gold && ((power && !alpha
             && !(out->cls == IGRAB_CLASS_TOUCHSCREEN && g_has_power_button))
-            || (out->cls == IGRAB_CLASS_KEYBOARD && has_only_physical_android_keys(key));
+            || (out->cls == IGRAB_CLASS_KEYBOARD && has_only_physical_android_keys(key)));
+
+    if (do_grab && !out->gold &&
+            (g_source == SOURCE_GOLD || !selected_physical_node(path) ||
+             (g_source == SOURCE_COMBINED && out->cls == IGRAB_CLASS_KEYBOARD &&
+              !out->watch_only))) {
+        close(fd);
+        return -1;
+    }
 
     if (!do_grab || out->watch_only) {
         /* Enumeration or a protected node. The caller owns this fd, but Android
          * keeps receiving its events. */
         out->grabbed = 0;
         return 0;
+    }
+
+    if (out->gold) {
+        /* These are already remapped events. Taking the output leaves Gold's
+         * physical grab and Anland profile intact, while Android gets no keys.
+         * If the entry key is still held, let its UP reach Android first. */
+        out->waiting_idle = 1;
+        if (grab_idle_gold(out) >= 0)
+            return 0;
+        close(fd);
+        return -1;
     }
 
     if (ioctl(fd, EVIOCGRAB, 1) < 0) {
@@ -701,9 +750,17 @@ static int node_is_allowed(const char *name)
 {
     if (node_list_contains(&g_excluded, name))
         return 0;
-    if (g_selected.count > 0 && !node_list_contains(&g_selected, name))
+    if (g_source != SOURCE_COMBINED && g_selected.count > 0 &&
+            !node_list_contains(&g_selected, name))
         return 0;
     return 1;
+}
+
+static int selected_physical_node(const char *path)
+{
+    const char *name = strrchr(path, '/');
+    name = name ? name + 1 : path;
+    return g_selected.count == 0 || node_list_contains(&g_selected, name);
 }
 
 /*
@@ -722,6 +779,8 @@ static int node_is_allowed(const char *name)
  */
 static int node_is_common_input(const struct dev_entry *entry)
 {
+    if (entry->gold)
+        return 1;
     if (entry->watch_only)
         return 0;
     /* Classified as a keyboard but carrying no letters: a button cluster. */
@@ -1031,6 +1090,15 @@ static int pump_device(int sock, int idx, int toggle)
         if (n == 0)
             return -2;      /* would otherwise spin: poll keeps reporting POLLIN */
 
+        if (g_devs[idx].waiting_idle) {
+            int ready = grab_idle_gold(&g_devs[idx]);
+            if (ready < 0)
+                return -2;
+            if (ready > 0)
+                g_devs[idx].announced = 0;
+            return 1; /* this batch belonged to Android before the grab */
+        }
+
         int count = (int)(n / (ssize_t)sizeof(struct input_event));
         for (int i = 0; i < count; i++) {
             struct input_event *e = &evs[i];
@@ -1103,13 +1171,6 @@ int main(int argc, char **argv)
 
     const char *bridge = argv[1];
     int toggle = atoi(argv[2]);
-    /* A session with no way out is never started: the toggle key is the only
-     * thing that guarantees the user can hand the input back. */
-    if (toggle <= 0 || toggle > KEY_MAX) {
-        LOGE("refusing to grab without a valid toggle scancode (%d)", toggle);
-        return 2;
-    }
-
     /* Everything past the toggle is a keyword argument. Unknown ones are
      * ignored so a newer app can talk to an older helper built before they
      * existed. A malformed list is refused outright: silently dropping a bad
@@ -1126,7 +1187,24 @@ int main(int argc, char **argv)
                 LOGE("refusing invalid exclude argument: %s", argv[i] + 8);
                 return 2;
             }
+        } else if (strncmp(argv[i], "source=", 7) == 0) {
+            if (strcmp(argv[i] + 7, "gold") == 0)
+                g_source = SOURCE_GOLD;
+            else if (strcmp(argv[i] + 7, "combined") == 0)
+                g_source = SOURCE_COMBINED;
+            else if (strcmp(argv[i] + 7, "physical") == 0)
+                g_source = SOURCE_PHYSICAL;
+            else
+                return 2;
         }
+    }
+
+    /* Gold-only leaves touch, Android gestures and hardware buttons available.
+     * It can auto-enter without a binding; EOF, heartbeat and screen-off still
+     * release it. Taking physical touch always requires an escape key. */
+    if (toggle < 0 || toggle > KEY_MAX || (toggle == 0 && g_source != SOURCE_GOLD)) {
+        LOGE("refusing invalid toggle scancode (%d)", toggle);
+        return 2;
     }
 
     signal(SIGPIPE, SIG_IGN);
@@ -1149,7 +1227,8 @@ int main(int argc, char **argv)
     setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
 
     int grabbed = scan_devices();
-    if (grabbed <= 0) {
+    if ((grabbed <= 0 && !pending_gold()) ||
+            (g_source != SOURCE_PHYSICAL && !has_gold_output())) {
         LOGE("no grabbable input devices");
         send_bye(sock, IGRAB_BYE_ERROR);
         release_all();
@@ -1304,7 +1383,7 @@ int main(int argc, char **argv)
             if (g_devs[i].fd >= 0 && g_devs[i].grabbed)
                 alive++;
         }
-        if (alive == 0) {
+        if (alive == 0 && !pending_gold() && g_source != SOURCE_GOLD) {
             LOGI("all grabbed devices are gone; ending session");
             reason = IGRAB_BYE_ERROR;
             break;

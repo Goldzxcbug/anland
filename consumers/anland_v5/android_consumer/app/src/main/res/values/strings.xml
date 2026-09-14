@@ -55,7 +55,7 @@
     <string name="immersive_no_devices">Could not start immersive mode: no input device could be taken over</string>
     <string name="immersive_interrupted">Immersive mode ended; input returned to Android</string>
     <string name="immersive_entering_mode">Immersive mode on: %1$s</string>
-    <string name="immersive_bus_entering">Immersive mode on (Gold\'s keyboard): typed keys go to the desktop, touch and mouse stay with Android. Press %1$s again to leave.</string>
+
     <string name="immersive_gold_unknown">Could not check which devices Gold holds; starting without keeping any of them free</string>
     <string name="immersive_selection_invalid">The saved device selection is not valid; fix it in Immersive input settings</string>
     <string name="immersive_selection_filtered">Every selected device is held by Gold, so there is nothing left to take</string>
@@ -68,21 +68,21 @@
     <string name="section_immersive_inputs_source">Input source</string>
     <string name="section_immersive_inputs_direct">Event nodes to take</string>
     <string name="section_immersive_inputs_scope">What this covers</string>
-    <string name="immersive_inputs_use_bus">Use Gold\'s keyboard without grabbing devices</string>
+
     <string name="immersive_inputs_direct_blurb">Currently: Anland takes the physical event nodes itself, and Android cannot see them while it does. Requires root.</string>
-    <string name="immersive_inputs_bus_hint">Currently: Anland touches nothing. It only listens to the keys Gold\'s keyboard already delivers to this window.</string>
-    <string name="immersive_inputs_combined_hint">Currently: Anland takes the pointers and touch, and forwards the keys from Gold\'s keyboard as well. Gold keeps the keyboard itself.</string>
-    <string name="immersive_inputs_bus_scope">Gold must be running and Android must be able to see its keyboard. Only keyboard events that reach the front-most window are forwarded — touch, mouse, wheels, gestures, raw event nodes and the lock screen are not covered.</string>
+    <string name="immersive_inputs_bus_hint">Gold remaps the keyboard; Anland takes its output exclusively and sends it directly to the desktop.</string>
+    <string name="immersive_inputs_combined_hint">Anland takes touch and pointers together with Gold\'s remapped keyboard output.</string>
+    <string name="immersive_inputs_bus_scope">Requires root and the Gold Keyboard Remaps module. All remapped keyboard keys, including Meta and system shortcuts, go to the desktop during the session. Touch, mouse and Android gestures stay available. Leaving the app or locking the screen releases the keyboard.</string>
     <string name="immersive_inputs_direct_hint">Only the devices ticked below are taken. Devices Gold has confirmed it holds are shown but cannot be selected.</string>
     <string name="immersive_inputs_auto">Choose devices automatically</string>
     <string-array name="immersive_source_options">
         <item>Anland takes the devices (direct)</item>
-        <item>Use the Gold Keyboard Remaps module\'s keyboard (takes no device)</item>
-        <item>Direct + the Gold Keyboard Remaps module\'s keyboard</item>
+        <item>Gold keyboard directly to desktop</item>
+        <item>Direct touch and pointers + Gold keyboard</item>
     </string-array>
     <string name="immersive_source_unavailable">Requires the Gold Keyboard Remaps module, which is not installed or not running</string>
     <string name="immersive_auto_enter">Automatically enter immersive mode</string>
-    <string name="immersive_auto_enter_hint">This source takes no device, so it can start on its own when the app comes up -- without a message, and without changing anything on screen. Touch and Android gestures keep working.</string>
+    <string name="immersive_auto_enter_hint">Automatically send the Gold keyboard to the desktop when this app returns to the foreground. Touch and Android gestures stay available.</string>
     <string name="immersive_inputs_loading">Checking devices…</string>
     <string name="immersive_inputs_found">Gold’s occupied devices are shown but cannot be selected.</string>
     <string name="immersive_inputs_unknown">Could not check which devices Gold holds, so none are marked as taken. Nothing here is known to be free.</string>

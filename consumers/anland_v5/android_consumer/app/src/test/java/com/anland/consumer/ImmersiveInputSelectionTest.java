@@ -43,7 +43,7 @@ public class ImmersiveInputSelectionTest {
     @Test
     public void eachHalfOfTheCombinedSourceIsStillItsOwnSource() {
         // Direct takes devices and leaves the keyboard to ordinary forwarding;
-        // the bus does the opposite and takes nothing.
+        // Gold-only takes the virtual output and leaves physical nodes alone.
         assertTrue(ImmersiveInputSource.DIRECT_EVENT_NODES.takesDevices());
         assertFalse(ImmersiveInputSource.DIRECT_EVENT_NODES.listensToGoldKeyboard());
 
@@ -122,6 +122,16 @@ public class ImmersiveInputSelectionTest {
         assertEquals(Collections.<String>emptySet(), result.excludedNodes);
         assertFalse(result.allFiltered);
         assertFalse(result.invalid);
+    }
+
+    @Test
+    public void eachSourceSelectsItsNativeCaptureScope() {
+        assertEquals("source=physical", ImmersiveInputSource.DIRECT_EVENT_NODES.helperArgument());
+        assertEquals("source=gold", ImmersiveInputSource.EXISTING_UINPUT_BUS.helperArgument());
+        assertEquals("source=combined", ImmersiveInputSource.DIRECT_PLUS_GOLD_KEYBOARD.helperArgument());
+        assertTrue(ImmersiveInputSource.EXISTING_UINPUT_BUS.allowsUnboundToggle());
+        assertFalse(ImmersiveInputSource.DIRECT_EVENT_NODES.allowsUnboundToggle());
+        assertFalse(ImmersiveInputSource.DIRECT_PLUS_GOLD_KEYBOARD.allowsUnboundToggle());
     }
 
     // ---- wire arguments ---------------------------------------------------

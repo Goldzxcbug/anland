@@ -1604,8 +1604,7 @@ public class MainActivity extends Activity
         // toggle never has to wait on an su round trip to know what Gold holds.
         if (immersive != null) {
             immersive.refreshGoldStatus();
-            // Only the source that takes no devices may do this, and only when
-            // the user asked for it; the controller decides.
+            // Gold-only can auto-enter while touch and Android gestures stay available.
             immersive.enterAutomatically();
         }
 
@@ -2321,9 +2320,9 @@ public class MainActivity extends Activity
             return true;
         if (handleSoftKeyboardToggleKey(event))
             return true;
-        // Android's own keys are settled before the Gold bus sees anything, and
-        // the bus before the generic forwarding below.
-        return immersive != null && immersive.routeBusKey(event);
+        // Discard Android events queued just before the helper's exclusive grab.
+        return immersive != null && immersive.ownsGoldKeyboard()
+                && GoldKeyboard.matches(event.getDevice());
     }
 
     @Override

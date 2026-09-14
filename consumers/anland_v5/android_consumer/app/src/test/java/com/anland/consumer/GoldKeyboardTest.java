@@ -8,28 +8,28 @@ import android.view.InputDevice;
 import org.junit.Test;
 
 /**
- * The device matcher. It decides whether a {@code KeyEvent} belongs to Gold, so
+ * The device matcher used to enable Gold input in Settings, so
  * getting it wrong in either direction is costly: too loose and Anland forwards
  * a stranger's keystrokes, too tight and the feature silently never fires.
  */
-public class GoldUinputBusSessionTest {
+public class GoldKeyboardTest {
     private static final String NAME = "Gold Keyboardremaps event12";
     // Read from the class rather than repeated here: what is under test is the
     // matcher, and a second copy of the ids would only be one more place to
     // forget when fn_remap.c changes.
-    private static final int VENDOR = GoldUinputBusSession.GOLD_VENDOR;
-    private static final int PRODUCT = GoldUinputBusSession.GOLD_PRODUCT;
+    private static final int VENDOR = GoldKeyboard.GOLD_VENDOR;
+    private static final int PRODUCT = GoldKeyboard.GOLD_PRODUCT;
     private static final int KEYBOARD = InputDevice.SOURCE_KEYBOARD;
 
     @Test
     public void acceptsTheDeviceFnRemapCreates() {
-        assertTrue(GoldUinputBusSession.matchesGoldKeyboard(
+        assertTrue(GoldKeyboard.matchesGoldKeyboard(
                 true, NAME, VENDOR, PRODUCT, KEYBOARD));
     }
 
     @Test
     public void acceptsTheBarePrefixWithoutANodeSuffix() {
-        assertTrue(GoldUinputBusSession.matchesGoldKeyboard(
+        assertTrue(GoldKeyboard.matchesGoldKeyboard(
                 true, "Gold Keyboardremaps", VENDOR, PRODUCT, KEYBOARD));
     }
 
@@ -37,39 +37,39 @@ public class GoldUinputBusSessionTest {
     public void acceptsAKeyboardThatAlsoReportsOtherSources() {
         int keyboardAndDpad = KEYBOARD | InputDevice.SOURCE_DPAD;
 
-        assertTrue(GoldUinputBusSession.matchesGoldKeyboard(
+        assertTrue(GoldKeyboard.matchesGoldKeyboard(
                 true, NAME, VENDOR, PRODUCT, keyboardAndDpad));
     }
 
     @Test
     public void rejectsAnythingThatIsNotAKeyboard() {
         // Same name and ids, but the kernel does not describe it as a keyboard.
-        assertFalse(GoldUinputBusSession.matchesGoldKeyboard(
+        assertFalse(GoldKeyboard.matchesGoldKeyboard(
                 true, NAME, VENDOR, PRODUCT, InputDevice.SOURCE_MOUSE));
-        assertFalse(GoldUinputBusSession.matchesGoldKeyboard(
+        assertFalse(GoldKeyboard.matchesGoldKeyboard(
                 true, NAME, VENDOR, PRODUCT, 0));
     }
 
     @Test
     public void rejectsThePhysicalKeyboardGoldRemaps() {
         // The physical device is product 0x3869; only the virtual one is ours.
-        assertFalse(GoldUinputBusSession.matchesGoldKeyboard(
+        assertFalse(GoldKeyboard.matchesGoldKeyboard(
                 true, "Gold Keyboardremaps", VENDOR, 0x3869, KEYBOARD));
-        assertFalse(GoldUinputBusSession.matchesGoldKeyboard(
+        assertFalse(GoldKeyboard.matchesGoldKeyboard(
                 true, "Some Other Keyboard", VENDOR, PRODUCT, KEYBOARD));
     }
 
     @Test
     public void rejectsWhenThereIsNoDeviceAtAll() {
-        assertFalse(GoldUinputBusSession.matchesGoldKeyboard(
+        assertFalse(GoldKeyboard.matchesGoldKeyboard(
                 false, NAME, VENDOR, PRODUCT, KEYBOARD));
-        assertFalse(GoldUinputBusSession.matchesGoldKeyboard(
+        assertFalse(GoldKeyboard.matchesGoldKeyboard(
                 true, null, VENDOR, PRODUCT, KEYBOARD));
     }
 
     @Test
     public void theNameMustStartWithThePrefixNotMerelyContainIt() {
-        assertFalse(GoldUinputBusSession.matchesGoldKeyboard(
+        assertFalse(GoldKeyboard.matchesGoldKeyboard(
                 true, "Not Gold Keyboardremaps", VENDOR, PRODUCT, KEYBOARD));
     }
 
@@ -80,7 +80,7 @@ public class GoldUinputBusSessionTest {
      */
     @Test
     public void virtualDevicesAreNotRejectedForBeingVirtual() {
-        assertTrue(GoldUinputBusSession.matchesGoldKeyboard(
+        assertTrue(GoldKeyboard.matchesGoldKeyboard(
                 true, NAME, VENDOR, PRODUCT, KEYBOARD));
     }
 }

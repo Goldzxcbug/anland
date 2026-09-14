@@ -1,14 +1,9 @@
 package com.anland.consumer;
 
-import android.content.BroadcastReceiver;
 import android.content.Context;
-import android.content.Intent;
-import android.content.IntentFilter;
 import android.content.SharedPreferences;
-import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
-import android.util.Log;
 import android.view.KeyEvent;
 import android.widget.Toast;
 
@@ -20,19 +15,10 @@ import java.util.Set;
  * Owns immersive input: which source is configured, which one is running, and
  * making sure only one of them ever is.
  *
- * <p>{@link ImmersiveMode} takes the physical nodes through the root helper;
- * {@link GoldUinputBusSession} takes nothing and only forwards what Gold's own
- * virtual keyboard already delivers. They contend for nothing, so a source may
- * ask for both — the direct half ends up with pointers and touch (Gold claims
- * every keyboard) and the bus half carries the keys. Which halves a source asks
- * for is {@link ImmersiveInputSource}'s business, not this class's.
- *
- * <p>One key press starts and ends whatever the source asked for, together. Two
- * keys for two halves would let a user arrive in a session that is missing the
- * half they thought they had.
+ * <p>Every source uses one root-helper session. Gold output is read as raw
+ * evdev events after remapping, so Android's shortcut policy is not involved.
  */
 final class ImmersiveInputController {
-    private static final String TAG = "AnlandImmersiveInput";
     private static final String PREFS_NAME = "anland_settings";
 
     /**
@@ -45,38 +31,17 @@ final class ImmersiveInputController {
 
     private final Context ctx;
     private final ImmersiveMode direct;
-    private final GoldUinputBusSession bus;
     private final GoldStatusCache goldStatus;
     private final SuCommand.CommandRunner runner = new SuCommand.SuRunner();
     private final Handler main = new Handler(Looper.getMainLooper());
 
     private ImmersiveInputSource runningSource = ImmersiveInputSource.DIRECT_EVENT_NODES;
-    private boolean screenOffRegistered;
-    /** Whether this session's entry has been announced and its exit still owes one. */
-    private boolean sessionAnnounced;
 
     ImmersiveInputController(ImmersiveMode.Host host) {
         this.ctx = host.context();
         this.direct = new ImmersiveMode(host);
         this.goldStatus = new GoldStatusCache(new GoldInputStatusClient(new GoldController(
                 new SuCommand.SuRunner(), GoldController.DEFAULT_CONTROLLER, new SecureRandom())));
-        this.bus = new GoldUinputBusSession(ctx, new GoldUinputBusSession.Host() {
-            @Override
-            public void sendKey(int action, int evdev) {
-                host.sendKey(action, evdev);
-            }
-
-            @Override
-            public void onBusActiveChanged(boolean active) {
-                // The bus has no grab, but the session still owns the keyboard:
-                // the screen going dark has to end it just as it does for direct.
-                if (active)
-                    registerScreenOff();
-                else
-                    unregisterScreenOff();
-                host.onImmersiveChanged(active);
-            }
-        });
 
         // A flag left behind by a crash would keep Gold on the Anland profile
         // with nothing running to ever take it off again.
@@ -86,10 +51,8 @@ final class ImmersiveInputController {
     /**
      * Tells Gold to use the Anland profile, or to stop.
      *
-     * <p>Runs off the main thread on purpose. Bus mode takes no device at all,
-     * and an {@code su} round trip on the toggle would put back exactly the
-     * delay this feature exists to avoid. Gold notices the file on its own
-     * heartbeat, so arriving a moment late costs nothing.
+     * <p>Runs off the main thread. Gold switches mapping profiles on its own
+     * heartbeat while retaining its physical grabs and virtual output nodes.
      */
     private void setAnlandProfileRequest(final boolean wanted) {
         synchronized (profileRequestLock) {
@@ -146,17 +109,6 @@ final class ImmersiveInputController {
      */
     void onSessionActiveChanged(boolean active) {
         setAnlandProfileRequest(active);
-        if (active || !sessionAnnounced)
-            return;
-        sessionAnnounced = false;
-        // The device half announces its own endings, and it knows more about
-        // them than this class does: a session that failed has a reason worth
-        // naming, and "immersive mode off" is not it. Only when no device half
-        // was part of the session is the ending ours to announce -- otherwise
-        // the user gets this and ImmersiveMode's message, one on top of the
-        // other, for a single key press.
-        if (!runningSource.takesDevices())
-            toast(R.string.immersive_exited);
     }
 
     /** Whether the app enters immersive mode on its own when it comes back up. */
@@ -165,12 +117,8 @@ final class ImmersiveInputController {
     /**
      * Enters immersive mode without a key press and without saying so.
      *
-     * <p>Offered only for the source that takes no devices, and deliberately so:
-     * a session that grabs the touchscreen the moment the app appears would take
-     * the device away from someone who never asked for it. This one changes
-     * nothing they can see, so arriving unannounced is helpful rather than
-     * alarming. It is silent at both ends -- a message on every resume and every
-     * pause would be noise, not information.
+     * <p>Offered only for Gold keyboards. Touch, Android gestures and hardware
+     * buttons stay available, and the normal pause/lock teardown ends the grab.
      *
      * <p>Called on resume. Leaving and coming back is what re-arms it; the
      * ordinary lifecycle teardown already ends the session on the way out.
@@ -192,9 +140,7 @@ final class ImmersiveInputController {
         if (isActive())
             return;
         runningSource = current;
-        // Nothing was announced on the way in, so nothing is owed on the way out.
-        sessionAnnounced = false;
-        bus.start();
+        direct.startWith(null, null, current);
     }
 
     ImmersiveInputSource source() {
@@ -202,7 +148,11 @@ final class ImmersiveInputController {
     }
 
     boolean isActive() {
-        return direct.isActive() || bus.isActive();
+        return direct.isActive();
+    }
+
+    boolean ownsGoldKeyboard() {
+        return isActive() && runningSource.listensToGoldKeyboard();
     }
 
     // ---- key routing -------------------------------------------------------
@@ -237,10 +187,7 @@ final class ImmersiveInputController {
     }
 
     /**
-     * Starts whichever halves the source asks for, under the one key press that
-     * asked for them. A source that wants devices and cannot have them starts
-     * neither half: a session that quietly came up short is worse than one that
-     * said why it did not start.
+     * Start one helper with the selected source, then announce the session.
      */
     private void startSession(ImmersiveInputSource source) {
         // Checked again here, not just in the picker: the module can be removed
@@ -250,15 +197,10 @@ final class ImmersiveInputController {
             toast(R.string.immersive_source_unavailable);
             return;
         }
-        if (source.takesDevices() && !startDirectNow())
+        boolean started = source.takesDevices() ? startDirectNow(source)
+                : direct.startWith(null, null, source);
+        if (!started)
             return;
-        if (source.listensToGoldKeyboard())
-            bus.start();
-
-        // One press, one message, saying which source it produced. Announcing
-        // it here rather than in each half is what keeps the combined source
-        // from stacking two toasts the user has to read past each other.
-        sessionAnnounced = true;
         toast(getString(R.string.immersive_entering_mode, sourceLabel(source)));
     }
 
@@ -277,19 +219,6 @@ final class ImmersiveInputController {
         // Leaves the toggle's own release swallowed, so the key that ended the
         // session does not then reach the desktop.
         direct.requestStop();
-        bus.stop();
-    }
-
-    /**
-     * Offers a key to the bus session.
-     *
-     * <p>Called for every key on every ingress, not only while a session runs:
-     * after one ends, a key it force-released can still send a late UP, and that
-     * one has to be swallowed rather than forwarded. The session's own early-out
-     * keeps this free for anyone who never turns the feature on.
-     */
-    boolean routeBusKey(KeyEvent event) {
-        return bus.handleKeyEvent(event);
     }
 
     // ---- direct start -------------------------------------------------------
@@ -304,7 +233,7 @@ final class ImmersiveInputController {
      * on. The cache is refilled in the background instead, so the next press has
      * an answer without ever having paid for one here.
      */
-    private boolean startDirectNow() {
+    private boolean startDirectNow(ImmersiveInputSource source) {
         SharedPreferences prefs = prefs();
         boolean automatic = ImmersiveInputSource.isAutomatic(prefs);
         Set<String> saved = ImmersiveInputSource.savedNodes(prefs);
@@ -335,18 +264,22 @@ final class ImmersiveInputController {
             toast(R.string.immersive_selection_invalid);
             return false;
         }
-        if (selection.allFiltered) {
+        if (selection.allFiltered && !source.listensToGoldKeyboard()) {
             // Every saved node is Gold's. Falling back to automatic here would
             // quietly take nodes the user explicitly did not choose.
             toast(R.string.immersive_selection_filtered);
             return false;
         }
-        direct.startWith(selection.selectedNodes, selection.excludedNodes);
+        // If every selected physical node belongs to Gold, the combined source
+        // can still take Gold output. Keep the saved nonempty selection so the
+        // helper does not interpret it as permission to auto-grab other nodes.
+        boolean started = direct.startWith(selection.allFiltered ? saved : selection.selectedNodes,
+                selection.excludedNodes, source);
 
         // Gold's answer for the next press, and for the settings page. Started
         // after the session is up so it cannot delay it.
         refreshGoldStatus();
-        return true;
+        return started;
     }
 
     /** Whether the occupancy answer is missing or cannot be trusted. */
@@ -387,44 +320,11 @@ final class ImmersiveInputController {
      */
     void stop() {
         direct.stop();
-        bus.stop();
         // Warm the occupancy answer for the next press. Left to the resume
         // refresh, a session started more than a few seconds later finds the
         // cache cold, drops Gold's exclusions, and can take nodes Gold is
         // holding -- the contention the selection design exists to avoid.
         refreshGoldStatus();
-    }
-
-    private final BroadcastReceiver screenOffReceiver = new BroadcastReceiver() {
-        @Override
-        public void onReceive(Context context, Intent intent) {
-            if (Intent.ACTION_SCREEN_OFF.equals(intent.getAction())) {
-                Log.i(TAG, "screen off; leaving the uinput bus session");
-                stop();
-            }
-        }
-    };
-
-    private void registerScreenOff() {
-        if (screenOffRegistered)
-            return;
-        IntentFilter filter = new IntentFilter(Intent.ACTION_SCREEN_OFF);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
-            ctx.registerReceiver(screenOffReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
-        else
-            ctx.registerReceiver(screenOffReceiver, filter);
-        screenOffRegistered = true;
-    }
-
-    private void unregisterScreenOff() {
-        if (!screenOffRegistered)
-            return;
-        screenOffRegistered = false;
-        try {
-            ctx.unregisterReceiver(screenOffReceiver);
-        } catch (IllegalArgumentException ignored) {
-            // The activity auto-unregisters its receivers on destroy.
-        }
     }
 
     private SharedPreferences prefs() {

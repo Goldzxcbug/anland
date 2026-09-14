@@ -50,7 +50,7 @@
     <string name="immersive_no_devices">无法进入沉浸模式：没有可接管的输入设备</string>
     <string name="immersive_interrupted">沉浸模式已结束，输入已交还安卓</string>
     <string name="immersive_entering_mode">已进入沉浸模式：%1$s</string>
-    <string name="immersive_bus_entering">已进入沉浸模式（用 Gold 的键盘）：键盘输入转发到桌面，触摸和鼠标仍归安卓。再按一次 %1$s 退出。</string>
+
     <string name="immersive_gold_unknown">无法确认 Gold 占用了哪些设备，将在不去避让的情况下启动</string>
     <string name="immersive_selection_invalid">已保存的设备选择无效，请在“沉浸输入”设置中修正</string>
     <string name="immersive_selection_filtered">所选设备全部由 Gold 占用，没有可接管的设备</string>
@@ -62,21 +62,21 @@
     <string name="section_immersive_inputs_source">输入来源</string>
     <string name="section_immersive_inputs_direct">要接管的 event 节点</string>
     <string name="section_immersive_inputs_scope">覆盖范围</string>
-    <string name="immersive_inputs_use_bus">用 Gold 的键盘，不接管设备</string>
+
     <string name="immersive_inputs_direct_blurb">当前：Anland 自己接管物理 event 节点，接管期间安卓看不到这些设备。需要 root。</string>
-    <string name="immersive_inputs_bus_hint">当前：Anland 不碰任何设备，只旁听 Gold 键盘投递到本窗口的按键。</string>
-    <string name="immersive_inputs_combined_hint">当前：Anland 接管指针与触摸，同时额外转发 Gold 键盘的按键；键盘本身仍由 Gold 持有。</string>
-    <string name="immersive_inputs_bus_scope">Gold 必须正在运行，且安卓能发现它的键盘。只有到达前台窗口的键盘事件会被转发——触摸、鼠标、滚轮、手势、原始 event 节点和锁屏均不覆盖。</string>
+    <string name="immersive_inputs_bus_hint">Gold 按配置重映射键盘，Anland 独占其输出并直接送入桌面。</string>
+    <string name="immersive_inputs_combined_hint">Anland 同时接管触摸、指针和 Gold 重映射后的键盘输出。</string>
+    <string name="immersive_inputs_bus_scope">需要 root 和 Gold Keyboard Remaps 模块。沉浸期间，重映射后的全部键盘按键（包括 Meta 和系统快捷键）直接送入桌面。触摸、鼠标和安卓手势仍可使用；离开 App 或锁屏时归还键盘。</string>
     <string name="immersive_inputs_direct_hint">只有下面勾选的设备会被接管。Gold 已确认占用的设备会显示，但无法选择。</string>
     <string name="immersive_inputs_auto">自动选择设备</string>
     <string-array name="immersive_source_options">
         <item>Anland 接管设备（直连）</item>
-        <item>使用 Gold Keyboard Remaps 模块的键盘（不接管设备）</item>
-        <item>直连 + Gold Keyboard Remaps 模块键盘</item>
+        <item>Gold 键盘直连桌面</item>
+        <item>触摸、指针直连 + Gold 键盘</item>
     </string-array>
     <string name="immersive_source_unavailable">需要 Gold Keyboard Remaps 模块，当前未安装或未运行</string>
     <string name="immersive_auto_enter">自动进入沉浸模式</string>
-    <string name="immersive_auto_enter_hint">这个来源不接管任何设备，所以可以在 App 回到前台时自动启用——不弹提示，屏幕上也不会有任何变化。触摸和安卓手势照常。</string>
+    <string name="immersive_auto_enter_hint">App 回到前台时自动将 Gold 键盘交给桌面，触摸和安卓手势仍可使用。</string>
     <string name="immersive_inputs_loading">正在检查设备…</string>
     <string name="immersive_inputs_found">Gold 占用的设备会显示，但无法选择。</string>
     <string name="immersive_inputs_unknown">无法确认 Gold 占用了哪些设备，因此没有标记任何设备为已占用。这里没有任何设备可以确定是空闲的。</string>
