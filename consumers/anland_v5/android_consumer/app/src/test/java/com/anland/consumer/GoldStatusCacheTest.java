@@ -111,4 +111,13 @@ public class GoldStatusCacheTest {
 
         assertEquals(GoldInputStatusClient.State.ABSENT, cache.fresh(NOW).state);
     }
+
+    @Test
+    public void anAbsentAnswerDoesNotBecomeUnknownWhenItAges() {
+        GoldStatusCache cache = new GoldStatusCache(neverQueried(new AtomicInteger()));
+        cache.store(GoldInputStatusClient.Result.absent(), NOW, NOW);
+
+        assertEquals(GoldInputStatusClient.State.ABSENT,
+                cache.fresh(NOW + GoldStatusCache.MAX_AGE_MS + 1).state);
+    }
 }

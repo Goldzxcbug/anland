@@ -320,13 +320,11 @@ final class ImmersiveInputController {
         Set<String> occupied = null;
         if (cached != null && cached.state == GoldInputStatusClient.State.VERIFIED) {
             occupied = new LinkedHashSet<>(cached.snapshot.claimed);
-        } else {
-            // Either Gold answered and could not be read, or nothing has asked
-            // it recently and the answer has aged out. The two are the same
-            // thing to this decision -- no exclusions -- and saying so matters
-            // more for the aged-out case than the other: it is the one that
-            // happens in ordinary use, several seconds after the last refresh,
-            // and it used to pass in silence.
+        } else if (shouldWarnGoldUnknown(cached)) {
+            // No cached answer, or an unreadable one, means Gold may still be
+            // holding nodes, so warn before starting without exclusions. An
+            // ABSENT answer is different: the controller proved that Gold is
+            // not installed, so there is nothing to warn about.
             toast(R.string.immersive_gold_unknown);
         }
 
@@ -349,6 +347,11 @@ final class ImmersiveInputController {
         // after the session is up so it cannot delay it.
         refreshGoldStatus();
         return true;
+    }
+
+    /** Whether the occupancy answer is missing or cannot be trusted. */
+    static boolean shouldWarnGoldUnknown(GoldInputStatusClient.Result result) {
+        return result == null || result.state == GoldInputStatusClient.State.UNKNOWN;
     }
 
     /**

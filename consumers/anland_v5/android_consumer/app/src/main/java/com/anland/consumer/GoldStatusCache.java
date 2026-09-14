@@ -17,9 +17,9 @@ package com.anland.consumer;
  */
 final class GoldStatusCache {
     /**
-     * How long an answer stays usable. Long enough that a press during normal use
-     * always finds one, short enough that a session started after Gold changed
-     * what it holds is working from something close to current.
+     * How long a verified or unknown answer stays usable. An ABSENT answer is
+     * definitive for this purpose: until a later refresh proves otherwise, Gold
+     * cannot be holding any nodes if its module is not installed.
      */
     static final long MAX_AGE_MS = 5000L;
 
@@ -40,7 +40,11 @@ final class GoldStatusCache {
      * on a key press.
      */
     GoldInputStatusClient.Result fresh(long nowMs) {
-        if (cached == null || !isFresh(cachedAt, nowMs, MAX_AGE_MS))
+        if (cached == null)
+            return null;
+        if (cached.state == GoldInputStatusClient.State.ABSENT)
+            return cached;
+        if (!isFresh(cachedAt, nowMs, MAX_AGE_MS))
             return null;
         return cached;
     }
@@ -72,6 +76,11 @@ final class GoldStatusCache {
      * own — a wedged {@code su} that finally returned — is not worth keeping.
      */
     void store(GoldInputStatusClient.Result result, long queriedAtMs, long nowMs) {
+        if (result != null && result.state == GoldInputStatusClient.State.ABSENT) {
+            cached = result;
+            cachedAt = nowMs;
+            return;
+        }
         if (!isFresh(queriedAtMs, nowMs, MAX_AGE_MS))
             return;
         cached = result;
