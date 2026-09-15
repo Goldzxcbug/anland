@@ -2,11 +2,14 @@
 # Syntax: ksud sepolicy patch — space separated, no colons (the colon form is
 # silently dropped!)
 type anland_host_service service_manager_type
-allow untrusted_app_27 anland_host_service service_manager find
+allow untrusted_app_29 anland_host_service service_manager find
+allow untrusted_app anland_host_service service_manager find
 allow shell anland_host_service service_manager find
 # APP ↔ daemon binder calls (Surface transfer / linkToDeath)
-allow untrusted_app_27 ksu binder { call transfer }
-allow ksu untrusted_app_27 binder { call transfer }
+allow untrusted_app_29 ksu binder { call transfer }
+allow untrusted_app ksu binder { call transfer }
+allow ksu untrusted_app_29 binder { call transfer }
+allow ksu untrusted_app binder { call transfer }
 
 # ---- awl_daemon: waylandbridge 守护进程自有域（原先跑在 ksu 域里，规则越收越宽
 #      会污染 su 域；语法同上：ksud sepolicy —— 空格分隔、无冒号）----
@@ -27,14 +30,23 @@ allow servicemanager awl_daemon binder { call transfer }
 allow servicemanager awl_daemon dir search
 allow servicemanager awl_daemon file { getattr open read }
 allow servicemanager awl_daemon process getattr
-# APK（targetSdk29 → untrusted_app_27）与普通 app 域 ↔ daemon：binder 调用 + Surface/dmabuf fd
-allow untrusted_app_27 awl_daemon binder { call transfer }
-allow awl_daemon untrusted_app_27 binder { call transfer }
-allow untrusted_app_27 awl_daemon fd use
-allow awl_daemon untrusted_app_27 fd use
+# APK（targetSdk29 → untrusted_app_29；targetSdk 29 是刻意的：pre-Q 应用同进程只允许
+# 一个 Activity resumed，分屏/自由窗口下其余宿主 Activity 会被 pause → detach 停渲染）
+# 与第三方消费 app 可能所在的 untrusted_app 域 ↔ daemon：
+# binder 调用 + Surface/dmabuf fd
+allow untrusted_app_29 awl_daemon binder { call transfer }
+allow untrusted_app awl_daemon binder { call transfer }
+allow awl_daemon untrusted_app_29 binder { call transfer }
+allow awl_daemon untrusted_app binder { call transfer }
+allow untrusted_app_29 awl_daemon fd use
+allow untrusted_app awl_daemon fd use
+allow awl_daemon untrusted_app_29 fd use
+allow awl_daemon untrusted_app fd use
 # wayland socket 客户端（app 域）↔ daemon
-allow untrusted_app_27 awl_daemon unix_stream_socket { read write }
-allow awl_daemon untrusted_app_27 unix_stream_socket { read write getopt }
+allow untrusted_app_29 awl_daemon unix_stream_socket { read write }
+allow untrusted_app awl_daemon unix_stream_socket { read write }
+allow awl_daemon untrusted_app_29 unix_stream_socket { read write getopt }
+allow awl_daemon untrusted_app unix_stream_socket { read write getopt }
 # am start 子进程（留在本域）→ ActivityManager
 allow awl_daemon activity_service service_manager find
 allow awl_daemon system_server binder { call transfer }
@@ -89,5 +101,7 @@ allow awl_daemon awl_daemon dir search
 allow awl_daemon awl_daemon file { getattr read open }
 allow awl_daemon droidspacesd dir search
 allow awl_daemon droidspacesd file { getattr read open }
-allow awl_daemon untrusted_app_27 dir search
-allow awl_daemon untrusted_app_27 file { getattr read open }
+allow awl_daemon untrusted_app_29 dir search
+allow awl_daemon untrusted_app dir search
+allow awl_daemon untrusted_app_29 file { getattr read open }
+allow awl_daemon untrusted_app file { getattr read open }

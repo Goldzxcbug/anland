@@ -26,8 +26,18 @@
  *   - APP abnormal death: AIBinder_linkToDeath(death token) → kernel
  *     callback auto-detaches all windows of that process (minimize
  *     semantics, wayland window kept alive)
- *   - window_destroyed (client quit on its own) → ctrl/broadcast tells
- *     the Activity to finish
+ *   - window_destroyed (client quit on its own) → immediate forced full
+ *     detach + close notification: C_CLOSE over ctrl to an ATTACHED
+ *     (active) holder → it finishes. A PAUSED holder is fully detached
+ *     already (every detach drops every binder of the window, ctrl
+ *     included) and is deliberately NOT chased: it keeps its last frame
+ *     and exits on its own at resume, when the re-attach SURFACE is
+ *     rejected (no such window → rc -1 → finish). The WINDOW_GONE
+ *     broadcast stays as the host-APK-only fallback for a failed ctrl
+ *     send. Note the ctrl object is owned by the Activity: the daemon
+ *     releasing its proxy is invisible to the Activity (death recipients
+ *     fire only on process death), so an explicit C_CLOSE is the only
+ *     daemon → active-holder close signal.
  *   - window events (T_SUBSCRIBE): created/destroyed/attached/detached
  *     pushed to subscriber apps over their own binder; unauthenticated
  *     apps receive only their own uid's windows; a paused subscriber is
@@ -251,7 +261,9 @@ static bool any_attached_locked(void) {
 static void evt_dispatch(uid_t owner, uint64_t id, transaction_code_t code, const char* title);
 
 /* Full detach (minimize semantics: wayland window kept alive, render
- * resources/control channel fully torn down).
+ * resources/control channel fully torn down — there is only ONE kind of
+ * detach: every binder of the window is dropped, re-attach re-sends all of
+ * them with SURFACE).
  * pause / evict / process death / window destroy all take this path.
  * Order: renderer teardown (lock-free, join outside the lock) → state
  * reset → focus-loss event outside the lock (awl_window_set_activated
@@ -566,8 +578,13 @@ static void run_am(const char* fmt, ...) {
         execl("/system/bin/sh", "sh", "-c", cmd, (char*)NULL);
         _exit(127);
     }
-    int st;
-    waitpid(pid, &st, 0);
+    int st = 0;
+    if (waitpid(pid, &st, 0) < 0)
+        LOGE("am: waitpid: %s", strerror(errno));
+    else if (!WIFEXITED(st) || WEXITSTATUS(st) != 0)
+        /* stdout/stderr go to /dev/null — the exit status is the only trace
+         * of a failed am (SELinux, missing receiver, dead system_server) */
+        LOGE("am: exit=%d for '%s'", WIFEXITED(st) ? WEXITSTATUS(st) : -1, cmd);
 }
 
 /* title → shell single-quote safe */
