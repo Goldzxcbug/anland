@@ -118,6 +118,23 @@ export WAYLAND_DISPLAY=wayland-anland
 export ANLAND_WM_SOCK="${ANLAND_WM_SOCK:-$ANLAND_RUNTIME_DIR/anland-wm.sock}"
 printf 'XDG_RUNTIME_DIR=%s\nWAYLAND_DISPLAY=%s\nDBUS_SESSION_BUS_ADDRESS=%s\n' \
        "$RT" "$WAYLAND_DISPLAY" "${DBUS_SESSION_BUS_ADDRESS:-unix:path=$RT/bus}" > "$ENVF"
+# app PATH: ~/.local/bin first. Login shells have it (~/.profile); the systemd
+# user manager's default PATH does not, and apps launched through
+# `systemd-run --user` (anland-shell) take theirs from the manager. It must
+# be there so glycin's `bwrap` lookup finds the fixed bubblewrap, and so this
+# session's own `Xwayland` launch resolves to the patched build — both are
+# installed there by setupanlandx.sh (patches/bubblewrap/, patches/xwayland/);
+# it is also where the user's own tools live. Exported below so this script
+# itself resolves them the same way. Left in place on exit — it stays valid,
+# unlike DISPLAY/WAYLAND_DISPLAY.
+MGR_PATH=$(systemctl --user show-environment 2>/dev/null | sed -n 's/^PATH=//p')
+: "${MGR_PATH:=${PATH:-/usr/local/bin:/usr/bin:/bin}}"
+case ":$MGR_PATH:" in
+    *":$HOME/.local/bin:"*) APP_PATH=$MGR_PATH ;;
+    *)                      APP_PATH="$HOME/.local/bin:$MGR_PATH" ;;
+esac
+printf 'PATH=%s\n' "$APP_PATH" >> "$ENVF"
+export PATH="$APP_PATH"
 # audio: the host PulseAudio socket (module pulse/) — libpulse also reaches it
 # via ~/.config/pulse/client.conf (written by setupanlandx.sh); publishing it
 # here covers env-driven clients too. Socket is absent when the host daemon
@@ -126,11 +143,18 @@ if [ -S "$ANLAND_RUNTIME_DIR/pulse.sock" ]; then
     printf 'PULSE_SERVER=unix:%s\n' "$ANLAND_RUNTIME_DIR/pulse.sock" >> "$ENVF"
 fi
 
-# display number handshake: Xwayland writes "N\n" to fd 3 once it listens
+# display number handshake: Xwayland writes "N\n" to fd 3 once it listens.
+# Resolved through the session PATH above: the patched ~/.local/bin build
+# (kgsl/turnip glamor fixes) wins when setupanlandx.sh installed it, else
+# the distro binary.
+XWL_BIN=$(command -v Xwayland) || {
+    echo "anland-session: no Xwayland in PATH — run setupanlandx.sh" >&2
+    exit 1
+}
 FIFO=$(mktemp -u "${TMPDIR:-/tmp}/anlandx.XXXXXX")
 mkfifo -m 600 "$FIFO" || exit 1
 # shellcheck disable=SC2086  # ANLAND_XWAYLAND_ARGS is a word list by design
-Xwayland -rootless -noreset -displayfd 3 ${ANLAND_XWAYLAND_ARGS:-} 3>"$FIFO" &
+"$XWL_BIN" -rootless -noreset -displayfd 3 ${ANLAND_XWAYLAND_ARGS:-} 3>"$FIFO" &
 XPID=$!
 N=
 read -r -t 30 N < "$FIFO"
@@ -142,7 +166,7 @@ fi
 
 export DISPLAY=":$N"
 printf '%s\n' "$DISPLAY" > "$STATE"
-echo "anland-session: Xwayland pid $XPID on $DISPLAY → $STATE; wm socket $ANLAND_WM_SOCK"
+echo "anland-session: Xwayland pid $XPID ($XWL_BIN) on $DISPLAY → $STATE; wm socket $ANLAND_WM_SOCK"
 echo "anland-session: app env → $ENVF (XDG_RUNTIME_DIR=$RT WAYLAND_DISPLAY=$WAYLAND_DISPLAY)"
 
 # publish the anland + mesa environment as the systemd user session
@@ -154,6 +178,7 @@ if ! systemctl --user set-environment \
         "DISPLAY=$DISPLAY" \
         "DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS:-unix:path=$RT/bus}" \
         "XDG_SESSION_TYPE=wayland" \
+        "PATH=$APP_PATH" \
         "MESA_LOADER_DRIVER_OVERRIDE=$MESA_LOADER_DRIVER_OVERRIDE" \
         "GALLIUM_DRIVER=$GALLIUM_DRIVER" \
         "FD_FORCE_KGSL=$FD_FORCE_KGSL"; then

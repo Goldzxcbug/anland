@@ -246,13 +246,68 @@ pulse: pulse-deps
 # SOURCE — the container has gcc + libx11-dev + libxcomposite-dev, so
 # setupanlandx.sh compiles anland-session/miniwm.c on the device (no cross
 # toolchain, no SDK needed here).
+# Also ships two patched components — same scheme as pulse/termux/: the
+# submodules stay pristine, the anland delta lives in patches/<component>/
+# and is applied to the staged copy here. deps.sh (run first by
+# setupanlandx.sh) installs the build deps on Debian/Ubuntu, incl.
+# `apt-get build-dep bubblewrap xwayland` — the distro's own dep lists, so
+# the -dev versions match whatever the distro ships. No distro source code
+# is ever fetched; the system bwrap/xwayland packages are never touched.
+#   bubblewrap/  third_party/bubblewrap v0.11.1 + patches/bubblewrap: the
+#                mountinfo index fix (16 GB id-indexed table on KernelSU+
+#                SuSFS → sorted array + bsearch; see the README there).
+#                setupanlandx.sh compiles it into ~/.local/bin/bwrap
+#                unconditionally — glycin (GTK SVG loading) then survives
+#                on SuSFS devices too (VS Code died on its file chooser).
+#   xserver/     third_party/xserver pinned to xwayland-24.1 + patches/xwayland:
+#                the kgsl/turnip glamor fixes. setupanlandx.sh builds
+#                Xwayland with meson into ~/.local/bin/Xwayland; ANLAND-SOURCE
+#                records commit + patch checksum so unchanged builds are
+#                skipped on re-run.
 anlandx:
+	command -v patch >/dev/null || { echo "ERROR: need patch on the build host"; exit 1; }
+	[ -f third_party/bubblewrap/bubblewrap.c ] || { echo "ERROR: third_party/bubblewrap not checked out — git submodule update --init third_party/bubblewrap"; exit 1; }
+	[ -f third_party/xserver/hw/xwayland/meson.build ] || { echo "ERROR: third_party/xserver not checked out — git submodule update --init third_party/xserver"; exit 1; }
 	rm -rf "$(OUT)/anlandx"
-	mkdir -p "$(OUT)/anlandx"
+	mkdir -p "$(OUT)/anlandx/bubblewrap" "$(OUT)/anlandx/xserver"
 	cp anland-session/miniwm.c anland-session/anland-session.sh \
-	   anland-session/anland-session.service anland-session/setupanlandx.sh \
+	   anland-session/anland-session.service anland-session/deps.sh \
 	   LICENSE "$(OUT)/anlandx/"
-	chmod 755 "$(OUT)/anlandx/setupanlandx.sh" "$(OUT)/anlandx/anland-session.sh"
+	cp anland-session/setup.sh "$(OUT)/anlandx/setupanlandx.sh"
+	cp -r patches "$(OUT)/anlandx/patches"
+	# bubblewrap: pristine v0.11.1 sources + anland config.h, patch applied below
+	cp third_party/bubblewrap/*.c third_party/bubblewrap/*.h \
+	   third_party/bubblewrap/COPYING "$(OUT)/anlandx/bubblewrap/"
+	cp patches/bubblewrap/config.h "$(OUT)/anlandx/bubblewrap/"
+	for p in patches/bubblewrap/*.patch; do
+	  patch -d "$(OUT)/anlandx/bubblewrap" -p1 -s --no-backup-if-mismatch < "$$p"
+	done
+	# xserver: tracked files of the pinned xwayland-24.1 submodule, patched the same way
+	git -C third_party/xserver archive --format=tar HEAD | tar -xf - -C "$(OUT)/anlandx/xserver"
+	for p in patches/xwayland/*.patch; do
+	  patch -d "$(OUT)/anlandx/xserver" -p1 -s --no-backup-if-mismatch < "$$p"
+	done
+	# xorgproto (release tarball, sha256-pinned — the pulse-deps pattern) as the
+	# xserver meson subproject fallback: the proto deps (presentproto >= 1.4 …)
+	# need it wherever the distro's xorgproto is older (Ubuntu 24.04 ships 1.3)
+	DL="$(OUT)/dl"; mkdir -p "$$DL"
+	if [ ! -f "$$DL/xorgproto-2024.1.tar.xz" ]; then
+	  curl -fsSL --retry 3 -o "$$DL/xorgproto-2024.1.tar.xz" \
+	    https://xorg.freedesktop.org/releases/individual/proto/xorgproto-2024.1.tar.xz
+	fi
+	echo "372225fd40815b8423547f5d890c5debc72e88b91088fbfb13158c20495ccb59  $$DL/xorgproto-2024.1.tar.xz" \
+	  | sha256sum -c --quiet || { echo "ERROR: checksum xorgproto-2024.1.tar.xz"; exit 1; }
+	rm -rf "$(OUT)/anlandx/xserver/subprojects"
+	mkdir -p "$(OUT)/anlandx/xserver/subprojects"
+	tar -C "$(OUT)/anlandx/xserver/subprojects" -xJf "$$DL/xorgproto-2024.1.tar.xz"
+	mv "$(OUT)/anlandx/xserver/subprojects/xorgproto-2024.1" \
+	   "$(OUT)/anlandx/xserver/subprojects/xorgproto"
+	# the exact input the patched tree was built from — setupanlandx.sh skips
+	# rebuilding ~/.local/bin/Xwayland when this matches its stamp
+	{ git -C third_party/xserver rev-parse HEAD; cat patches/xwayland/*.patch | md5sum; } \
+	  > "$(OUT)/anlandx/xserver/ANLAND-SOURCE"
+	chmod 755 "$(OUT)/anlandx/setupanlandx.sh" "$(OUT)/anlandx/anland-session.sh" \
+	   "$(OUT)/anlandx/deps.sh"
 	tar -C "$(OUT)" --owner=0 --group=0 -czf "$(OUT)/anlandx.tar.gz" anlandx
 	ls -la "$(OUT)/anlandx.tar.gz"
 	echo "OK: $(OUT)/anlandx.tar.gz  (device: tar xzf anlandx.tar.gz && bash anlandx/setupanlandx.sh)"
