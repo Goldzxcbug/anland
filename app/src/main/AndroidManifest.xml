@@ -3,6 +3,8 @@
 
     <application
         android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:allowBackup="false">
 
         <!-- Launcher entry: window list (Attached/Detached state) -->
