@@ -47,6 +47,44 @@ allow untrusted_app_29 awl_daemon unix_stream_socket { read write }
 allow untrusted_app awl_daemon unix_stream_socket { read write }
 allow awl_daemon untrusted_app_29 unix_stream_socket { read write getopt }
 allow awl_daemon untrusted_app unix_stream_socket { read write getopt }
+# PulseAudio（module pulse/，service.sh 以 awl_daemon 域拉起）→ AudioFlinger/AudioPolicy
+# （OpenSL ES / AAudio 走 audioserver binder + 共享内存 fd）
+allow awl_daemon audioserver_service service_manager find
+allow awl_daemon mediametrics_service service_manager find
+allow awl_daemon audioserver binder { call transfer }
+allow audioserver awl_daemon binder { call transfer }
+allow audioserver awl_daemon fd use
+allow awl_daemon audioserver fd use
+# 音频栈反向访问 pulseaudio 进程（/proc/<pid>/cmdline 等）：
+# OPlus audioserver 的 AudioBoost 在 createTrack 路径里 search/getattr 客户端
+# /proc/<pid> 与 /proc/<pid>/task，system_server 的 SchedulingPolicyService 也要
+# 看 /proc/<tid> 并调整调度。这些拒绝部分被 dontaudit（dmesg 只有部分 AVC），
+# 表现为 createTrack INVALID_OPERATION（FAILED_TRANSACTION）/ thread does not exist。
+# 源域是 enforcing 的，permissive awl_daemon 救不了这里。
+allow audioserver awl_daemon dir { search getattr }
+allow audioserver awl_daemon file { open read getattr }
+allow audioserver awl_daemon lnk_file { read }
+allow audioserver awl_daemon process { getattr getsched setsched }
+allow system_server awl_daemon dir { search getattr }
+allow system_server awl_daemon file { open read getattr }
+allow system_server awl_daemon lnk_file { read }
+allow system_server awl_daemon process { getattr getsched setsched }
+allow system_server awl_daemon binder { call transfer }
+allow system_server awl_daemon fd use
+# ---- 运行时 socket 收紧：wayland-0 / pulse.sock 仅容器（droidspacesd 域）可连 ----
+# 原先两个 socket 落在 shell_data_file 且 DAC 0666/0777（容器进程 uid 与属主不同，
+# DAC 必须开放），任何 app 都能连（wayland 协议全开 / pulse 匿名 auth）。改为专用
+# 类型、创建即打标：只授予 droidspacesd 连接；Android app 按架构走 binder T_CONNECT，
+# 不碰 unix socket。daemon/pulse 重建 socket 时生效（service.sh 开机先 rm 再建）。
+type awl_runtime_sock sock_file
+type_transition awl_daemon shell_data_file sock_file awl_runtime_sock
+# 新类型的文件落在 /data 分区需要 associate（源是文件类型，域 permissive 管不到）
+allow awl_runtime_sock labeledfs filesystem associate
+allow awl_daemon awl_runtime_sock sock_file { create unlink setattr read write getattr open }
+allow droidspacesd awl_runtime_sock sock_file { open read write getattr setattr }
+allow droidspacesd awl_daemon unix_stream_socket connectto
+# ksu 域只需清理（service.sh 的 rm -f），不给连接
+allow ksu awl_runtime_sock sock_file unlink
 # am start 子进程（留在本域）→ ActivityManager
 allow awl_daemon activity_service service_manager find
 allow awl_daemon system_server binder { call transfer }

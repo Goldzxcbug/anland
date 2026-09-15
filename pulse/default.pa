@@ -1,0 +1,24 @@
+#!/data/adb/modules/anland-awl/pulse/bin/pulseaudio -nF
+#
+# anland PulseAudio — the Linux container's apps play through Android.
+# Loaded by the module's service.sh with `-n -F` (no upstream default.pa);
+# module-native-protocol-unix is NOT here: service.sh passes it with -L
+# because its socket lives in the configurable runtime dir.
+#
+# Output = Termux's Android sink modules. OpenSL ES is the default (what
+# Termux ships); AAudio is the alternative — swap the two load-module lines
+# if OpenSL ES loads but stays silent. Both accept rate=/latency=.
+# With neither loading, module-always-sink provides a null sink so clients
+# still connect and /data/local/tmp/awl_pulse.log shows the module error.
+
+.fail
+load-module module-stream-restore restore_device=false
+
+.nofail
+load-module module-sles-sink sink_name=android sink_properties=device.description=Android
+#load-module module-aaudio-sink sink_name=android sink_properties=device.description=Android
+set-default-sink android
+.fail
+
+load-module module-always-sink
+load-module module-suspend-on-idle

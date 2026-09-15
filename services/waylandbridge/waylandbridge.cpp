@@ -623,7 +623,7 @@ static void attach_activity(uint64_t id, const char* title) {
  * /data/local/tmp/awl; droidspaces bind-mounts it at /run/anland inside the
  * container, which is the ANLAND_RUNTIME_DIR convention there). It
  * used to sit one level up in /data/local/tmp, which is 0771 shell: a
- * NON-root user service in the container (xwm/setupanlandx.sh) cannot bind
+ * NON-root user service in the container (anland-session/setupanlandx.sh) cannot bind
  * there, while the awl dir is 0777 by design. One connection per command,
  * line-text protocol:
  *   S <serial> <w> <h>   resize the X window (serial = WL_SURFACE_SERIAL pairing value)

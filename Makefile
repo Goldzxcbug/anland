@@ -12,8 +12,10 @@
 #                    #   Release: LOGD hot-path tracing compiled out (awl_log.h)
 #   make native-debug  # same binary with LOGD tracing compiled in → build/waylandbridge-debug
 #   make apk        # com.anlandnext APK (gradle project in app/, via gradlew)
-#   make module     # SukiSU module zip (build/module/anland-awl.zip)
-#   make anlandx    # in-container Xwayland+mini-wm user service, SOURCE tarball (build/anlandx.tar.gz)
+#   make module     # SukiSU module zip (build/module/anland-awl.zip; includes pulse/)
+#   make pulse      # PulseAudio for Android (Termux sink modules) → build/pulse-stage (module pulse/)
+#   make pulse-deps # its static deps: libsndfile / libsoxr / libltdl (tarballs, sha256-pinned)
+#   make anlandx    # in-container anland session (D-Bus + Xwayland + mini-wm), SOURCE tarball (build/anlandx.tar.gz)
 #   make libffi     # one-time bootstrap: cross-compile libffi (skipped if present)
 #   make clean
 SHELL := /bin/bash
@@ -41,7 +43,17 @@ BUILD    := build/arm64
 BUILD_DBG:= build/arm64-debug
 OUT      := $(abspath build)
 
-.PHONY: all check-tools native native-debug apk module anlandx libffi clean
+# ---- PulseAudio for Android (module pulse/) ----
+# PA_PREFIX is baked into the binaries (module dir: config, modlibexecdir).
+# No trailing comments on these lines: make keeps the blanks before a '#'.
+PA_PREFIX := /data/adb/modules/anland-awl/pulse
+PA_API    := 35
+PA_TC     := $(NDK)/toolchains/llvm/prebuilt/linux-x86_64/bin
+PA_DEPS   := $(OUT)/pulse-deps
+PA_STAGE  := $(OUT)/pulse-stage
+PA_ROOT   := $(PA_STAGE)$(PA_PREFIX)
+
+.PHONY: all check-tools native native-debug apk module pulse pulse-deps anlandx libffi clean
 
 all: native apk module anlandx
 	md5sum "$(OUT)/waylandbridge" "$(OUT)/anland-wayland.apk" \
@@ -127,7 +139,7 @@ testapk: native
 # the device's live system original (guards against stale OTA shadowing);
 # update installs are idempotent. The build only merges in the latest
 # waylandbridge binary.
-module: native
+module: native pulse
 	MOD="$(OUT)/module/anland-awl"
 	rm -rf "$(OUT)/module"
 	mkdir -p "$$MOD"
@@ -135,27 +147,112 @@ module: native
 	   module/customize.sh module/plat_service_contexts.anland "$$MOD/"
 	cp LICENSE "$$MOD/"
 	cp "$(OUT)/waylandbridge" "$$MOD/"
-	chmod 755 "$$MOD/waylandbridge" "$$MOD/service.sh" "$$MOD/customize.sh"
+	cp -r "$(PA_ROOT)" "$$MOD/pulse"   # PulseAudio tree (bin/lib/etc), see `make pulse`
+	chmod 755 "$$MOD/waylandbridge" "$$MOD/service.sh" "$$MOD/customize.sh" "$$MOD"/pulse/bin/*
 	(cd "$$MOD" && zip -qr "$(OUT)/module/anland-awl.zip" \
 	  module.prop sepolicy.rule service.sh customize.sh \
-	  plat_service_contexts.anland waylandbridge \
+	  plat_service_contexts.anland waylandbridge pulse \
 	  LICENSE)
 	echo "OK: $(OUT)/module/anland-awl.zip"
 
-# ---------------- anlandx: Xwayland + mini-wm user service (source tarball) ----------------
+# ---------------- PulseAudio for Android ----------------
+# Termux's pulseaudio (termux-packages packages/pulseaudio: bionic patches +
+# module-sles-sink / module-aaudio-sink, vendored in pulse/termux/) built
+# with our NDK against pulseaudio v17.0 (submodule third_party/pulseaudio).
+# Playback only. Installed at PA_PREFIX inside the module; service.sh runs it
+# as root in the awl_daemon domain, socket <runtime_dir>/pulse.sock — the
+# container's libpulse clients connect through /run/anland/pulse.sock
+# (setupanlandx.sh writes the client.conf). Host tools: meson ninja cmake patch.
+# adrian-aec=true only satisfies meson's "one echo canceller" sanity check
+# with the dependency-free built-in (Termux pulls libwebrtc-audio-processing
+# for it); module-echo-cancel is never loaded here.
+pulse-deps: check-tools
+	if [ -f "$(PA_DEPS)/lib/libsndfile.a" ] && [ -f "$(PA_DEPS)/lib/libsoxr.a" ] && \
+	   [ -f "$(PA_DEPS)/lib/libltdl.a" ]; then echo "pulse deps already built"; exit 0; fi
+	command -v cmake >/dev/null || { echo "ERROR: cmake missing"; exit 1; }
+	DL=build/pulse-dl; mkdir -p "$$DL"
+	fetch() {   # fetch <file> <url> <sha256>
+	  if [ ! -f "$$DL/$$1" ]; then curl -fsSL --retry 3 -o "$$DL/$$1" "$$2"; fi
+	  echo "$$3  $$DL/$$1" | sha256sum -c --quiet || { echo "ERROR: checksum $$1"; rm -f "$$DL/$$1"; exit 1; }
+	}
+	fetch libtool-2.4.7.tar.xz https://ftpmirror.gnu.org/libtool/libtool-2.4.7.tar.xz \
+	  4f7f217f057ce655ff22559ad221a0fd8ef84ad1fc5fcb6990cecc333aa1635d
+	fetch libsndfile-1.2.2.tar.xz https://github.com/libsndfile/libsndfile/releases/download/1.2.2/libsndfile-1.2.2.tar.xz \
+	  3799ca9924d3125038880367bf1468e53a1b7e3686a934f098b7e1d286cdb80e
+	fetch soxr-0.1.3.tar.gz https://github.com/chirlu/soxr/archive/refs/tags/0.1.3.tar.gz \
+	  db6ca1b1e8405c6ef92f8294fc123d910abf0a114003b3f0f13fa57a95fd62d0
+	rm -rf build/pulse-deps-src "$(PA_DEPS)"; mkdir -p build/pulse-deps-src "$(PA_DEPS)"
+	for t in "$$DL"/*.tar.*; do tar -C build/pulse-deps-src -xf "$$t"; done
+	# static + PIC: they end up inside libpulsecommon.so; CMAKE_POLICY_VERSION_MINIMUM
+	# keeps cmake ≥ 4 accepting their old cmake_minimum_required
+	CM="-DCMAKE_TOOLCHAIN_FILE=$(NDK)/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a \
+	    -DANDROID_PLATFORM=android-$(PA_API) -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=$(PA_DEPS) \
+	    -DBUILD_SHARED_LIBS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_POLICY_VERSION_MINIMUM=3.5"
+	cmake -S build/pulse-deps-src/libsndfile-1.2.2 -B build/pulse-deps-src/sndfile-build $$CM \
+	  -DENABLE_EXTERNAL_LIBS=OFF -DENABLE_MPEG=OFF -DBUILD_PROGRAMS=OFF -DBUILD_EXAMPLES=OFF \
+	  -DBUILD_TESTING=OFF -DBUILD_REGTEST=OFF -DENABLE_CPACK=OFF -DENABLE_PACKAGE_CONFIG=OFF >/dev/null
+	cmake --build build/pulse-deps-src/sndfile-build -j$$(nproc) >/dev/null
+	cmake --install build/pulse-deps-src/sndfile-build >/dev/null
+	cmake -S build/pulse-deps-src/soxr-0.1.3 -B build/pulse-deps-src/soxr-build $$CM \
+	  -DBUILD_TESTS=OFF -DBUILD_EXAMPLES=OFF -DWITH_OPENMP=OFF -DWITH_LSR_BINDINGS=OFF >/dev/null
+	cmake --build build/pulse-deps-src/soxr-build -j$$(nproc) >/dev/null
+	cmake --install build/pulse-deps-src/soxr-build >/dev/null
+	cd build/pulse-deps-src/libtool-2.4.7/libltdl
+	CC="$(PA_TC)/aarch64-linux-android$(PA_API)-clang" AR="$(PA_TC)/llvm-ar" RANLIB="$(PA_TC)/llvm-ranlib" \
+	CFLAGS="-O2 -fPIC" ./configure --host=aarch64-linux-android --prefix="$(PA_DEPS)" \
+	  --enable-static --disable-shared --enable-ltdl-install >/dev/null
+	make -j$$(nproc) >/dev/null && make install >/dev/null
+	ls -la "$(PA_DEPS)"/lib/*.a
+	echo "OK: pulse deps in $(PA_DEPS)"
+
+pulse: pulse-deps
+	command -v meson >/dev/null && command -v ninja >/dev/null && command -v patch >/dev/null \
+	  || { echo "ERROR: need meson, ninja, patch on the build host"; exit 1; }
+	git submodule update --init third_party/pulseaudio
+	bash pulse/prepare-src.sh build/pulse-src
+	sed -e "s|@TC@|$(PA_TC)|g;s|@API@|$(PA_API)|g;s|@DEPS@|$(PA_DEPS)|g" \
+	  pulse/meson-cross.ini.in > build/pulse-cross.ini
+	rm -rf build/pulse-build
+	meson setup build/pulse-build build/pulse-src --cross-file build/pulse-cross.ini \
+	  --buildtype=release --strip \
+	  --prefix="$(PA_PREFIX)" --libdir=lib --sysconfdir=etc --localstatedir=var \
+	  -Ddaemon=true -Dclient=true -Ddoxygen=false -Dman=false -Dtests=false \
+	  -Ddatabase=simple -Dsoxr=enabled -Dipv6=false \
+	  -Dalsa=disabled -Dasyncns=disabled -Davahi=disabled -Dbluez5=disabled \
+	  -Dconsolekit=disabled -Ddbus=disabled -Delogind=disabled -Dfftw=disabled \
+	  -Dglib=disabled -Dgsettings=disabled -Dgstreamer=disabled -Dgtk=disabled \
+	  -Dhal-compat=false -Djack=disabled -Dlirc=disabled -Dopenssl=disabled \
+	  -Dorc=disabled -Doss-output=disabled -Dsamplerate=disabled -Dspeex=disabled \
+	  -Dsystemd=disabled -Dtcpwrap=disabled -Dudev=disabled -Dvalgrind=disabled \
+	  -Dx11=disabled -Dadrian-aec=true -Dwebrtc-aec=disabled \
+	  -Dbashcompletiondir=no -Dzshcompletiondir=no > build/pulse-meson-setup.log
+	meson compile -C build/pulse-build
+	rm -rf "$(PA_STAGE)"
+	DESTDIR="$(PA_STAGE)" meson install -C build/pulse-build --quiet
+	install -m 644 pulse/default.pa "$(PA_ROOT)/etc/pulse/default.pa"
+	rm -rf "$(PA_ROOT)/include" "$(PA_ROOT)/lib/pkgconfig" "$(PA_ROOT)/lib/cmake" "$(PA_ROOT)/share"   # dev/doc files: not shipped
+	du -sh "$(PA_ROOT)"
+	echo "OK: $(PA_ROOT) (bin/pulseaudio + lib + etc/pulse/default.pa)"
+
+# ---------------- anlandx: in-container anland session (source tarball) ----------------
 # Runs INSIDE the Linux container (Ubuntu arm64) as a systemd --user service:
-# Xwayland -rootless picks a free display (-displayfd), publishes ":N" in
-# ~/.anlandx, mini-wm surfaces the X windows and serves the daemon's
-# resize/close channel on <runtime_dir>/anland-wm.sock (container view:
-# /run/anland = ANLAND_RUNTIME_DIR convention). Shipped as SOURCE —
-# the container has gcc + libx11-dev + libxcomposite-dev, so setupanlandx.sh
-# compiles xwm/miniwm.c on the device (no cross toolchain, no SDK needed here).
+# anland-session sets up the session D-Bus ($XDG_RUNTIME_DIR/bus — system
+# user bus, else dbus-launch'd), links the anland wayland socket into
+# /run/user/<uid> as wayland-anland and publishes the app environment in
+# ~/.anlandx-env; Xwayland -rootless picks a free display (-displayfd),
+# publishes ":N" in ~/.anlandx, mini-wm surfaces the X windows and serves
+# the daemon's resize/close channel on <runtime_dir>/anland-wm.sock
+# (container view: /run/anland = ANLAND_RUNTIME_DIR convention). Shipped as
+# SOURCE — the container has gcc + libx11-dev + libxcomposite-dev, so
+# setupanlandx.sh compiles anland-session/miniwm.c on the device (no cross
+# toolchain, no SDK needed here).
 anlandx:
 	rm -rf "$(OUT)/anlandx"
 	mkdir -p "$(OUT)/anlandx"
-	cp xwm/miniwm.c xwm/anlandx-start.sh xwm/anlandx.service xwm/setupanlandx.sh \
+	cp anland-session/miniwm.c anland-session/anland-session.sh \
+	   anland-session/anland-session.service anland-session/setupanlandx.sh \
 	   LICENSE "$(OUT)/anlandx/"
-	chmod 755 "$(OUT)/anlandx/setupanlandx.sh" "$(OUT)/anlandx/anlandx-start.sh"
+	chmod 755 "$(OUT)/anlandx/setupanlandx.sh" "$(OUT)/anlandx/anland-session.sh"
 	tar -C "$(OUT)" --owner=0 --group=0 -czf "$(OUT)/anlandx.tar.gz" anlandx
 	ls -la "$(OUT)/anlandx.tar.gz"
 	echo "OK: $(OUT)/anlandx.tar.gz  (device: tar xzf anlandx.tar.gz && bash anlandx/setupanlandx.sh)"

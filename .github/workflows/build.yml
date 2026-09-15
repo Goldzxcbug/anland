@@ -36,7 +36,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            meson ninja-build pkg-config
+            meson ninja-build pkg-config m4 patch
 
       # libffi: overlay the v3.4.6 release tarball (same pin as the
       # submodule) over third_party/libffi — it ships a generated configure,

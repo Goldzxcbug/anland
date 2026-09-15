@@ -1,0 +1,25 @@
+# meson cross file for the pulseaudio Android build — template, `make pulse`
+# substitutes @TC@ (NDK llvm bin dir), @API@ (android platform level) and
+# @DEPS@ (build/pulse-deps prefix: static libsndfile / libsoxr / libltdl).
+[binaries]
+c = '@TC@/aarch64-linux-android@API@-clang'
+cpp = '@TC@/aarch64-linux-android@API@-clang++'
+ar = '@TC@/llvm-ar'
+strip = '@TC@/llvm-strip'
+pkg-config = 'pkg-config'
+
+[built-in options]
+c_args = ['-I@DEPS@/include']
+# --undefined-version: lld rejects the symbol maps' entries for functions that
+# are compiled out on bionic (same workaround as Termux)
+c_link_args = ['-L@DEPS@/lib', '-Wl,--undefined-version']
+
+[properties]
+# only the cross-built deps — never the build host's own .pc files
+pkg_config_libdir = '@DEPS@/lib/pkgconfig'
+
+[host_machine]
+system = 'android'
+cpu_family = 'aarch64'
+cpu = 'aarch64'
+endian = 'little'

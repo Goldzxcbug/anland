@@ -5,3 +5,6 @@
 	path = third_party/wayland
 	url = https://github.com/SuperTurtleDev/libwayland.git
 	branch = awl
+[submodule "third_party/pulseaudio"]
+	path = third_party/pulseaudio
+	url = https://github.com/pulseaudio/pulseaudio.git

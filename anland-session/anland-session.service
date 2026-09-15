@@ -1,0 +1,26 @@
+# anland-session — the per-user anland session: session D-Bus + wayland
+# link + Xwayland (rootless) + mini-wm. Installed to
+# ~/.config/systemd/user/ by setupanlandx.sh. While the service runs:
+#   ~/.anlandx     the X display, e.g. ":5"
+#   ~/.anlandx-env the app environment (XDG_RUNTIME_DIR, WAYLAND_DISPLAY,
+#                  DBUS_SESSION_BUS_ADDRESS) as KEY=VALUE lines
+[Unit]
+Description=anland session — D-Bus + wayland link + Xwayland + mini-wm
+Documentation=https://github.com/SuperTurtleDev/anland
+# the anland daemon's wayland socket is host-side (nothing in this user
+# session to order against): the start script fails fast while it is down and
+# Restart= keeps retrying — never give up on the start-rate limit
+StartLimitIntervalSec=0
+
+[Service]
+Type=exec
+ExecStart=%h/.local/bin/anland-session
+Restart=on-failure
+RestartSec=5
+# the container's users are not in systemd-journal (journalctl --user shows
+# nothing) — keep the Xwayland/mini-wm output readable in the user runtime dir
+StandardOutput=append:%t/anland-session.log
+StandardError=inherit
+
+[Install]
+WantedBy=default.target
