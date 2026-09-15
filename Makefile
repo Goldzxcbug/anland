@@ -15,7 +15,7 @@
 #   make module     # SukiSU module zip (build/module/anland-awl.zip; includes pulse/)
 #   make pulse      # PulseAudio for Android (Termux sink modules) → build/pulse-stage (module pulse/)
 #   make pulse-deps # its static deps: libsndfile / libsoxr / libltdl (tarballs, sha256-pinned)
-#   make anlandx    # in-container anland session (D-Bus + Xwayland + mini-wm), SOURCE tarball (build/anlandx.tar.gz)
+#   make anland-session    # in-container anland session (D-Bus + Xwayland + mini-wm), SOURCE tarball (build/anland-session.tar.gz)
 #   make libffi     # one-time bootstrap: cross-compile libffi (skipped if present)
 #   make clean
 SHELL := /bin/bash
@@ -53,11 +53,11 @@ PA_DEPS   := $(OUT)/pulse-deps
 PA_STAGE  := $(OUT)/pulse-stage
 PA_ROOT   := $(PA_STAGE)$(PA_PREFIX)
 
-.PHONY: all check-tools native native-debug apk module pulse pulse-deps anlandx libffi clean
+.PHONY: all check-tools native native-debug apk module pulse pulse-deps anland-session libffi clean
 
-all: native apk module anlandx
+all: native apk module anland-session
 	md5sum "$(OUT)/waylandbridge" "$(OUT)/anland-wayland.apk" \
-	       "$(OUT)/module/anland-awl.zip" "$(OUT)/anlandx.tar.gz"
+	       "$(OUT)/module/anland-awl.zip" "$(OUT)/anland-session.tar.gz"
 
 # ---------------- Toolchain self-check (missing components → sdkmanager install) ----------------
 check-tools:
@@ -162,7 +162,7 @@ module: native pulse
 # Playback only. Installed at PA_PREFIX inside the module; service.sh runs it
 # as root in the awl_daemon domain, socket <runtime_dir>/pulse.sock — the
 # container's libpulse clients connect through /run/anland/pulse.sock
-# (setupanlandx.sh writes the client.conf). Host tools: meson ninja cmake patch.
+# (setup.sh writes the client.conf). Host tools: meson ninja cmake patch.
 # adrian-aec=true only satisfies meson's "one echo canceller" sanity check
 # with the dependency-free built-in (Termux pulls libwebrtc-audio-processing
 # for it); module-echo-cancel is never loaded here.
@@ -234,28 +234,28 @@ pulse: pulse-deps
 	du -sh "$(PA_ROOT)"
 	echo "OK: $(PA_ROOT) (bin/pulseaudio + lib + etc/pulse/default.pa)"
 
-# ---------------- anlandx: in-container anland session (source tarball) ----------------
+# ---------------- anland-session: in-container anland session (source tarball) ----------------
 # Runs INSIDE the Linux container (Ubuntu arm64) as a systemd --user service:
 # anland-session sets up the session D-Bus ($XDG_RUNTIME_DIR/bus — system
 # user bus, else dbus-launch'd), links the anland wayland socket into
 # /run/user/<uid> as wayland-anland and publishes the app environment in
-# ~/.anlandx-env; Xwayland -rootless picks a free display (-displayfd),
-# publishes ":N" in ~/.anlandx, mini-wm surfaces the X windows and serves
+# ~/.anland-session-env; Xwayland -rootless picks a free display (-displayfd),
+# publishes ":N" in ~/.anland-session, mini-wm surfaces the X windows and serves
 # the daemon's resize/close channel on <runtime_dir>/anland-wm.sock
 # (container view: /run/anland = ANLAND_RUNTIME_DIR convention). Shipped as
 # SOURCE — the container has gcc + libx11-dev + libxcomposite-dev, so
-# setupanlandx.sh compiles anland-session/miniwm.c on the device (no cross
+# setup.sh compiles anland-session/miniwm.c on the device (no cross
 # toolchain, no SDK needed here).
-anlandx:
-	rm -rf "$(OUT)/anlandx"
-	mkdir -p "$(OUT)/anlandx"
+anland-session:
+	rm -rf "$(OUT)/anland-session"
+	mkdir -p "$(OUT)/anland-session"
 	cp anland-session/miniwm.c anland-session/anland-session.sh \
-	   anland-session/anland-session.service anland-session/setupanlandx.sh \
-	   LICENSE "$(OUT)/anlandx/"
-	chmod 755 "$(OUT)/anlandx/setupanlandx.sh" "$(OUT)/anlandx/anland-session.sh"
-	tar -C "$(OUT)" --owner=0 --group=0 -czf "$(OUT)/anlandx.tar.gz" anlandx
-	ls -la "$(OUT)/anlandx.tar.gz"
-	echo "OK: $(OUT)/anlandx.tar.gz  (device: tar xzf anlandx.tar.gz && bash anlandx/setupanlandx.sh)"
+	   anland-session/anland-session.service anland-session/setup.sh \
+	   LICENSE "$(OUT)/anland-session/"
+	chmod 755 "$(OUT)/anland-session/setup.sh" "$(OUT)/anland-session/anland-session.sh"
+	tar -C "$(OUT)" --owner=0 --group=0 -czf "$(OUT)/anland-session.tar.gz" anland-session
+	ls -la "$(OUT)/anland-session.tar.gz"
+	echo "OK: $(OUT)/anland-session.tar.gz  (device: tar xzf anland-session.tar.gz && bash anland-session/setup.sh)"
 
 # ---------------- One-time bootstrap: cross-compile libffi ----------------
 # Source = git submodule third_party/libffi (pinned at v3.4.6);
