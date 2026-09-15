@@ -102,4 +102,5 @@ jobs:
             build/anland-wayland.apk
             build/anland-awllib.aar
             build/module/anland-awl.zip
+            build/anlandx.tar.gz
           if-no-files-found: error

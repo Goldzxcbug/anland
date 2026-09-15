@@ -13,6 +13,7 @@
 #   make native-debug  # same binary with LOGD tracing compiled in → build/waylandbridge-debug
 #   make apk        # com.anlandnext APK (gradle project in app/, via gradlew)
 #   make module     # SukiSU module zip (build/module/anland-awl.zip)
+#   make anlandx    # in-container Xwayland+mini-wm user service, SOURCE tarball (build/anlandx.tar.gz)
 #   make libffi     # one-time bootstrap: cross-compile libffi (skipped if present)
 #   make clean
 SHELL := /bin/bash
@@ -40,11 +41,11 @@ BUILD    := build/arm64
 BUILD_DBG:= build/arm64-debug
 OUT      := $(abspath build)
 
-.PHONY: all check-tools native native-debug apk module libffi clean
+.PHONY: all check-tools native native-debug apk module anlandx libffi clean
 
-all: native apk module
+all: native apk module anlandx
 	md5sum "$(OUT)/waylandbridge" "$(OUT)/anland-wayland.apk" \
-	       "$(OUT)/module/anland-awl.zip"
+	       "$(OUT)/module/anland-awl.zip" "$(OUT)/anlandx.tar.gz"
 
 # ---------------- Toolchain self-check (missing components → sdkmanager install) ----------------
 check-tools:
@@ -140,6 +141,24 @@ module: native
 	  plat_service_contexts.anland waylandbridge \
 	  LICENSE)
 	echo "OK: $(OUT)/module/anland-awl.zip"
+
+# ---------------- anlandx: Xwayland + mini-wm user service (source tarball) ----------------
+# Runs INSIDE the Linux container (Ubuntu arm64) as a systemd --user service:
+# Xwayland -rootless picks a free display (-displayfd), publishes ":N" in
+# ~/.anlandx, mini-wm surfaces the X windows and serves the daemon's
+# resize/close channel on <runtime_dir>/anland-wm.sock (container view:
+# /run/anland = ANLAND_RUNTIME_DIR convention). Shipped as SOURCE —
+# the container has gcc + libx11-dev + libxcomposite-dev, so setupanlandx.sh
+# compiles xwm/miniwm.c on the device (no cross toolchain, no SDK needed here).
+anlandx:
+	rm -rf "$(OUT)/anlandx"
+	mkdir -p "$(OUT)/anlandx"
+	cp xwm/miniwm.c xwm/anlandx-start.sh xwm/anlandx.service xwm/setupanlandx.sh \
+	   LICENSE "$(OUT)/anlandx/"
+	chmod 755 "$(OUT)/anlandx/setupanlandx.sh" "$(OUT)/anlandx/anlandx-start.sh"
+	tar -C "$(OUT)" --owner=0 --group=0 -czf "$(OUT)/anlandx.tar.gz" anlandx
+	ls -la "$(OUT)/anlandx.tar.gz"
+	echo "OK: $(OUT)/anlandx.tar.gz  (device: tar xzf anlandx.tar.gz && bash anlandx/setupanlandx.sh)"
 
 # ---------------- One-time bootstrap: cross-compile libffi ----------------
 # Source = git submodule third_party/libffi (pinned at v3.4.6);

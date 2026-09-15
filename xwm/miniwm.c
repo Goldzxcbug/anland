@@ -15,8 +15,13 @@
  *   every surfaced Xwayland window sends a WL_SURFACE_SERIAL ClientMessage
  *   to root (data.l[0]=lo, l[1]=hi; this WM always receives it thanks to
  *   SubstructureRedirectMask) — building the serial ↔ X window pair table;
- *   listening for text-line commands on /host/data/local/tmp/anland-wm.sock
- *   (host side: /data/local/tmp/anland-wm.sock):
+ *   listening for text-line commands on $ANLAND_WM_SOCK, else
+ *   $XDG_RUNTIME_DIR/anland-wm.sock — the awl runtime dir, where Xwayland
+ *   also finds wayland-0 (convention: container /run/anland, a droidspaces
+ *   bind mount of the host runtime_dir /data/local/tmp/awl; the daemon
+ *   derives the same path from its config "runtime_dir"), else the
+ *   historical /host/data/local/tmp/anland-wm.sock (root only: that dir is
+ *   0771 shell, the awl dir 0777):
  *     S <serial> <w> <h>   resize that X window (Android window size sync)
  *     C <serial>           request close (WM_DELETE_WINDOW; XKillClient if
  *                          the protocol is absent)
@@ -41,8 +46,22 @@
 #include <sys/un.h>
 #include <sys/select.h>
 
-#define WM_SOCK_PATH "/host/data/local/tmp/anland-wm.sock"
 #define MAX_PAIRS 128
+
+/* Control socket path (see the header): resolved once, sized for sun_path. */
+static char g_sock_path[108];
+static const char* wm_sock_path(void) {
+    if (g_sock_path[0]) return g_sock_path;
+    const char* p = getenv("ANLAND_WM_SOCK");
+    const char* rt = getenv("XDG_RUNTIME_DIR");
+    if (p && *p)
+        snprintf(g_sock_path, sizeof g_sock_path, "%s", p);
+    else if (rt && *rt)
+        snprintf(g_sock_path, sizeof g_sock_path, "%s/anland-wm.sock", rt);
+    else
+        snprintf(g_sock_path, sizeof g_sock_path, "/host/data/local/tmp/anland-wm.sock");
+    return g_sock_path;
+}
 
 /* A second MapRequest for the same window (unmap/remap) redirects again →
  * BadAccess; other stray errors shouldn't kill the WM either — log and
@@ -185,12 +204,12 @@ int main(void) {
     }
 
     /* Control channel */
-    unlink(WM_SOCK_PATH);
+    unlink(wm_sock_path());
     int lfd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (lfd < 0) { perror("mini-wm: socket"); return 1; }
     struct sockaddr_un sa = { 0 };
     sa.sun_family = AF_UNIX;
-    strncpy(sa.sun_path, WM_SOCK_PATH, sizeof(sa.sun_path) - 1);
+    snprintf(sa.sun_path, sizeof(sa.sun_path), "%s", wm_sock_path());
     if (bind(lfd, (struct sockaddr*)&sa, sizeof(sa)) != 0 ||
         listen(lfd, 4) != 0) {
         perror("mini-wm: bind/listen");
@@ -199,7 +218,7 @@ int main(void) {
 
     XSync(d, False);
     fprintf(stderr, "mini-wm: running (root 0x%lx, sock %s)\n",
-            root, WM_SOCK_PATH);
+            root, wm_sock_path());
 
     int xfd = XConnectionNumber(d);
     int maxfd = xfd > lfd ? xfd : lfd;
@@ -275,6 +294,6 @@ int main(void) {
         }
     }
     close(lfd);
-    unlink(WM_SOCK_PATH);
+    unlink(wm_sock_path());
     return 0;
 }

@@ -618,28 +618,33 @@ static void attach_activity(uint64_t id, const char* title) {
 /* ---------------- wayland logic-layer callbacks (wayland event thread) ---------------- */
 
 /* ---- mini-wm control channel (X-side operations on Xwayland windows, #32) ----
- * The in-container mini-wm listens on /host/data/local/tmp/anland-wm.sock
- * (= /data/local/tmp/anland-wm.sock on this side); one connection per
- * command, line-text protocol:
+ * The in-container mini-wm listens on <runtime_dir>/anland-wm.sock — the
+ * dir that also holds wayland-0 (config "runtime_dir", default
+ * /data/local/tmp/awl; droidspaces bind-mounts it at /run/anland inside the
+ * container, which is the ANLAND_RUNTIME_DIR convention there). It
+ * used to sit one level up in /data/local/tmp, which is 0771 shell: a
+ * NON-root user service in the container (xwm/setupanlandx.sh) cannot bind
+ * there, while the awl dir is 0777 by design. One connection per command,
+ * line-text protocol:
  *   S <serial> <w> <h>   resize the X window (serial = WL_SURFACE_SERIAL pairing value)
  *   C <serial>           request close (WM_DELETE_WINDOW, or XKillClient if unsupported)
  * With no mini-wm (pure wayland client scenario) the connect fails —
  * skip silently, warn only once. */
-#define AWL_WM_SOCK "/data/local/tmp/anland-wm.sock"
+static const char* cfg_runtime_dir(void);   /* defined with the config block (g_sock_dir) */
 static void xwm_send_cmd(const char* cmd, size_t len) {
     static std::atomic<time_t> warned{0};   /* reachable from multiple binder threads */
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) return;
     struct sockaddr_un sa = {};
     sa.sun_family = AF_UNIX;
-    strncpy(sa.sun_path, AWL_WM_SOCK, sizeof(sa.sun_path) - 1);
+    snprintf(sa.sun_path, sizeof(sa.sun_path), "%s/anland-wm.sock", cfg_runtime_dir());
     if (connect(fd, (struct sockaddr*)&sa, sizeof(sa)) != 0) {
         time_t now = time(NULL);
         time_t last = warned.load(std::memory_order_relaxed);
         if (now - last > 60) {   /* no Xwayland session is the norm; don't spam */
             warned.store(now, std::memory_order_relaxed);
-            LOGI("mini-wm channel unreachable (%s) — Xwayland window resize/close skipped",
-                 strerror(errno));
+            LOGI("mini-wm channel %s unreachable (%s) — Xwayland window resize/close skipped",
+                 sa.sun_path, strerror(errno));
         }
         close(fd);
         return;
@@ -1068,6 +1073,9 @@ static int g_cfg_init_h = 600;
 static int g_cfg_scale_mode = 0;   /* view mapping mode (#34; mirror of g_srv.scale_mode, AWL_SCALE_*) */
 static char g_sock_dir[256] = "/data/local/tmp/awl";   /* runtime_dir (startup-loaded; see above) */
 static bool g_sock_listen = true;                      /* socket_listen (same) */
+/* runtime_dir for the mini-wm control socket (xwm_send_cmd): written once in
+ * cfg_load_sock_cfg before any binder/event thread exists, read-only after */
+static const char* cfg_runtime_dir(void) { return g_sock_dir; }
 
 /* known config keys → valid domain (under g_cfg_lock); unknown keys rejected */
 static bool cfg_domain(const std::string& key, int* lo, int* hi) {
