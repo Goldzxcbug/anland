@@ -1,0 +1,95 @@
+--- a/bind-mount.c
++++ b/bind-mount.c
+@@ -226,6 +226,44 @@
+   return info;
+ }
+ 
++/* anland: parent lookup by mount id through a sorted pointer array instead
++ * of upstream's table indexed by the raw id (xcalloc (max_id + 1, ...)).
++ * Kernels with SuSFS (KernelSU) give every mount created or cloned by a
++ * KernelSU-domain process a fake id counted from DEFAULT_KSU_MNT_ID =
++ * 2000000000 (susfs_def.h); a droidspaces container is entirely such
++ * mounts, so that table is 16 GB of address space. glycin runs its image
++ * loaders through bwrap under RLIMIT_AS (80% of MemAvailable+SwapFree,
++ * capped at 20 GB → never enough) — bwrap died with "Out of memory" before
++ * mounting anything, no SVG could be loaded and GTK aborted on the
++ * image-missing fallback (gtkiconhelper.c ensure_surface_for_gicon). */
++static int
++compare_mountinfo_line_by_id (const void *a, const void *b)
++{
++  const MountInfoLine *la = *(MountInfoLine * const *) a;
++  const MountInfoLine *lb = *(MountInfoLine * const *) b;
++
++  if (la->id < lb->id)
++    return -1;
++  if (la->id > lb->id)
++    return 1;
++  return 0;
++}
++
++static MountInfoLine *
++lookup_mountinfo_line_by_id (MountInfoLine **by_id,
++                             unsigned int    n_lines,
++                             int             id)
++{
++  MountInfoLine key;
++  MountInfoLine *keyp = &key;
++  MountInfoLine **found;
++
++  key.id = id;
++  found = bsearch (&keyp, by_id, n_lines, sizeof (MountInfoLine *),
++                   compare_mountinfo_line_by_id);
++  return found != NULL ? *found : NULL;
++}
++
+ static MountTab
+ parse_mountinfo (int  proc_fd,
+                  const char *root_mount)
+@@ -238,7 +276,6 @@
+   int n_mounts;
+   char *line;
+   unsigned int i;
+-  int max_id;
+   unsigned int n_lines;
+   int root;
+ 
+@@ -249,7 +286,6 @@
+   n_lines = count_lines (mountinfo);
+   lines = xcalloc (n_lines, sizeof (MountInfoLine));
+ 
+-  max_id = 0;
+   line = mountinfo;
+   i = 0;
+   root = -1;
+@@ -295,11 +331,6 @@
+       *options_end = 0;
+       lines[i].options = options;
+ 
+-      if (lines[i].id > max_id)
+-        max_id = lines[i].id;
+-      if (lines[i].parent_id > max_id)
+-        max_id = lines[i].parent_id;
+-
+       if (path_equal (lines[i].mountpoint, root_mount))
+         root = i;
+ 
+@@ -314,14 +345,16 @@
+       return steal_pointer (&mount_tab);
+     }
+ 
+-  by_id = xcalloc (max_id + 1, sizeof (MountInfoLine*));
++  /* index sized by the number of mounts, not by the largest id (see above) */
++  by_id = xcalloc (n_lines, sizeof (MountInfoLine*));
+   for (i = 0; i < n_lines; i++)
+-    by_id[lines[i].id] = &lines[i];
++    by_id[i] = &lines[i];
++  qsort (by_id, n_lines, sizeof (MountInfoLine*), compare_mountinfo_line_by_id);
+ 
+   for (i = 0; i < n_lines; i++)
+     {
+       MountInfoLine *this = &lines[i];
+-      MountInfoLine *parent = by_id[this->parent_id];
++      MountInfoLine *parent = lookup_mountinfo_line_by_id (by_id, n_lines, this->parent_id);
+       MountInfoLine **to_sibling;
+       MountInfoLine *sibling;
+       bool covered = false;

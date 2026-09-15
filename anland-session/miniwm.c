@@ -25,8 +25,24 @@
  *     S <serial> <w> <h>   resize that X window (Android window size sync)
  *     C <serial>           request close (WM_DELETE_WINDOW; XKillClient if
  *                          the protocol is absent)
+ *     R <serial>           raise (pointer entered / touch landed on its
+ *                          Android window)
+ *     F <serial>           raise + X input focus (its Activity got focus)
  *   The host daemon only knows surface↔serial (set_serial), speaks no X
  *   protocol — a two-level pairing.
+ *
+ * X-space geometry (2026-09-15, "Xwayland unclickable"): every toplevel is
+ * its own Android window, but input still travels through ONE X screen —
+ * rootless Xwayland dispatches wl_pointer/wl_touch at drawable.x/y + the
+ * surface-local position and lets the DIX hit-test the X stack
+ * (xwayland-input.c dispatch_absolute_motion / xwl_touch_send_event /
+ * xwl_xy_to_window); the pointer is clamped to the screen (mipointer
+ * limits). So this WM pins every managed toplevel at (0,0) (MapRequest,
+ * ConfigureRequest, the S command — a client's own placement has no visual
+ * meaning here anyway) so the whole window lies inside the screen the host
+ * daemon grows to the largest Android window, and R/F mirror the Android
+ * side onto the X stacking order so the DIX finds the window the event was
+ * actually aimed at (what mutter/kwin do as XWM by restacking).
  *
  * Single-threaded select: X connection fd + listen fd; X events batched via
  * XPending.
@@ -154,7 +170,9 @@ static void handle_command(Display* d, char* line) {
     if (sscanf(line, "S %llu %d %d", &serial, &w, &h) == 3) {
         Window win = pair_lookup(serial);
         if (win != None && w > 0 && h > 0) {
-            XResizeWindow(d, win, (unsigned)w, (unsigned)h);
+            /* (0,0) pin: the Android window shows the whole X window, so its
+             * X position only matters for input — inside the screen */
+            XMoveResizeWindow(d, win, 0, 0, (unsigned)w, (unsigned)h);
             XFlush(d);
             fprintf(stderr, "mini-wm: resize 0x%lx -> %dx%d\n", win, w, h);
         } else {
@@ -164,6 +182,23 @@ static void handle_command(Display* d, char* line) {
         Window win = pair_lookup(serial);
         if (win != None) request_close(d, win);
         else fprintf(stderr, "mini-wm: close serial %llu has no paired window\n", serial);
+    } else if (sscanf(line, "R %llu", &serial) == 1 ||
+               sscanf(line, "F %llu", &serial) == 1) {
+        /* raise (R) / raise + focus (F): the Android side tells us which X
+         * window input is about to reach — put it on top of the X stack so
+         * the DIX hit-test agrees (see the header) */
+        Window win = pair_lookup(serial);
+        if (win != None) {
+            XRaiseWindow(d, win);
+            if (line[0] == 'F')
+                XSetInputFocus(d, win, RevertToPointerRoot, CurrentTime);
+            XFlush(d);
+            fprintf(stderr, "mini-wm: %s 0x%lx\n",
+                    line[0] == 'F' ? "raise+focus" : "raise", win);
+        } else {
+            fprintf(stderr, "mini-wm: %c serial %llu has no paired window\n",
+                    line[0], serial);
+        }
     } else {
         fprintf(stderr, "mini-wm: unknown command '%s'\n", line);
     }
@@ -251,6 +286,7 @@ int main(void) {
             switch (e.type) {
             case MapRequest: {
                 Window w = e.xmaprequest.window;
+                XMoveWindow(d, w, 0, 0);   /* (0,0) pin, see the header (covers a CreateWindow position) */
                 XCompositeRedirectWindow(d, w, CompositeRedirectManual);
                 XMapWindow(d, w);
                 set_wm_state(d, w, NormalState);
@@ -259,14 +295,19 @@ int main(void) {
                 break;
             }
             case ConfigureRequest: {
+                /* pass-through for size/border/stacking; the position is
+                 * always (0,0) — a client re-centering itself on the (now
+                 * larger) screen would push part of its window outside it */
                 XConfigureRequestEvent* c = &e.xconfigurerequest;
                 XWindowChanges wc;
                 memset(&wc, 0, sizeof wc);
-                wc.x = c->x; wc.y = c->y;
+                wc.x = 0; wc.y = 0;
                 wc.width = c->width; wc.height = c->height;
                 wc.border_width = c->border_width;
                 wc.sibling = c->above; wc.stack_mode = c->detail;
-                XConfigureWindow(d, c->window, c->value_mask, &wc);
+                XConfigureWindow(d, c->window,
+                                 (c->value_mask & ~(unsigned)(CWX | CWY)) | CWX | CWY,
+                                 &wc);
                 break;
             }
             case CirculateRequest:

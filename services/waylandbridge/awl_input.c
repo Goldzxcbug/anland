@@ -395,6 +395,22 @@ static void drag_deliver_motion(uint64_t win, float x, float y) {
     pthread_rwlock_unlock(&g_srv.rwl);
 }
 
+/* wl_pointer.frame closes every logical pointer event group on a v5+ pointer
+ * (wayland.xml: "All wl_pointer events before a wl_pointer.frame event belong
+ * to the same logical event group"). It is not optional for us: Xwayland 24.1
+ * (hw/xwayland/xwayland-input.c pointer_handle_motion) binds seat v8 and, at
+ * pointer version >= 5, only STORES motion in pending_pointer_event —
+ * dispatch_pointer_motion_event runs from pointer_handle_frame. Without a
+ * frame after motion the X pointer never leaves the enter position and every
+ * button lands there (2026-09-15 "Xwayland unclickable"; chromium was fine
+ * because its WaylandPointer dispatches immediately unless the on-frame
+ * feature is on). enter/leave/button are their own groups (kwin
+ * PointerInterface: sendFrame after each), axis/rel already framed below. */
+static inline void ptr_frame(struct wl_resource* ptr) {
+    if (wl_resource_get_version(ptr) >= WL_POINTER_FRAME_SINCE_VERSION)
+        wl_pointer_send_frame(ptr);
+}
+
 /* Pointer leaves the current focus layer (caller holds rwl.rd; strictly paired with enter) */
 static void ptr_leave_focus(void) {
     if (!g_ptr_focus) return;
@@ -404,6 +420,7 @@ static void ptr_leave_focus(void) {
         pthread_mutex_lock(&s->ev_lock);
         wl_pointer_send_leave(ptr, wl_display_next_serial(g_srv.display),
                               s->resource);
+        ptr_frame(ptr);
         wl_client_flush(wl_resource_get_client(ptr));
         pthread_mutex_unlock(&s->ev_lock);
     }
@@ -418,6 +435,7 @@ static void ptr_enter_focus(struct wl_resource* ptr, struct awl_surface* hit,
     uint32_t serial = wl_display_next_serial(g_srv.display);
     wl_pointer_send_enter(ptr, serial, hit->resource,
                           wl_fixed_from_double(x), wl_fixed_from_double(y));
+    ptr_frame(ptr);
     wl_client_flush(wl_resource_get_client(ptr));
     pthread_mutex_unlock(&hit->ev_lock);
     g_ptr_enter_serial = serial;
@@ -475,6 +493,7 @@ static void tr_ptr_motion(uint64_t win, float x, float y) {
         wl_pointer_send_motion(ptr, awl_now_ms(),
                                wl_fixed_from_double(x),
                                wl_fixed_from_double(y));
+        ptr_frame(ptr);   /* Xwayland dispatches the motion only here (see ptr_frame) */
         wl_client_flush(wl_resource_get_client(ptr));
         pthread_mutex_unlock(&hit->ev_lock);
         dirty = cursor_pointer_moved(win, rx, ry);   /* position → atomic; redraw if a cursor image is shown */
@@ -547,6 +566,7 @@ static void tr_ptr_button(uint64_t win, uint32_t btn, uint32_t state) {
             pthread_mutex_lock(&hit->ev_lock);
             wl_pointer_send_button(ptr, wl_display_next_serial(g_srv.display),
                                    awl_now_ms(), btn, state);
+            ptr_frame(ptr);
             wl_client_flush(wl_resource_get_client(ptr));
             pthread_mutex_unlock(&hit->ev_lock);
             if (state) g_ptr_buttons |= bit;

@@ -158,6 +158,12 @@ int  awl_server_is_running(void);
  * connection mutex + atomic serial): resolve→protocol send→flush all happen
  * inside the binder thread, bypassing the event thread. */
 void awl_window_resize(uint64_t id, int32_t w, int32_t h);   /* xdg configure */
+/* An Android window of w×h physical px attached/resized: grow the wl_output
+ * mode to cover it (per-axis max, never shrinks; no-op when it already fits)
+ * and re-announce it to every bound wl_output. Rootless Xwayland sizes its X
+ * screen from the output and clamps pointer/touch to it, so an X toplevel
+ * larger than the output had unreachable regions. Any thread. */
+void awl_output_grow(uint32_t w, uint32_t h);
 /* Android window resized → the renderer's cached ANativeWindow size for this
  * window is stale: drop it, the next frame re-queries and renders at the new
  * size (the original full-screen path). Called from awl_window_resize; any

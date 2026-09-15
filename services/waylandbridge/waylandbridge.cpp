@@ -670,6 +670,28 @@ static void xwm_close_window(uint64_t id) {
     int n = snprintf(cmd, sizeof(cmd), "C %llu\n", (unsigned long long)serial);
     xwm_send_cmd(cmd, (size_t)n);
 }
+/* Xwayland window about to receive input: mirror the Android side onto the X
+ * stacking order. All X toplevels sit at (0,0) in one X screen (mini-wm pins
+ * them there), so the DIX hit-test (XYToWindow, which rootless Xwayland only
+ * wraps — xwayland-input.c xwl_xy_to_window) picks the TOPMOST X window at
+ * the event position, not the one whose Android window the event came from;
+ * with two X apps open the lower one was unreachable. A real compositor's
+ * XWM mirrors stacking the same way (mutter stack tracker / kwin
+ * propagateWindows). 'R' = raise only (pointer enter / touch down — hover
+ * must not move X keyboard focus, keys still come from the focused
+ * Activity), 'F' = raise + XSetInputFocus (Android window focus). Deduped
+ * on the last raised serial so a touch storm costs one connect. */
+static std::atomic<uint64_t> g_xwm_top{0};
+static void xwm_activate_window(uint64_t id, bool focus) {
+    uint64_t serial = 0;
+    if (!awl_xwayland_window_serial(id, &serial)) return;
+    if (!focus && g_xwm_top.load(std::memory_order_relaxed) == serial) return;
+    g_xwm_top.store(serial, std::memory_order_relaxed);
+    char cmd[48];
+    int n = snprintf(cmd, sizeof(cmd), "%c %llu\n", focus ? 'F' : 'R',
+                     (unsigned long long)serial);
+    xwm_send_cmd(cmd, (size_t)n);
+}
 
 /* config.json "auto_attach" (default false; see the daemon config section):
  * launch the host Activity on window creation. false = the window waits for a
@@ -1571,6 +1593,7 @@ static binder_status_t host_on_transact(AIBinder* binder, transaction_code_t cod
         ime_reopen_on_attach(id);            /* input state kept alive: enabled during detach → reopen */
         capture_reopen_on_attach(id);        /* constraint still active (persistent) → re-capture */
         keep_on_reopen_on_attach(id);        /* idle inhibitor alive → re-set FLAG_KEEP_SCREEN_ON */
+        awl_output_grow((uint32_t)w, (uint32_t)h);   /* X screen must cover the X window before it is resized to us */
         awl_window_resize(id, w, h);         /* Android fully owns sizing (initial + subsequent) */
         xwm_resize_window(id, w, h);         /* Xwayland window: sync initial size to the X side */
         awl_renderer_request_render(id);     /* render a first frame */
@@ -1701,6 +1724,7 @@ static binder_status_t host_on_transact(AIBinder* binder, transaction_code_t cod
         AParcel_readInt32(in, &w);
         AParcel_readInt32(in, &h);
         if (!window_ok((uint64_t)id64)) { AParcel_writeInt32(out, -1); return STATUS_OK; }
+        awl_output_grow((uint32_t)w, (uint32_t)h);
         awl_window_resize((uint64_t)id64, w, h);
         xwm_resize_window((uint64_t)id64, w, h);
         awl_renderer_request_render((uint64_t)id64);
@@ -1793,6 +1817,7 @@ static binder_status_t host_on_transact(AIBinder* binder, transaction_code_t cod
             if (it != g_wins.end()) it->second.kbd_focus = has != 0;
         }
         awl_window_set_activated((uint64_t)id64, has);
+        if (has) xwm_activate_window((uint64_t)id64, true);   /* Xwayland: raise + X input focus follow the Activity */
         awl_input_ev_t ev;
         memset(&ev, 0, sizeof(ev));
         ev.id = (uint64_t)id64;
@@ -1819,6 +1844,10 @@ static binder_status_t host_on_transact(AIBinder* binder, transaction_code_t cod
             return STATUS_BAD_VALUE;
         ev.id = (uint64_t)id64;
         if (!window_ok(ev.id)) return STATUS_PERMISSION_DENIED;   /* oneway: no reply to read anyway */
+        /* Xwayland: the X window this event is aimed at must be on top of the
+         * X stack before the pointer/touch reaches it (see xwm_activate_window) */
+        if (ev.type == AWL_IN_PTR_ENTER || ev.type == AWL_IN_TOUCH_DOWN)
+            xwm_activate_window(ev.id, false);
         awl_input_dispatch(&ev);
         return STATUS_OK;   /* oneway, no reply */
     }

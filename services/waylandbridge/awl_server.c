@@ -13,14 +13,29 @@
 
 struct awl_server g_srv;
 
-/* ---------------- wl_output (main screen) ---------------- */
+/* ---------------- wl_output (main screen) ----------------
+ * One virtual output. Its mode is NOT a fixed display size: the bound
+ * resources are kept in a list and awl_output_grow re-announces the mode
+ * whenever an Android window larger than the current mode attaches. Reason
+ * (2026-09-15 Xwayland "unclickable"): rootless Xwayland sizes its X screen
+ * from the wl_output bounding box (hw/xwayland/xwayland-output.c
+ * update_screen_size) and the X server clamps the pointer to the screen
+ * (mi/mipointer.c limits = pScreen->width/height) while touch is normalised
+ * by the screen size (xwayland-input.c xwl_touch_send_event). Every X
+ * toplevel here is resized to its Android window, so any window bigger than
+ * the output had unreachable regions — with the query_display fallback
+ * (1280x720 when `wm size` is denied in the awl_daemon domain) that was most
+ * of a 3392x2400 window. The mode only ever grows (per axis) — no client
+ * sees a shrink — and Xwayland turns it into a RandR change. */
 
-static void output_bind(struct wl_client* client, void* data,
-                        uint32_t version, uint32_t id) {
-    struct wl_resource* res = wl_resource_create(
-            client, &wl_output_interface, version < 3 ? version : 3, id);
-    wl_resource_set_user_data(res, NULL);
+struct awl_output_res {
+    struct wl_resource* res;
+    struct wl_list link;   /* g_outputs (topology: g_srv.rwl) */
+};
+static struct wl_list g_outputs;
 
+/* caller holds rwl (rd or wr): resource fields are read, no topology change */
+static void output_send_state(struct wl_resource* res) {
     int dpi = g_srv.info.dpi > 0 ? g_srv.info.dpi : 420;
     wl_output_send_geometry(res, 0, 0,
                             (int32_t)(g_srv.info.width * 25.4f / dpi),
@@ -33,6 +48,60 @@ static void output_bind(struct wl_client* client, void* data,
         wl_output_send_scale(res, (uint32_t)g_srv.info.scale);
     if (wl_resource_get_version(res) >= WL_OUTPUT_DONE_SINCE_VERSION)
         wl_output_send_done(res);
+}
+
+static void output_res_destroy(struct wl_resource* res) {
+    struct awl_output_res* o = wl_resource_get_user_data(res);
+    if (!o) return;
+    pthread_rwlock_wrlock(&g_srv.rwl);
+    wl_list_remove(&o->link);
+    pthread_rwlock_unlock(&g_srv.rwl);
+    free(o);
+}
+
+static void output_release(struct wl_client* client, struct wl_resource* res) {
+    wl_resource_destroy(res);
+}
+static const struct wl_output_interface output_iface = {
+    .release = output_release,   /* v3 */
+};
+
+static void output_bind(struct wl_client* client, void* data,
+                        uint32_t version, uint32_t id) {
+    struct wl_resource* res = wl_resource_create(
+            client, &wl_output_interface, version < 3 ? version : 3, id);
+    if (!res) { wl_client_post_no_memory(client); return; }
+    struct awl_output_res* o = calloc(1, sizeof(*o));
+    if (!o) { wl_resource_destroy(res); wl_client_post_no_memory(client); return; }
+    o->res = res;
+    wl_resource_set_implementation(res, &output_iface, o, output_res_destroy);
+    pthread_rwlock_wrlock(&g_srv.rwl);
+    wl_list_insert(g_outputs.prev, &o->link);
+    output_send_state(res);   /* info is read under the same lock grow writes it */
+    pthread_rwlock_unlock(&g_srv.rwl);
+}
+
+/* Any thread (binder SURFACE/RESIZE). Grows the output mode to cover w×h
+ * (physical px, per-axis max, never shrinks) and re-announces it to every
+ * bound wl_output; a no-op when the window already fits. */
+void awl_output_grow(uint32_t w, uint32_t h) {
+    if (!g_srv.running || (w <= g_srv.info.width && h <= g_srv.info.height))
+        return;   /* racy pre-check only — the decision repeats under the lock */
+    pthread_rwlock_wrlock(&g_srv.rwl);
+    if (w <= g_srv.info.width && h <= g_srv.info.height) {
+        pthread_rwlock_unlock(&g_srv.rwl);
+        return;
+    }
+    if (w > g_srv.info.width) g_srv.info.width = w;
+    if (h > g_srv.info.height) g_srv.info.height = h;
+    struct awl_output_res* o;
+    wl_list_for_each(o, &g_outputs, link) {
+        output_send_state(o->res);
+        wl_client_flush(wl_resource_get_client(o->res));
+    }
+    pthread_rwlock_unlock(&g_srv.rwl);
+    LOGI("output grown to %ux%u (window %ux%u attached)",
+         g_srv.info.width, g_srv.info.height, w, h);
 }
 
 /* ---------------- Client lifecycle ---------------- */
@@ -305,6 +374,7 @@ int awl_server_start(int listen_fd, const awl_display_info_t* info,
     wl_list_init(&g_srv.surfaces);
     wl_list_init(&g_srv.buffers);
     wl_list_init(&g_srv.clients);
+    wl_list_init(&g_outputs);
     g_srv.next_surface_id = 1;
     g_srv.info = *info;
     if (g_srv.info.scale <= 0) g_srv.info.scale = 1;
