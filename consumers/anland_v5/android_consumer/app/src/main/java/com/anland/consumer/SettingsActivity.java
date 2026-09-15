@@ -63,6 +63,8 @@ public class SettingsActivity extends Activity {
     private static final String KEY_IMMERSIVE_ENABLED = ImmersiveMode.KEY_ENABLED;
     private static final String KEY_IMMERSIVE_KEYCODE = ImmersiveMode.KEY_KEYCODE;
     private static final String KEY_IMMERSIVE_SCANCODE = ImmersiveMode.KEY_SCANCODE;
+    private static final String KEY_OPLUS_REFRESH_RATE_LOCK =
+            OplusRefreshRateLease.KEY_ENABLED;
     private static final String KEY_EXTRA_KEYS_MODE = "extra_keys_mode";
     // Mapped to R.array.extra_keys_mode_options positions
     private static final String MODE_ALWAYS = "always";
@@ -799,6 +801,23 @@ public class SettingsActivity extends Activity {
         immersiveHint.setTextColor(Color.GRAY);
         immersiveHint.setPadding(0, dp(4), 0, dp(12));
         root.addView(immersiveHint);
+
+        Switch refreshRateSwitch = new Switch(this);
+        refreshRateSwitch.setText(R.string.immersive_oplus_refresh_rate_switch);
+        refreshRateSwitch.setTextSize(14);
+        refreshRateSwitch.setChecked(prefs.getBoolean(KEY_OPLUS_REFRESH_RATE_LOCK,
+                OplusRefreshRateLease.DEFAULT_ENABLED));
+        refreshRateSwitch.setOnCheckedChangeListener((v, checked) ->
+            getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+                .putBoolean(KEY_OPLUS_REFRESH_RATE_LOCK, checked).apply());
+        root.addView(refreshRateSwitch);
+
+        TextView refreshRateHint = new TextView(this);
+        refreshRateHint.setText(R.string.immersive_oplus_refresh_rate_hint);
+        refreshRateHint.setTextSize(12);
+        refreshRateHint.setTextColor(Color.GRAY);
+        refreshRateHint.setPadding(0, dp(4), 0, dp(12));
+        root.addView(refreshRateHint);
 
         // Constructing the row appends it to `root`.
         new KeyBinding(root, KEY_IMMERSIVE_KEYCODE, KEY_IMMERSIVE_SCANCODE,

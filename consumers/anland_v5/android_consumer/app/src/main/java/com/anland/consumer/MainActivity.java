@@ -226,6 +226,7 @@ public class MainActivity extends Activity
     // enables it in Settings and presses the key they bound to it.
     private ImmersiveInputController immersive;
     private boolean immersiveActive = false;
+    private boolean mResumed = false;
     private boolean touchscreenGrabbed;
     // Cached display rotation. A grabbed touchscreen reports in the panel's own
     // fixed frame, so the rotation has to be undone before its coordinates mean
@@ -289,6 +290,11 @@ public class MainActivity extends Activity
             // camera frames route to this window (others get blank frames).
             sInstance = this;
             if (mNative != null) mNative.setFocused(true);
+            // Automatic immersive entry can happen from onResume() before the
+            // window has received its first focus callback. Retry the policy lease
+            // here when that session is still active.
+            if (immersiveActive && mResumed && isOplusRefreshRateLockEnabled())
+                OplusRefreshRateLease.acquire(this);
         }
         if (hasFocus && clipboard != null) {
             clipboard.pushClipboard();
@@ -308,6 +314,7 @@ public class MainActivity extends Activity
             immersive.stop();
             releaseAllForwardedKeys();
             releaseScreenTouches();
+            OplusRefreshRateLease.release(this);
         }
     }
 
@@ -1519,6 +1526,7 @@ public class MainActivity extends Activity
     @Override
     protected void onResume() {
         super.onResume();
+        mResumed = true;
 
         // Bounced to Settings from onCreate (socket missing): nothing was set up, so
         // just exit this window instead of running the connect logic.
@@ -1615,12 +1623,14 @@ public class MainActivity extends Activity
     @Override
     protected void onPause() {
         super.onPause();
+        mResumed = false;
         // Socket-missing bounce: no pipeline exists, so skip teardown (mNative is
         // null) and don't let the jump to Settings trigger any of it.
         if (mForceSettings) return;
         // A session must never outlive the foreground: leaving the input devices
         // grabbed for a window the user has left is how a tablet gets bricked.
         if (immersive != null) immersive.stop();
+        OplusRefreshRateLease.release(this);
         // Before the pipeline stops: a key this window forwarded and never saw
         // released has to be lifted, or the desktop holds it until the user
         // presses that key again.
@@ -1639,8 +1649,10 @@ public class MainActivity extends Activity
 
     @Override
     protected void onDestroy() {
+        mResumed = false;
         abandonMediaAudioFocus();
         if (immersive != null) immersive.stop();
+        OplusRefreshRateLease.release(this);
         // Before the pipeline stops: a key this window forwarded and never saw
         // released has to be lifted, or the desktop holds it until the user
         // presses that key again.
@@ -1780,6 +1792,7 @@ public class MainActivity extends Activity
     public void surfaceDestroyed(SurfaceHolder holder) {
         surfaceReady = false;
         if (immersive != null) immersive.stop();
+        OplusRefreshRateLease.release(this);
         // Before the pipeline stops: a key this window forwarded and never saw
         // released has to be lifted, or the desktop holds it until the user
         // presses that key again.
@@ -2167,50 +2180,21 @@ public class MainActivity extends Activity
             // external pointer" setting is left alone and takes effect again as
             // soon as the session ends.
             releasePointerCapture(false);
-            pinDisplayRefreshRate(true);
+            if (mResumed && hasWindowFocus() && isOplusRefreshRateLockEnabled())
+                OplusRefreshRateLease.acquire(this);
+            else
+                OplusRefreshRateLease.release(this);
         } else {
-            pinDisplayRefreshRate(false);
+            OplusRefreshRateLease.release(this);
             if (mRoot != null)
                 mRoot.post(this::syncPointerCapture);
         }
     }
 
-    /**
-     * While an immersive session runs, the desktop is the only thing on screen.
-     * Panels with power-saving mode switching drop to 30-60 Hz when the image
-     * goes still, which reads as a sudden refresh-rate drop and stutter the
-     * moment the user stops moving the pointer; a touch on the panel would have
-     * kept it boosted before. Pin the display to a high rate for the duration
-     * (KWin follows the resulting mode switch through pushRefreshRate).
-     */
-    private void pinDisplayRefreshRate(boolean pin) {
-        try {
-            Surface s = surfaceView.getHolder().getSurface();
-            if (s == null || !s.isValid())
-                return;
-            if (!pin) {
-                s.setFrameRate(0f, Surface.FRAME_RATE_COMPATIBILITY_DEFAULT,
-                        Surface.CHANGE_FRAME_RATE_ALWAYS);
-                return;
-            }
-            Display d = getDisplay();
-            if (d == null)
-                return;
-            float hz = d.getRefreshRate();
-            if (hz < 90f) {
-                // Entered mid-drop: go for the panel's best instead of pinning
-                // whatever low rate it has fallen to.
-                for (float r : d.getSupportedRefreshRates()) {
-                    if (r > hz)
-                        hz = r;
-                }
-            }
-            s.setFrameRate(hz, Surface.FRAME_RATE_COMPATIBILITY_DEFAULT,
-                    Surface.CHANGE_FRAME_RATE_ALWAYS);
-            Log.i(TAG, "immersive: display pinned at " + hz + " Hz");
-        } catch (Exception e) {
-            Log.w(TAG, "setFrameRate failed: " + e);
-        }
+    private boolean isOplusRefreshRateLockEnabled() {
+        return getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                .getBoolean(OplusRefreshRateLease.KEY_ENABLED,
+                        OplusRefreshRateLease.DEFAULT_ENABLED);
     }
 
     // ================================================================
