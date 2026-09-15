@@ -105,7 +105,7 @@ public class AwlWindowActivity extends Activity {
     /** Unique Activity instance id (trailing host field of SURFACE/PAUSE: daemon eviction criterion) */
     private static final AtomicLong HOST_SEQ = new AtomicLong();
 
-    private long id;
+    private long id = -1;   /* -1 = unbound (bindWindowId's firstBind test; a plain long would read 0 = "bound to window 0") */
     private long host;
     private SurfaceView sv;
     private FrameLayout root;
@@ -407,9 +407,15 @@ public class AwlWindowActivity extends Activity {
         imm = getSystemService(InputMethodManager.class);
         clipMgr = getSystemService(ClipboardManager.class);
 
-        id = getIntent().getLongExtra("id", -1);
-        if (id >= 0) {
-            bindWindowId(id, getIntent().getStringExtra("title"), null, true);
+        /* Local, NOT the field: bindWindowId's first line is
+         * `if (newId == id) return;` — pre-assigning the field made the bind a
+         * no-op for every daemon/attachWindow-started instance (no ctrl, no
+         * death token, no LIVE entry, host=0 → SURFACE attached without a
+         * ctrl channel, so C_CLOSE / WINDOW_GONE could never finish it; the
+         * window stayed on its last frame after the client quit). */
+        long startId = getIntent().getLongExtra("id", -1);
+        if (startId >= 0) {
+            bindWindowId(startId, getIntent().getStringExtra("title"), null, true);
         } else if (onAwaitWindow()) {
             /* awaiting mode: no daemon-death watch yet (armed at first bind);
              * but with the daemon GONE there is nothing to wait for */
