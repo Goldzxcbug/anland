@@ -15,7 +15,16 @@
 #include "wayland-server-protocol-core.h"
 #include "linux-dmabuf-unstable-v1-server-protocol.h"
 #include "xdg-shell-server-protocol.h"
+#include "awl_bufferqueue.h"
 #include "awl_log.h"   /* AWL_TAG "anland-wl" + LOGI/LOGE/LOGD (see awl_log.h) */
+
+/* Damage state of a surface since the shm converter last consumed it
+ * (awl_surface.cd_state; NONE = calloc default) */
+enum {
+    AWL_DMG_NONE = 0,
+    AWL_DMG_RECT = 1,
+    AWL_DMG_FULL = 2,
+};
 
 #define awl_fourcc(a, b, c, d) \
     ((uint32_t)(a) | ((uint32_t)(b) << 8) | ((uint32_t)(c) << 16) | \
@@ -54,10 +63,15 @@ enum awl_role {
 };
 
 /* wl_buffer wrapper for the dmabuf side (shm buffers are self-managed by
- * libwayland and not wrapped) */
+ * libwayland and not wrapped). Refcounted: the resource holds one reference,
+ * every queued frame (awl_bufferqueue element cookie) holds another — the
+ * wrapper outlives a client-side wl_buffer.destroy while its frames are
+ * still in flight. `resource` is cleared by the destroy handler under
+ * g_bufref_lock; wl_buffer.release is only ever sent under that lock. */
 struct awl_buffer {
-    struct wl_resource* resource;    /* wl_buffer (created by us) */
+    struct wl_resource* resource;    /* wl_buffer (created by us); NULL = destroyed (g_bufref_lock) */
     struct wl_list link;             /* server.buffers */
+    atomic_int refs;
     int dmabuf_fd;                   /* owned after dup */
     uint64_t ino;                    /* dma-buf inode at creation — render-side
                                       * identity without a per-frame fstat
@@ -170,36 +184,132 @@ struct awl_surface {
     int32_t pending_offset_x, pending_offset_y;
 
     /* damage (wl_surface.damage/damage_buffer accumulated in pending —
-     * surface-local px, bbox merge; moved to cur on the commit/latch-apply
-     * that presents a buffer). cur_* = damage since the renderer last
-     * consumed it (awl_surface_get_damage / _damage_consumed):
-     *   NONE    nothing changed since the last upload (cursor/layer move
-     *           re-render → the renderer skips the upload entirely)
-     *   RECT    the bbox rect needs re-uploading
+     * surface-local px, bbox merge; moved to cur on the commit/latch-apply).
+     * cur_* = damage since the shm converter (awl_shmblit.c) last consumed
+     * it — dmabuf layers never read it (the GPU samples the memory in place):
+     *   NONE    nothing changed since the last copy
+     *   RECT    the bbox rect needs re-copying
      *   FULL    a commit attached a buffer with NO damage — protocol
      *           default: whole surface (client gave no information)
-     * cd_gen increments on every change: the renderer consumes only when
-     * token+gen still match (a commit racing the upload keeps its damage
-     * for the next frame — over-upload is always safe, under-upload never).
-     * All owned by this surface's ev_lock. */
+     * Over-copy is always safe, under-copy never. All owned by ev_lock. */
     int32_t pd_x, pd_y, pd_w, pd_h;
     int pending_damage_empty;
     int32_t cur_damage_x, cur_damage_y, cur_damage_w, cur_damage_h;
-    int cd_state;               /* AWL_DMG_* (awl.h; NONE = 0, calloc-init) */
-    uint32_t cd_gen;
+    int cd_state;               /* AWL_DMG_* (NONE = 0, calloc-init) */
 
     struct wl_list frame_callbacks;
     bool dirty;                      /* awaiting render after commit */
 
-    /* Deferred release queue (KWin GraphicsBuffer reference semantics:
-     * wl_buffer.release is sent only after the frame that sampled the buffer
-     * is presented) — keeps clients from overwriting a dmabuf mid-sampling.
-     * Only dmabuf queues (shm upload copies at once, no concurrent sampling);
-     * presented drains it; queue full (rendering stalled) degrades to freeing
-     * the head immediately. wl_buffer destruction removes entries from it. */
-    struct wl_resource* release_q[4];
-    int release_q_n;
+    /* ---- frame stream (awl_bufferqueue.h) ----
+     * Every presented buffer state change of this surface becomes one queue
+     * element: dmabuf commits push the client's fd + acquire fence directly
+     * (commit path, awl_surface_apply_buffer); shm commits go through the
+     * shm→dmabuf converter (awl_shmblit.c), which pushes the converted frame
+     * at vsync cadence; attach(NULL) pushes a NULL marker. The renderer is
+     * the consumer (lock → drain → gethead → GL → unlock). wl_buffer.release
+     * / zwp_linux_buffer_release_v1 go out when the element leaves the queue
+     * (bq_release_cb in awl_surface.c) — never from a "presented" hook. */
+    struct awl_bufferqueue* q;
+    struct awl_shmblit* shm;         /* created on the first shm attach; NULL = never used shm */
+    atomic_int attached;             /* root only: an Android window is attached (renderer
+                                      * alive). Commit-time drain is skipped while 0 so a
+                                      * minimized window's client parks on buffer starvation
+                                      * instead of spinning. Adapter writes (awl_window_attached). */
+
+    /* ---- zwp_linux_explicit_synchronization_v1 (awl_esync.c) ----
+     * Double-buffered like the buffer itself: pend_* is applied on the commit
+     * that carries the attach (sync-subsurface latching moves it to
+     * latched_*). Ownership of an acquire fd moves into the queue element. */
+    struct wl_resource* sync_res;            /* zwp_linux_surface_synchronization_v1 (≤ 1) */
+    int pend_acquire_fd;                     /* -1 = none */
+    struct wl_resource* pend_release_res;    /* zwp_linux_buffer_release_v1 for this cycle */
+    int latched_acquire_fd;
+    struct wl_resource* latched_release_res;
+    struct wl_list esync_all;                /* every live release object of this surface
+                                              * (awl_esync_release::all_link; dispatch thread) */
+    struct wl_list esync_gc;                 /* delivered ones awaiting wl_resource_destroy on
+                                              * the dispatch thread (gc_link; g_bufref_lock) */
 };
+
+/* Buffer / release-object liveness lock (awl_surface.c): guards
+ * awl_buffer.resource, awl_bufref.release_res, esync_gc — the words a
+ * client-side destroy (dispatch thread) races against a release being sent
+ * from the render or shm thread. Leaf lock: taken with nothing else held
+ * except a bufferqueue head lock (drain callback) or rwl/ev_lock (destroy
+ * handlers); never take rwl/ev_lock inside it. */
+extern pthread_mutex_t g_bufref_lock;
+struct awl_buffer* awl_buffer_ref(struct awl_buffer* b);
+void awl_buffer_unref(struct awl_buffer* b);
+
+/* Queue element cookie (awl_bq_buffer.user): what the release callback needs
+ * to hand the frame back to whoever produced it. */
+enum { AWL_REF_DMABUF = 1, AWL_REF_SHM = 2 };
+struct awl_bufref {
+    int kind;
+    struct awl_buffer* b;                /* DMABUF: ref'd wrapper */
+    struct wl_resource* release_res;     /* zwp_linux_buffer_release_v1 of the commit (g_bufref_lock; NULL = none/destroyed) */
+    struct awl_shmblit* sb;              /* SHM: ref'd converter + slot index */
+    int slot;
+};
+struct awl_bufref* awl_bufref_shm(struct awl_shmblit* sb, int slot);   /* awl_surface.c */
+/* Discard an uncommitted/unpresented explicit-sync pair: close the fence,
+ * immediate_release the object (no lock held by the caller). */
+void awl_surface_discard_sync(int acquire_fd, struct wl_resource* release_res);
+
+/* Commit-path glue (awl_surface.c). apply_buffer: the double-buffered buffer
+ * state of `s` just became `res` (NULL = detach); acquire_fd (owned, moved)
+ * and release_res (may be NULL) are the explicit-sync state of that cycle.
+ * Pushes the frame (dmabuf) / hands it to the shm converter / pushes a NULL
+ * marker. Caller holds s->ev_lock. commit_drain: the opportunistic
+ * trylock+drain (throttle rule inside). schedule_render: root window dirty. */
+void awl_surface_apply_buffer(struct awl_surface* s, struct wl_resource* res,
+                              int acquire_fd, struct wl_resource* release_res);
+void awl_surface_commit_drain(struct awl_surface* s);
+void awl_surface_schedule_render(struct awl_surface* s);
+
+/* awl_shmblit.c — per-surface shm→dmabuf converter (triple-buffered, damage
+ * accumulating, one global blit thread ticking at the output refresh rate).
+ * Refcounted: the surface holds one reference, every queued converted frame
+ * holds another (slot_released gives the slot back). All *_locked entries
+ * are called with the surface's ev_lock held. */
+struct awl_shmblit* awl_shmblit_create(struct awl_surface* s);
+void awl_shmblit_ref(struct awl_shmblit* sb);
+void awl_shmblit_unref(struct awl_shmblit* sb);
+/* surface dying: stop the blit thread touching the surface (waits for an
+ * in-flight copy). Call with NO logic-layer lock held, before rwl.wr. */
+void awl_shmblit_detach(struct awl_shmblit* sb);
+/* attach committed: res = the new shm wl_buffer (NULL = detach), release_res =
+ * its explicit-sync release object (immediate_release when we are done
+ * reading it) */
+void awl_shmblit_attach_locked(struct awl_shmblit* sb, struct wl_resource* res,
+                               struct wl_resource* release_res);
+void awl_shmblit_damaged_locked(struct awl_shmblit* sb);   /* cd_state changed (any commit) */
+void awl_shmblit_buffer_gone_locked(struct awl_shmblit* sb, struct wl_resource* res);
+void awl_shmblit_release_gone_locked(struct awl_shmblit* sb, struct wl_resource* release_res);
+void awl_shmblit_slot_released(struct awl_shmblit* sb, int slot);   /* queue release callback */
+void awl_shmblit_shutdown(void);
+
+/* awl_dmaheap.c — CPU-writable dma-buf (kernel DMA heap uapi, no gralloc) */
+int   awl_dmaheap_alloc(size_t len);              /* dma-buf fd or -1 */
+void* awl_dmabuf_map(int fd, size_t len);
+void  awl_dmabuf_unmap(void* p, size_t len);
+int   awl_dmabuf_cpu_sync(int fd, int start, int write);   /* DMA_BUF_IOCTL_SYNC */
+
+/* awl_esync.c — zwp_linux_explicit_synchronization_v1 v2 */
+void awl_esync_setup(void);
+/* Deliver the release event for a commit's release object (fence_fd ≥ 0 →
+ * fenced_release, else immediate_release) and park the resource for
+ * destruction on its dispatch thread. Caller holds g_bufref_lock; `res` must
+ * be live (the caller read it from a guarded word). The caller flushes. */
+void awl_esync_release_locked(struct wl_resource* res, int fence_fd);
+/* A queued frame now carries this release object (its cookie is `ref`):
+ * the object's destroy handler clears ref->release_res. Dispatch thread. */
+void awl_esync_bind_ref(struct wl_resource* res, struct awl_bufref* ref);
+void awl_esync_gc(struct awl_surface* s);           /* dispatch thread: destroy parked release objects */
+void awl_esync_surface_gone(struct awl_surface* s); /* dispatch thread, rwl.wr held, queue already flushed, before free */
+/* Commit-time protocol validation (dispatch thread, before latching/apply):
+ * 1 = a protocol error was posted, the commit must be abandoned. */
+int awl_esync_commit_check(struct awl_surface* s);
 
 /* ---- wl_data_device_manager (awl_data_device.c; KWin semantics) ----
  * Topology (three lists) is owned by g_srv.rwl: create/destroy and offer
@@ -284,6 +394,7 @@ struct awl_server {
     struct wl_global* g_xdg_wm_base;
     struct wl_global* g_subcompositor;
     struct wl_global* g_data_device_manager;
+    struct wl_global* g_esync;       /* zwp_linux_explicit_synchronization_v1 */
 
     struct wl_list data_devices;   /* struct awl_data_device::link */
     struct wl_list data_sources;   /* struct awl_data_source::link */
@@ -337,10 +448,9 @@ int awl_region_bbox(struct wl_resource* region, int32_t* x, int32_t* y,
  * then means FULL; an empty commit (neither) is a no-op. */
 void awl_damage_merge_pending(struct awl_surface* s, int has_attach);
 
-/* Shared by dmabuf/shm: on buffer destroy, unlink it from current/pending */
-void awl_surface_detach_buffer(struct wl_resource* buffer_res);
-/* Enqueue a deferred release (caller holds that surface's ev_lock; dmabuf only — shm releases immediately) */
-void awl_surface_release_defer(struct awl_surface* s, struct wl_resource* buf);
+/* Shared by dmabuf/shm: on buffer destroy, unlink it from pending/current/
+ * latched of every surface (rwl.rd + ev_lock inside; dispatch thread) */
+void awl_surface_buffer_gone(struct wl_resource* buffer_res);
 
 /* awl_input.c — wl_seat input (per-event literal translation: Android is the
  * routing authority, events carry the window id; event types in awl.h) */

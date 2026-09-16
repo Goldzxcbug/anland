@@ -17,9 +17,7 @@
 extern "C" {
 #endif
 
-#define AWL_ABI_VERSION 2
-
-struct wl_shm_buffer;
+#define AWL_ABI_VERSION 3
 
 /* ---- Window callbacks (implemented by the adaptation layer, invoked on the
  *      client's protocol dispatch thread: the main event thread or its
@@ -307,65 +305,27 @@ void awl_ime_text(uint64_t id, uint32_t op, const char* text, int32_t a, int32_t
  * selection. Echo suppression is the APK side's job (lastClipWritten). */
 void awl_datadev_android_clip(const char* utf8);
 
-/* ---- Adaptation layer → logic layer (render thread; locked snapshot
- *      inside) ---- */
+/* ---- Adaptation layer → logic layer (render thread) ----
+ * Frames reach the renderer through the surface's buffer queue
+ * (awl_bufferqueue.h — dma-buf fd + acquire fence + geometry, nothing
+ * else): every layer of a window has one. Per frame the renderer does, for
+ * each layer, queue_ref → lock → drain → gethead → GL → set_release_fence →
+ * unlock → unref. wl_shm buffers never reach it: the logic layer converts
+ * them to dma-buf internally (awl_shmblit.c) and pushes the result. Buffer
+ * release / explicit-sync release are the queue's business (they fire when
+ * a frame leaves it), not the renderer's.
+ *
+ * awl_surface_queue_ref: +1 reference on the layer's queue (NULL = unknown
+ * surface); the caller must awl_bufferqueue_unref it after the frame. The
+ * reference keeps a locked queue alive across a concurrent surface death. */
+struct awl_bufferqueue;
+struct awl_bufferqueue* awl_surface_queue_ref(uint64_t id);
 
-enum {
-    AWL_BUFFER_NONE = 0,
-    AWL_BUFFER_SHM = 1,      /* wl_shm_buffer, accessed via libwayland API */
-    AWL_BUFFER_DMABUF = 2,
-};
-
-typedef struct awl_buffer_info {
-    int kind;
-    void* token;             /* buffer identity (wayland resource pointer value, reuse check) */
-    /* SHM (both shm/pool are references pinned at get: the mapping survives
-     * the client destroying the buffer/pool — the upload is asynchronous to
-     * commit; the caller must return them with wl_shm_buffer_unref +
-     * wl_shm_pool_unref when done, otherwise the mapping leaks) */
-    struct wl_shm_buffer* shm;    /* read-only access: wl_shm_buffer_get_data etc. */
-    struct wl_shm_pool*   pool;   /* pool reference: also defers resize (mremap) */
-    /* DMABUF (fd is dup'ed by this call — stays valid even if the buffer is
-     * destroyed meanwhile; the caller must close it when done) */
-    int      fd;
-    uint64_t ino;            /* dma-buf identity, fstat'ed once at buffer
-                              * creation (no per-frame fstat on the render
-                              * path); 0 = unknown (caller fstat fallback) */
-    uint64_t modifier;
-    /* common */
-    uint32_t width, height, stride;
-    uint32_t drm_format;          /* DRM fourcc */
-} awl_buffer_info_t;
-
-/* Get the current buffer (rdlock+ev_lock snapshot + dup fd, render-thread
- * safe). Returns 0 = present, <0 = none */
-int  awl_surface_get_buffer(uint64_t id, awl_buffer_info_t* out);
-
-/* ---- Damage (shm render path; wl_surface.damage accumulation) ----
- * get_damage returns the damage accumulated since the renderer last consumed
- * it (read-only snapshot under rdlock+ev_lock):
- *   AWL_DMG_NONE  nothing changed — skip the upload entirely (re-render
- *                 triggered by a cursor/layer move)
- *   AWL_DMG_RECT  re-upload the bbox (x,y,w,h, buffer px, already scaled by
- *                 buffer_scale; clamp to the buffer before use)
- *   AWL_DMG_FULL  the client committed a buffer with no damage — upload in
- *                 full (protocol default)
- * token = the wl_buffer resource the damage applies to, gen = its revision.
- * Compare token with the awl_buffer_info_t.token from get_buffer: mismatch
- * (buffer swapped between the two calls) → upload in full and do NOT consume.
- * After a successful upload call awl_surface_damage_consumed with the same
- * token+gen — it clears the damage only when still current (a commit that
- * raced the upload keeps its damage for the next frame). Over-upload is
- * always safe, under-upload never. dmabuf layers ignore this (the texture
- * samples the memory in place). */
-enum {
-    AWL_DMG_NONE = 0,
-    AWL_DMG_RECT = 1,
-    AWL_DMG_FULL = 2,
-};
-int  awl_surface_get_damage(uint64_t id, int32_t* x, int32_t* y,
-                            int32_t* w, int32_t* h, void** token, uint32_t* gen);
-void awl_surface_damage_consumed(uint64_t id, void* token, uint32_t gen);
+/* Adapter → logic layer: the Android window (render target) of root `id`
+ * attached (1) / detached (0). While detached the commit path stops draining
+ * the window's queues: the client runs out of buffers and parks — a
+ * minimized window's client neither spins nor burns frames. Any thread. */
+void awl_window_attached(uint64_t id, int attached);
 
 /* ---- Sublayer composition snapshot (wl_subsurface, render thread) ----
  * #31 zoom: coordinates/sizes are always logical px (viewport dst | source |

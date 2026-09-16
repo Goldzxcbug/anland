@@ -272,6 +272,7 @@ static void detach_window(uint64_t id) {
     bool had_kbd = false;
     bool sched_drop = false;      /* was attached → restore the client's cgroups */
     bool sched_none_left = false; /* this detach emptied the attach set → self falls back */
+    awl_window_attached(id, 0);            /* logic layer: stop draining this window's queues at commit (client parks on buffer starvation) */
     awl_renderer_attach(id, nullptr);      /* free GL resources (window and texture state stays inside the renderer) */
     {
         std::lock_guard<std::mutex> lk(g_state_lock);
@@ -1525,6 +1526,7 @@ static binder_status_t host_on_transact(AIBinder* binder, transaction_code_t cod
             return STATUS_OK;
         }
         ANativeWindow_release(anw);          /* renderer holds its own reference */
+        awl_window_attached(id, 1);          /* logic layer: commit-time queue drains resume (mailbox) */
 
         /* single atomic decision point (mutually exclusive with cb_window_destroyed / concurrent SURFACE) */
         AIBinder* evicted = nullptr;

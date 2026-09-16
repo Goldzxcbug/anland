@@ -183,6 +183,21 @@ add_custom_command(
           ${AWL_GENERATED}/xwayland-shell-v1-protocol.c
   DEPENDS ${XWLS_XML})
 
+# linux-explicit-synchronization v1 protocol codegen (acquire/release fences
+ # per commit, awl_esync.c in this dir; the queue in awl_bufferqueue.c
+ # consumes the acquire fence, the renderer produces the release fence)
+set(ES_XML ${CMAKE_CURRENT_SOURCE_DIR}/protocols/linux-explicit-synchronization-unstable-v1.xml)
+add_custom_command(
+  OUTPUT ${AWL_GENERATED}/linux-explicit-synchronization-unstable-v1-server-protocol.h
+  COMMAND ${WAYLAND_SCANNER} server-header ${ES_XML}
+          ${AWL_GENERATED}/linux-explicit-synchronization-unstable-v1-server-protocol.h
+  DEPENDS ${ES_XML})
+add_custom_command(
+  OUTPUT ${AWL_GENERATED}/linux-explicit-synchronization-unstable-v1-protocol.c
+  COMMAND ${WAYLAND_SCANNER} private-code ${ES_XML}
+          ${AWL_GENERATED}/linux-explicit-synchronization-unstable-v1-protocol.c
+  DEPENDS ${ES_XML})
+
 # text-input v1/v3 protocol codegen (Android IME bridging, see awl_ime.c in this dir)
 set(TI1_XML ${CMAKE_CURRENT_SOURCE_DIR}/protocols/text-input-unstable-v1.xml)
 add_custom_command(
@@ -306,6 +321,12 @@ add_executable(waylandbridge
   awl_idle.c
   awl_icon.c
   awl_sched.c
+  awl_bufferqueue.c
+  awl_dmaheap.c
+  awl_shmblit.c
+  awl_esync.c
+  ${AWL_GENERATED}/linux-explicit-synchronization-unstable-v1-protocol.c
+  ${AWL_GENERATED}/linux-explicit-synchronization-unstable-v1-server-protocol.h
   ${AWL_GENERATED}/xwayland-shell-v1-protocol.c
   ${AWL_GENERATED}/xwayland-shell-v1-server-protocol.h
   ${AWL_GENERATED}/relative-pointer-unstable-v1-protocol.c

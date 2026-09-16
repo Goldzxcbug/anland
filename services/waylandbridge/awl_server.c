@@ -397,6 +397,7 @@ int awl_server_start(int listen_fd, const awl_display_info_t* info,
     awl_xwayland_setup();     /* xwayland_shell_v1 (Xwayland rootless, #32) */
     awl_idle_setup();         /* zwp_idle_inhibit_manager_v1 (keep-screen-on, C_KEEPON) */
     awl_icon_setup();         /* xdg_toplevel_icon_manager_v1 (per-window icons, C_ICON) */
+    awl_esync_setup();        /* zwp_linux_explicit_synchronization_v1 (acquire/release fences) */
 
     g_srv.g_output = wl_global_create(g_srv.display, &wl_output_interface, 3,
                                       NULL, output_bind);
@@ -479,6 +480,9 @@ void awl_server_stop(void) {
     /* 4. Unmigrated clients (connections that never mapped) destroyed in
      *    one sweep — main thread already stopped, no concurrent dispatch */
     wl_display_destroy_clients(g_srv.display);
+
+    /* every surface is gone (its converter detached) → stop the blit thread */
+    awl_shmblit_shutdown();
 
     wl_display_destroy(g_srv.display);
     pthread_rwlock_destroy(&g_srv.rwl);

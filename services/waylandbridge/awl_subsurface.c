@@ -21,18 +21,19 @@
  *   - set_desync immediately flushes the latched state of itself and of
  *     descendants whose effective sync has been released (parentDesynchronized →
  *     transaction->commit).
- *   - Release of a replaced buffer is deferred until "after the frame being
- *     sampled is presented" (KWin GraphicsBuffer reference semantics, see
- *     awl_surface.c release_q) — a client (desync bubble swapping frames at a
- *     high rate) overwriting a dmabuf under sampling is another source of
- *     tearing/flicker.
+ *   - A replaced buffer is released when its frame leaves the child's buffer
+ *     queue (awl_bufferqueue.h; superseded frames at the next drain, the
+ *     sampled one with the composite's release fence) — a client (desync
+ *     bubble swapping frames at a high rate) overwriting a dmabuf under
+ *     sampling is another source of tearing/flicker.
  *
  * Composition: child surface commit → dirty the "root" window (child layers get
  * no Activity); the render side snapshots via awl_surface_get_layers then
- * composites the layers on the GPU (awl_renderer.cpp).
+ * composites the layers on the GPU (awl_renderer.cpp), pulling each layer's
+ * frame from its own queue.
  *
  * Locks: topology (sub_parent / sub_children render stack order) = g_srv.rwl
- * (readers and writers alike); sub_x / sub_y / latched / release_q = child
+ * (readers and writers alike); sub_x / sub_y / latched = child
  * surface ev_lock. The sub_sync / sub_latched flags are read/written only by the
  * client dispatch thread (a wl_subsurface tree is always one client) — no lock.
  * Order: rwl → ev_lock (consistent with the existing layering).
@@ -64,45 +65,61 @@ int awl_subsurface_maybe_latch(struct awl_surface* s) {
         return 0;
     pthread_mutex_lock(&s->ev_lock);
     struct wl_resource* drop = NULL;
+    int drop_fd = -1;
+    struct wl_resource* drop_rel = NULL;
     if (s->pending_attached) {   /* latch buffer state only for cycles that attached */
-        if (s->sub_latched && s->latched_attach && s->latched_buffer_res &&
-            s->latched_buffer_res != s->pending_buffer_res)
-            drop = s->latched_buffer_res;   /* superseded by a newer latch, never presented */
+        if (s->sub_latched && s->latched_attach) {
+            /* superseded by a newer latch, never presented: the buffer
+             * (unless it is also the displayed one) and its explicit-sync
+             * pair go straight back */
+            if (s->latched_buffer_res && s->latched_buffer_res != s->pending_buffer_res)
+                drop = s->latched_buffer_res;
+            drop_fd = s->latched_acquire_fd;
+            drop_rel = s->latched_release_res;
+        }
         s->latched_buffer_res = s->pending_buffer_res;
         s->pending_buffer_res = NULL;
         s->pending_attached = 0;
         s->latched_attach = 1;
+        s->latched_acquire_fd = s->pend_acquire_fd;   /* explicit-sync state latches with the buffer */
+        s->pend_acquire_fd = -1;
+        s->latched_release_res = s->pend_release_res;
+        s->pend_release_res = NULL;
     }
     s->sub_latched = 1;
     /* damage stays pending and keeps accumulating; moved to current on apply */
     pthread_mutex_unlock(&s->ev_lock);
     if (drop && drop != s->current_buffer_res)
         wl_buffer_send_release(drop);   /* never sampled — release immediately */
+    awl_surface_discard_sync(drop_fd, drop_rel);
     return 1;
 }
 
 /* Apply s's latched state (caller = client dispatch thread). */
 static void sub_apply_state(struct awl_surface* ch) {
     pthread_mutex_lock(&ch->ev_lock);
-    if (ch->latched_attach) {
-        struct wl_resource* old = ch->current_buffer_res;
-        ch->current_buffer_res = ch->latched_buffer_res;
-        if (old && old != ch->current_buffer_res) {
-            if (wl_shm_buffer_get(old))
-                wl_buffer_send_release(old);
-            else
-                awl_surface_release_defer(ch, old);
-        }
-    }
-    ch->latched_buffer_res = NULL;
     int had_attach = ch->latched_attach;
+    int acquire_fd = ch->latched_acquire_fd;
+    struct wl_resource* release_res = ch->latched_release_res;
+    if (ch->latched_attach)
+        ch->current_buffer_res = ch->latched_buffer_res;
+    ch->latched_buffer_res = NULL;
     ch->latched_attach = 0;
+    ch->latched_acquire_fd = -1;
+    ch->latched_release_res = NULL;
     ch->sub_latched = 0;
     /* latched state applies now — its damage with it (also covers a latched
      * damage-only commit: no attach, pd accumulated, function's empty-check
      * handles the "nothing changed" case) */
     awl_damage_merge_pending(ch, had_attach);
+    /* the presented frame enters the child's queue exactly like a direct
+     * commit (the old current is released when its element is drained) */
+    if (had_attach)
+        awl_surface_apply_buffer(ch, ch->current_buffer_res, acquire_fd, release_res);
+    else if (ch->shm && ch->cd_state != AWL_DMG_NONE)
+        awl_shmblit_damaged_locked(ch->shm);
     pthread_mutex_unlock(&ch->ev_lock);
+    if (had_attach) awl_surface_commit_drain(ch);
 }
 
 /* s's state was just applied (any commit): child double-buffered positions take
@@ -170,9 +187,16 @@ static void sub_res_destroy(struct wl_resource* res) {
     pthread_rwlock_unlock(&g_srv.rwl);
     /* Latched state was never presented — release directly; pending position voided */
     struct wl_resource* latched_drop = NULL;
+    int drop_fd = -1;
+    struct wl_resource* drop_rel = NULL;
     pthread_mutex_lock(&s->ev_lock);
-    if (s->sub_latched && s->latched_attach)
+    if (s->sub_latched && s->latched_attach) {
         latched_drop = s->latched_buffer_res;
+        drop_fd = s->latched_acquire_fd;
+        drop_rel = s->latched_release_res;
+        s->latched_acquire_fd = -1;
+        s->latched_release_res = NULL;
+    }
     s->latched_buffer_res = NULL;
     s->sub_latched = 0;
     s->latched_attach = 0;
@@ -180,6 +204,7 @@ static void sub_res_destroy(struct wl_resource* res) {
     pthread_mutex_unlock(&s->ev_lock);
     if (latched_drop)
         wl_buffer_send_release(latched_drop);
+    awl_surface_discard_sync(drop_fd, drop_rel);
     LOGI("surface %llu un-role subsurface", (unsigned long long)s->id);
     if (dirty && g_srv.cbs.window_dirty)
         g_srv.cbs.window_dirty(g_srv.cbs.user, root_id);

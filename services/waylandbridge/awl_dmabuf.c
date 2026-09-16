@@ -1,5 +1,6 @@
-/* awl_dmabuf.c — zwp_linux_dmabuf_v1 v3 (v2: only registers the buffer; the
- * renderer gets the fd via awl_surface_get_buffer and imports the EGLImage itself) */
+/* awl_dmabuf.c — zwp_linux_dmabuf_v1 v3 (registers the buffer; a commit dup's
+ * its fd into the surface's frame queue, awl_surface_apply_buffer, and the
+ * renderer imports the EGLImage from the queue element) */
 #include "awl_internal.h"
 
 #include <string.h>
@@ -32,40 +33,20 @@ static const struct wl_buffer_interface dmabuf_buffer_iface = {
 static void dmabuf_buffer_destroy_handler(struct wl_resource* res) {
     struct awl_buffer* b = wl_resource_get_user_data(res);
     if (!b) return;
-    /* Remove references from each surface's pending/current: rd + per-window
-     * ev_lock (render thread get_buffer snapshots under the same lock — its
-     * dup fd already pinned the memory, so close is safe).
-     * This handler runs on that client's dispatch thread; the lock exists
-     * for the render-thread readers. */
-    pthread_rwlock_rdlock(&g_srv.rwl);
-    struct awl_surface* s;
-    wl_list_for_each(s, &g_srv.surfaces, link) {
-        int queued = 0;
-        for (int i = 0; i < s->release_q_n && !queued; i++)
-            queued = (s->release_q[i] == res);   /* lock-free read of the count (this thread is the only writer + render side only clears, never adds) */
-        if (s->pending_buffer_res != res && s->current_buffer_res != res &&
-            s->latched_buffer_res != res && !queued)
-            continue;   /* unrelated window: skip ev_lock (commit not affected) */
-        pthread_mutex_lock(&s->ev_lock);
-        if (s->pending_buffer_res == res) s->pending_buffer_res = NULL;
-        if (s->current_buffer_res == res) s->current_buffer_res = NULL;
-        if (s->latched_buffer_res == res) {
-            s->latched_buffer_res = NULL;
-            s->latched_attach = 0;
-            s->sub_latched = 0;
-        }
-        for (int i = 0; i < s->release_q_n; )   /* resource is dying: remove it, stop sending release */
-            if (s->release_q[i] == res) s->release_q[i] = s->release_q[--s->release_q_n];
-            else i++;
-        pthread_mutex_unlock(&s->ev_lock);
-    }
-    pthread_rwlock_unlock(&g_srv.rwl);
+    /* Strip the surfaces' pending/current/latched references (dispatch
+     * thread). Queued frames keep their own fd dup + wrapper reference: the
+     * wrapper only loses its resource here (under g_bufref_lock — a release
+     * being sent from another thread finishes first) and is freed by the
+     * last frame that leaves a queue. */
+    awl_surface_buffer_gone(res);
     pthread_rwlock_wrlock(&g_srv.rwl);
     wl_list_remove(&b->link);
     pthread_rwlock_unlock(&g_srv.rwl);
-    if (b->dmabuf_fd >= 0) close(b->dmabuf_fd);
-    free(b);
+    pthread_mutex_lock(&g_bufref_lock);
+    b->resource = NULL;
+    pthread_mutex_unlock(&g_bufref_lock);
     wl_resource_set_user_data(res, NULL);
+    awl_buffer_unref(b);
 }
 
 static struct awl_buffer* dmabuf_buffer_create(struct wl_client* client,
@@ -79,10 +60,11 @@ static struct awl_buffer* dmabuf_buffer_create(struct wl_client* client,
     }
     struct awl_buffer* b = calloc(1, sizeof(*b));
     if (!b) return NULL;
+    atomic_init(&b->refs, 1);          /* the resource's reference */
     b->dmabuf_fd = fd;                 /* take over the fd */
-    struct stat st;                    /* identity once, here — the render side
-                                        * compares awl_buffer_info_t.ino with
-                                        * no per-frame fstat */
+    struct stat st;                    /* identity once, here — the queue element
+                                        * carries it, the render side compares
+                                        * inodes with no per-frame fstat */
     b->ino = fstat(fd, &st) == 0 ? (uint64_t)st.st_ino : 0;
     b->width = w;
     b->height = h;
