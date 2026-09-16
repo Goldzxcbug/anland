@@ -7,25 +7,36 @@
  * neither side sees the other's types. This is the seam a hardware-composer
  * backend plugs into later (it consumes the same elements).
  *
- * Model (mailbox):
+ * Model (mailbox + per-element references):
  *   push    lock-free, any thread. Fails when the ring is full (the caller
  *           must hand the buffer straight back to its owner).
  *   drain   caller holds the head lock. Pops the head while the element
  *           behind it is already complete (its acquire fence signaled —
  *           completion is assumed FIFO: an element is complete only if every
- *           earlier one is), releasing every popped element through the
- *           release callback. Afterwards the head is the newest complete
+ *           earlier one is). Afterwards the head is the newest complete
  *           element (or the oldest incomplete one when none is complete yet).
- *   gethead caller holds the head lock. Returns the head after waiting for
- *           its acquire fence (bounded), NULL when empty. Valid until unlock.
- *   lock/trylock/unlock  head lock. The render thread locks around
- *           drain+gethead+draw-submit+set_release_fence and UNLOCKS BEFORE
- *           its vsync-blocking swap (holding it across the swap turns every
- *           producer into vsync × buffer-count — measured 180 fps with
- *           3 buffers at 60 Hz); the dispatch thread only trylocks at commit
- *           for an opportunistic drain (over-speed commits get their buffers
- *           back without waiting for a frame) and passes when the render
- *           thread holds it; the fence waiter (arm) blocks on it briefly.
+ *           A popped element drops the ring's reference; it goes back to the
+ *           producer (release callback) when the last reference is gone.
+ *   gethead caller holds the head lock. Waits (bounded) for the head's
+ *           acquire fence, takes a reference on it and returns it — the
+ *           caller may UNLOCK IMMEDIATELY: the element stays valid (and its
+ *           dma-buf open) until the caller's awl_bufferqueue_put, however far
+ *           the ring moves meanwhile. The lock is held for microseconds; a
+ *           commit-time drain almost never misses.
+ *   put     any thread, no lock: the consumer is done with an element it
+ *           got from gethead. fence_fd (sync_file, may be -1) = when the
+ *           consumer's reads of that memory are finished — merged into the
+ *           element's release fence, handed to the producer when the last
+ *           reference drops (explicit-sync fenced_release / implicit-sync
+ *           read fence in the dma-buf reservation).
+ *   arm     caller holds the lock, after drain: when the frame behind the
+ *           head is still incomplete, a shared fence-waiter thread drains
+ *           the queue the moment its acquire fence signals — a producer
+ *           parked on buffer starvation is unblocked when its own GPU work
+ *           finishes, not at the next commit or the next vsync.
+ *   lock/trylock/unlock  head lock. The render thread holds it across
+ *           drain+gethead only; the dispatch thread trylocks at commit for
+ *           an opportunistic drain and passes when it is busy.
  *
  * Elements own their fds: the queue closes dmabuf/acquire/release fds once the
  * release callback returned. `user` is an opaque producer cookie handed to the
@@ -33,10 +44,10 @@
  * there). A dmabuf_fd of -1 is a NULL-buffer marker (wl_surface.attach(NULL)
  * commit): always "complete", the consumer draws nothing for that layer.
  *
- * Lifetime: refcounted. The owning surface holds one reference; a consumer
- * that resolved the queue takes its own for the duration of the frame, so a
- * surface dying mid-frame never frees a locked queue. The last unref releases
- * whatever is still queued. */
+ * Lifetime: refcounted. The owning surface holds one reference; every live
+ * element holds one (so the queue outlives its owner while a consumer still
+ * holds a frame); a consumer resolving the queue takes its own for the span
+ * it touches the ring. */
 #ifndef AWL_BUFFERQUEUE_H
 #define AWL_BUFFERQUEUE_H
 
@@ -51,9 +62,8 @@ struct awl_bq_buffer {
     int acquire_fd;        /* sync_file the producer's writes signal; owned;
                             * -1 = none → implicit: the dma-buf's own write
                             * fences (poll POLLIN) gate readiness */
-    int release_fd;        /* sync_file set by the consumer (set_release_fence);
-                            * owned; -1 = none. Handed to the release callback
-                            * (the callee may dup it) */
+    int release_fd;        /* merged consumer fences (awl_bufferqueue_put);
+                            * valid inside the release callback only */
     uint64_t ino;          /* dma-buf inode: render-side identity (0 = unknown) */
     uint32_t width, height, stride;   /* stride in bytes */
     uint32_t format;       /* DRM fourcc */
@@ -63,46 +73,39 @@ struct awl_bq_buffer {
 
 struct awl_bufferqueue;
 
-/* Called for every element that leaves the queue (drain / push-fail path is
- * the caller's own / flush / last unref), with the queue lock NOT held by the
- * callback contract (drain holds the head lock — the callback must never
- * lock the same queue). fds are still open during the callback and closed by
- * the queue right after; the callee owns `user`. */
+/* Called once per element, when its last reference drops (ring popped it
+ * AND every consumer put it back), on whichever thread dropped it. The head
+ * lock may be held by that thread — the callback must never touch the same
+ * queue. fds are still open during the callback and closed by the queue
+ * right after; the callee owns `user`. */
 typedef void (*awl_bq_release_fn)(struct awl_bq_buffer* e, void* ctx);
 
 struct awl_bufferqueue* awl_bufferqueue_create(awl_bq_release_fn fn, void* ctx);
 void awl_bufferqueue_ref(struct awl_bufferqueue* q);
-void awl_bufferqueue_unref(struct awl_bufferqueue* q);   /* last ref: flush + free */
+void awl_bufferqueue_unref(struct awl_bufferqueue* q);
 
-/* Lock-free (single writer per call site, several producers may interleave).
- * 1 = queued (the queue now owns the fds + user), 0 = full (caller keeps
- * everything and must return the buffer itself). */
+/* Lock-free. 1 = queued (the queue now owns the fds + user), 0 = full
+ * (caller keeps everything and must return the buffer itself). */
 int awl_bufferqueue_push(struct awl_bufferqueue* q, const struct awl_bq_buffer* e);
 
 int  awl_bufferqueue_trylock(struct awl_bufferqueue* q);   /* 1 = locked */
 void awl_bufferqueue_lock(struct awl_bufferqueue* q);
 void awl_bufferqueue_unlock(struct awl_bufferqueue* q);
 
-/* Caller holds the lock. Returns the number of elements released. */
+/* Caller holds the lock. Returns the number of elements popped. */
 int awl_bufferqueue_drain(struct awl_bufferqueue* q);
 /* Caller holds the lock. Waits up to timeout_ms for the head's acquire fence
  * (a timeout is logged and the head is returned anyway — never stall the
- * pipeline on a broken client fence). NULL = empty. */
-const struct awl_bq_buffer* awl_bufferqueue_gethead(struct awl_bufferqueue* q,
-                                                    int timeout_ms);
-/* Caller holds the lock. Attach a consumer-side fence to the head (dup'd;
- * merged with one already there — the head may be sampled by several frames
- * before it is superseded). Once set, the consumer may unlock: the fence,
- * not the lock, now orders the producer's reuse after the consumer's read. */
-void awl_bufferqueue_set_release_fence(struct awl_bufferqueue* q, int fence_fd);
-/* Caller holds the lock; call after drain. If the frame behind the head is
- * still incomplete, watch its fence: a shared waiter thread drains the queue
- * (lock → drain → unlock) the moment it signals — a producer parked on
- * buffer starvation is unblocked when its own GPU work finishes, not at the
- * next commit or the next vsync. No-op when nothing is pending / already
- * armed. */
+ * pipeline on a broken client fence). NULL = empty. The returned element is
+ * referenced: pair with awl_bufferqueue_put. */
+struct awl_bq_buffer* awl_bufferqueue_gethead(struct awl_bufferqueue* q, int timeout_ms);
+/* Any thread, no lock. fence_fd is dup'd/merged (caller keeps its fd). */
+void awl_bufferqueue_put(struct awl_bq_buffer* e, int fence_fd);
+/* Caller holds the lock, after drain. No-op when nothing incomplete is
+ * pending or a watch is already registered. */
 void awl_bufferqueue_arm(struct awl_bufferqueue* q);
-/* Caller holds the lock. Release everything (surface teardown). */
+/* Caller holds the lock. Pop everything (surface teardown). Elements a
+ * consumer still holds are released by its put. */
 void awl_bufferqueue_flush(struct awl_bufferqueue* q);
 
 /* Lock-free snapshots (any thread; advisory). */

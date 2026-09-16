@@ -5,10 +5,11 @@
  * dma-buf fd + acquire fence + geometry, whatever the client committed
  * (zwp_linux_dmabuf) or the logic layer converted (wl_shm → dma-buf in
  * awl_shmblit.c). Per layer and frame: lock → drain (superseded frames go
- * back to the client) → gethead (waits the acquire fence) → import → draw;
- * after the composite is submitted a native fence of this frame is attached
- * to every sampled head (set_release_fence → the client's release fence /
- * implicit-sync read fence) and the queues are unlocked.
+ * back to the client) → gethead (waits the acquire fence, takes a reference)
+ * → unlock → import (per-layer cache keyed by dma-buf inode: a client
+ * cycling its swapchain never re-imports) → draw → put(native fence of this
+ * composite) — the element goes back to the client when the ring has
+ * dropped it too, with the fence as its release fence.
  *   dmabuf : forged AHardwareBuffer → EGLImage → zero-copy texture
  * Composite = multi-layer quads (root + wl_subsurface child layers, render
  * stack order bottom→top, then the client's wl_pointer.set_cursor image on
@@ -105,30 +106,30 @@ static const float k_root_xform[8][9] = {
     /* 7 flipped_270 */ { 0, -1, 1, -1, 0, 1,   0, 0, 1 },
 };
 
-/* Per-surface dmabuf slot: ONE AHardwareBuffer per surface, swapped per
- * arriving buffer (snapalloc donor scheme, see wrap_dmabuf_ahb). When the
- * dmabuf changes the AHB is re-forged with a fresh identity (kgsl binds the
- * memory at import — an in-place fd swap would leave the GPU sampling the
- * old dmabuf); the re-forge uses the OLD AHB itself as the donor (its
- * metadata blob already carries this geometry — no allocation), and the old
- * AHB's release closes the swapped-out dmabuf fd. The blob stays alive
- * through the relay: each forged AHB's handle holds its own fd dup. After a
- * swap the consumer MUST re-import: a new EGLImage for the texture.
- * Render-thread only per surface. */
-struct awl_ahb_slot {
-    AHardwareBuffer* ahb = NULL;   /* wraps the current dmabuf */
-    uint64_t ino = 0;              /* dma-buf identity (fstat inode) */
+/* Per-layer import cache: one entry per distinct dma-buf the layer has shown
+ * recently, keyed by the dma-buf inode (kernel: monotonically allocated,
+ * never recycled — a safe identity). Each entry = a forged AHardwareBuffer
+ * (snapalloc donor scheme, see wrap_dmabuf_ahb; the handle holds its own
+ * dmabuf/blob fd dups, so the entry outlives the client's wl_buffer) + the
+ * EGLImage importing it + a GL texture bound to that image. A client cycling
+ * N buffers hits the cache from the second lap on: zero gralloc imports,
+ * zero EGLImage creation per frame — the per-frame cost is one texture bind.
+ * Capacity covers every swapchain size in the wild (mesa WSI mailbox = 4,
+ * chrome ≤ 3); a resize walks the LRU out. Render-thread only per window. */
+#define AWL_TEX_CACHE 8
+struct ahb_entry {
+    AHardwareBuffer* ahb = NULL;
+    EGLImageKHR image = EGL_NO_IMAGE_KHR;
+    GLuint texture = 0;
+    uint64_t ino = 0;              /* 0 = empty */
     uint32_t w = 0, h = 0, stride = 0;
+    uint64_t used = 0;             /* frame counter of the last hit (LRU) */
 };
 
-/* Per-layer texture state. dmabuf: the surface's awl_ahb_slot (one AHB,
- * swapped per arriving buffer) + the EGLImage currently importing it. */
+/* Per-layer texture state: the import cache + the entry this frame draws. */
 struct wl_tex {
-    GLuint texture = 0;
-    uint32_t tex_w = 0, tex_h = 0;
-    bool tex_is_image = false;     /* external-memory texture (dmabuf) */
-    EGLImageKHR image = EGL_NO_IMAGE_KHR;
-    awl_ahb_slot slot;
+    ahb_entry ent[AWL_TEX_CACHE];
+    GLuint texture = 0;            /* selected for this frame (ent[k].texture) */
 };
 
 struct wl_window {
@@ -149,7 +150,8 @@ struct wl_window {
                                     * surface in place, no SURFACE re-attach) */
     std::atomic<bool> size_dirty{true};   /* render_frame re-queries once */
     bool logged_frame = false;     /* first-frame log (diagnostics) */
-    std::map<uint64_t, wl_tex> layers;   /* layer id → texture (includes root's own id) */
+    uint64_t frame_no = 0;         /* LRU clock of the layer import caches */
+    std::map<uint64_t, wl_tex> layers;   /* layer id → import cache (includes root's own id) */
 
     /* dedicated render thread: context bound 1:1 to the thread, requests coalesced via condvar */
     std::thread th;
@@ -335,10 +337,7 @@ static void window_teardown_gl(wl_window* w) {
         eglMakeCurrent(g.display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
         if (w->program) glDeleteProgram(w->program);
         if (w->vbo) glDeleteBuffers(1, &w->vbo);
-        for (auto& kv : w->layers) {
-            destroy_dmabuf_texture(&kv.second);
-            if (kv.second.texture) glDeleteTextures(1, &kv.second.texture);
-        }
+        for (auto& kv : w->layers) destroy_dmabuf_texture(&kv.second);
         w->layers.clear();
         if (w->surface != EGL_NO_SURFACE) eglDestroySurface(g.display, w->surface);
         eglDestroyContext(g.display, w->context);
@@ -817,57 +816,18 @@ static AHardwareBuffer* wrap_dmabuf_ahb(const struct awl_bq_buffer* b,
     return out;
 }
 
-/* ---------------- per-surface dmabuf slot (public API) ---------------- */
+/* ---------------- per-layer import cache ---------------- */
 
-static int awl_renderer_ahb_swap(awl_ahb_slot* s, const struct awl_bq_buffer* b) {
-    /* identity = the dmabuf inode, fstat'ed once when the frame was queued
-     * (awl_bq_buffer.ino) instead of per frame here; 0 = unknown there
-     * (broken fd) → per-call fstat fallback */
-    uint64_t ino = b->ino;
-    if (!ino) {
-        struct stat st;
-        if (fstat(b->dmabuf_fd, &st) != 0) return -1;
-        ino = (uint64_t)st.st_ino;
-    }
-    /* (The write-fence gate that used to sit here — the client's paint may
-     * still be in flight at commit, resize-ack frames read as zeros for a
-     * few ms — is now the queue's job: gethead returned this element only
-     * after its acquire fence signaled, explicit or exported from the
-     * dma-buf's own write fences.) */
-
-    if (s->ahb && s->ino == ino &&
-        s->w == b->width && s->h == b->height && s->stride == b->stride)
-        return 0;   /* same dma-buf: the AHB already wraps this memory */
-
-    /* dmabuf changed → re-forge (the old AHB itself is the donor when its
-     * geometry matches — one gralloc import, zero allocations), then release
-     * it: the release closes the swapped-out dmabuf fd, and the new AHB's own
-     * blob-fd dup keeps the metadata alive. Consumers still displaying the
-     * old buffer hold their own refs (SF) / their own image ref (EGL) — valid
-     * until they re-import. */
-    AHardwareBuffer* ahb = wrap_dmabuf_ahb(
-        b, AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE, s->ahb);
-    if (!ahb) return -1;   /* old AHB kept — retry next frame */
-    if (s->ahb) AHardwareBuffer_release(s->ahb);
-    s->ahb = ahb;
-    s->ino = ino;
-    s->w = b->width;
-    s->h = b->height;
-    s->stride = b->stride;
-    return 1;
-}
-
-static void awl_renderer_ahb_slot_destroy(awl_ahb_slot* s) {
-    if (s->ahb) AHardwareBuffer_release(s->ahb);
-    memset(s, 0, sizeof(*s));
+static void entry_destroy(ahb_entry* e) {
+    if (e->texture) glDeleteTextures(1, &e->texture);
+    if (e->image != EGL_NO_IMAGE_KHR) g.eglDestroyImageKHR(g.display, e->image);
+    if (e->ahb) AHardwareBuffer_release(e->ahb);
+    *e = ahb_entry();
 }
 
 static void destroy_dmabuf_texture(wl_tex* t) {
-    if (t->image != EGL_NO_IMAGE_KHR) {
-        g.eglDestroyImageKHR(g.display, t->image);
-        t->image = EGL_NO_IMAGE_KHR;
-    }
-    awl_renderer_ahb_slot_destroy(&t->slot);
+    for (auto& e : t->ent) entry_destroy(&e);
+    t->texture = 0;
 }
 
 /* HAL BGRA_8888 constant lives in awl_renderer.hpp */
@@ -879,27 +839,54 @@ static void tex_params_default(void) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 }
 
-static bool import_dmabuf_texture(wl_tex* t, const struct awl_bq_buffer* b) {
-    /* HAL format: DRM AR24/XR24 memory order B,G,R,(A|X) → HAL BGRA_8888 — the
-     * GPU samples the buffer's true channel order, the R/B fix lives in the
-     * texture descriptor instead of the shader (no u_swap_rb). XR24 alpha = the
-     * X byte: harmless for blend-off layer 0 (Xwayland root); XR24 as a blended
-     * child layer is not a real client pattern (chrome subsurfaces are AR24).
-     * Sampled-only usage (texture) — GPU_FRAMEBUFFER not declared */
-    int r = awl_renderer_ahb_swap(&t->slot, b);
-    if (r <= 0) return r == 0;   /* same dma-buf: the texture IS that memory */
-
-    /* dmabuf swapped → re-import: the old EGLImage pinned the old memory
-     * through the swap via its own ref; drop it and build on the new AHB */
-    if (t->image != EGL_NO_IMAGE_KHR) {
-        g.eglDestroyImageKHR(g.display, t->image);
-        t->image = EGL_NO_IMAGE_KHR;
+/* Select (or build) the cache entry for this frame's dma-buf; on success
+ * t->texture is the texture to bind. frame = the window's frame counter
+ * (LRU clock). */
+static bool import_dmabuf_texture(wl_tex* t, const struct awl_bq_buffer* b, uint64_t frame) {
+    /* identity = the dmabuf inode, fstat'ed once when the frame was queued
+     * (awl_bq_buffer.ino); 0 = unknown there (broken fd) → fstat here */
+    uint64_t ino = b->ino;
+    if (!ino) {
+        struct stat st;
+        if (fstat(b->dmabuf_fd, &st) != 0) return false;
+        ino = (uint64_t)st.st_ino;
     }
+    /* (The write-fence gate that used to sit here — the client's paint may
+     * still be in flight at commit, resize-ack frames read as zeros for a
+     * few ms — is the queue's job now: gethead returned this element only
+     * after its acquire fence signaled, explicit or exported from the
+     * dma-buf's own write fences.) */
 
-    /* eglGetNativeClientBufferANDROID: AHB → EGLClientBuffer (the sanctioned path) */
-    EGLClientBuffer cb = g.eglGetNativeClientBuffer(t->slot.ahb);
+    /* hit: same dma-buf, same geometry — the texture IS that memory */
+    ahb_entry* victim = NULL;
+    AHardwareBuffer* tmpl = NULL;   /* donor: any cached AHB of this geometry */
+    for (auto& e : t->ent) {
+        if (e.ino == ino && e.w == b->width && e.h == b->height && e.stride == b->stride) {
+            e.used = frame;
+            t->texture = e.texture;
+            return true;
+        }
+        if (!e.ino) { if (!victim) victim = &e; }
+        else {
+            if (!tmpl && e.w == b->width && e.h == b->height && e.stride == b->stride) tmpl = e.ahb;
+            if (!victim || (victim->ino && e.used < victim->used)) victim = &e;
+        }
+    }
+    if (victim->ino && victim->ahb == tmpl) tmpl = NULL;   /* never donate from the entry being replaced (kept simple: cold path) */
+
+    /* miss: forge an AHB over this dma-buf (HAL format: DRM AR24/XR24 memory
+     * order B,G,R,(A|X) → HAL BGRA_8888 — the GPU samples the buffer's true
+     * channel order, the R/B fix lives in the texture descriptor instead of
+     * the shader. XR24 alpha = the X byte: harmless for blend-off layer 0
+     * (Xwayland root); XR24 as a blended child layer is not a real client
+     * pattern. Sampled-only usage — GPU_FRAMEBUFFER not declared), then an
+     * EGLImage + texture on it. The victim (LRU / empty) is replaced. */
+    AHardwareBuffer* ahb = wrap_dmabuf_ahb(b, AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE, tmpl);
+    if (!ahb) return false;   /* cache untouched — retry next frame */
+    EGLClientBuffer cb = g.eglGetNativeClientBuffer(ahb);   /* AHB → EGLClientBuffer (the sanctioned path) */
     if (!cb) {
         LOGE("eglGetNativeClientBuffer == NULL");
+        AHardwareBuffer_release(ahb);
         return false;
     }
     EGLImageKHR img = g.eglCreateImageKHR(g.display, EGL_NO_CONTEXT,
@@ -907,22 +894,26 @@ static bool import_dmabuf_texture(wl_tex* t, const struct awl_bq_buffer* b) {
     if (img == EGL_NO_IMAGE_KHR) {
         LOGE("eglCreateImageKHR(native buffer): 0x%x (%ux%u stride=%u)",
              eglGetError(), b->width, b->height, b->stride);
+        AHardwareBuffer_release(ahb);
         return false;
     }
-    LOGD("AHB import ok %ux%u stride=%u fd=%d",
-         b->width, b->height, b->stride, b->dmabuf_fd);
-
-    if (t->texture) glDeleteTextures(1, &t->texture);
-    glGenTextures(1, &t->texture);
-    glBindTexture(GL_TEXTURE_2D, t->texture);
+    entry_destroy(victim);
+    victim->ahb = ahb;
+    victim->image = img;
+    victim->ino = ino;
+    victim->w = b->width;
+    victim->h = b->height;
+    victim->stride = b->stride;
+    victim->used = frame;
+    glGenTextures(1, &victim->texture);
+    glBindTexture(GL_TEXTURE_2D, victim->texture);
     tex_params_default();
     g.glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, img);
     GLenum terr = glGetError();
     if (terr != GL_NO_ERROR) LOGE("EGLImageTargetTexture: 0x%x", terr);
-    t->image = img;
-    t->tex_is_image = true;
-    t->tex_w = b->width;
-    t->tex_h = b->height;
+    LOGD("AHB import ok %ux%u stride=%u ino=%llu (cache slot %d)",
+         b->width, b->height, b->stride, (unsigned long long)ino, (int)(victim - t->ent));
+    t->texture = victim->texture;
     return true;
 }
 
@@ -1006,25 +997,29 @@ static void render_frame(wl_window* w) {
     glActiveTexture(GL_TEXTURE0);
 
     /* Per-layer frame source: resolve the queue (own reference — a layer
-     * dying mid-frame cannot free it), lock it for the whole composite (the
-     * head must not move under the GPU), drain superseded frames back to
-     * the client, then take the newest complete head (waits its acquire
-     * fence, bounded). NULL / NULL-marker = nothing to draw for this layer.
-     * All logic-layer rwl-taking calls (get_layers / xform above, presented
-     * below) stay outside the locked span — a surface teardown flushing a
-     * queue under rwl.wr must never wait on a frame that needs rwl. */
-    struct awl_bufferqueue* q[AWL_MAX_LAYERS + 1];
-    const struct awl_bq_buffer* head[AWL_MAX_LAYERS + 1];
+     * dying mid-frame cannot free it), lock → drain superseded frames back
+     * to the client → take a reference on the newest complete head (waits
+     * its acquire fence, bounded) → arm the fence waiter for a still-
+     * incomplete newer frame → unlock. Microseconds under the lock: the
+     * element reference, not the lock, keeps the frame alive and its memory
+     * open while we import and draw; a commit-time drain on the dispatch
+     * thread almost never finds the lock busy. NULL / NULL-marker = nothing
+     * to draw for this layer. */
+    struct awl_bq_buffer* head[AWL_MAX_LAYERS + 1];
     bool more = false;   /* a queue still holds a newer, not-yet-complete frame */
     for (int i = 0; i < n; i++) {
-        q[i] = awl_surface_queue_ref(lay[i].surface_id);
         head[i] = NULL;
-        if (!q[i]) continue;
-        awl_bufferqueue_lock(q[i]);
-        awl_bufferqueue_drain(q[i]);
-        head[i] = awl_bufferqueue_gethead(q[i], 100);
-        if (awl_bufferqueue_pending(q[i]) > 0) more = true;
+        struct awl_bufferqueue* q = awl_surface_queue_ref(lay[i].surface_id);
+        if (!q) continue;
+        awl_bufferqueue_lock(q);
+        awl_bufferqueue_drain(q);
+        head[i] = awl_bufferqueue_gethead(q, 100);
+        if (awl_bufferqueue_pending(q) > 0) more = true;
+        awl_bufferqueue_arm(q);   /* pending incomplete frame: its fence, not the next vsync, releases the head */
+        awl_bufferqueue_unlock(q);
+        awl_bufferqueue_unref(q);
     }
+    w->frame_no++;
 
     uint64_t seen[AWL_MAX_LAYERS + 1];
     int nseen = 0;
@@ -1034,7 +1029,7 @@ static void render_frame(wl_window* w) {
         if (!b || b->dmabuf_fd < 0) continue;   /* no frame yet / detached (NULL marker) */
         wl_tex& t = w->layers[lay[i].surface_id];   /* layers seen this frame */
         seen[nseen++] = lay[i].surface_id;
-        bool ok = import_dmabuf_texture(&t, b);
+        bool ok = import_dmabuf_texture(&t, b, w->frame_no);
         if (!ok) continue;
 
         /* first layer (root) writes directly with blend off; child layers stack on top with premultiplied alpha */
@@ -1076,12 +1071,7 @@ static void render_frame(wl_window* w) {
         }
     }
     if (!drew) {   /* not even root has a usable buffer — don't spin on a swap */
-        for (int i = 0; i < n; i++) {
-            if (!q[i]) continue;
-            awl_bufferqueue_arm(q[i]);
-            awl_bufferqueue_unlock(q[i]);
-            awl_bufferqueue_unref(q[i]);
-        }
+        for (int i = 0; i < n; i++) awl_bufferqueue_put(head[i], -1);   /* nothing sampled */
         if (more) awl_renderer_request_render(w->id);
         return;
     }
@@ -1093,7 +1083,6 @@ static void render_frame(wl_window* w) {
             found = (seen[k] == it->first);
         if (!found) {
             destroy_dmabuf_texture(&it->second);
-            if (it->second.texture) glDeleteTextures(1, &it->second.texture);
             it = w->layers.erase(it);
         } else {
             ++it;
@@ -1102,34 +1091,26 @@ static void render_frame(wl_window* w) {
 
     /* Release fence for the client buffers this composite sampled: a native
      * fence inserted after the draws (signals when the GPU is done reading;
-     * the dup flushes the command stream). Attached to every locked head —
-     * the queue hands it to the client as the explicit-sync release fence,
-     * or parks it in the dma-buf's reservation for implicit-sync clients
-     * (bq_release_cb). From that point the FENCE orders the client's reuse
-     * after our read, so the queues are unlocked BEFORE eglSwapBuffers:
-     * with swap interval 1 the swap blocks until vsync, and a lock held
-     * across it makes every commit-time drain fail → the client only gets
-     * buffers back once per vsync → vsync × buffer-count fps (measured:
-     * vkmark pinned at 180). Without native fences the only guarantee left
-     * is glFinish (GPU idle = reads done) before unlocking. No glFinish
+     * the dup flushes the command stream). put() merges it into every held
+     * element and drops our reference — when the ring has already popped
+     * the element (a newer frame superseded it while we drew) it goes back
+     * to the client right here, with the fence: explicit-sync clients get it
+     * as the fenced_release, implicit-sync clients find it as a read fence
+     * in the dma-buf reservation (bq_release_cb). Without native fences the
+     * only remaining guarantee is glFinish (GPU idle = reads done). Nothing
+     * of this waits for the vsync-blocking swap below: the client's buffer
+     * turnaround is bounded by the GPU, not by the display. No glFinish
      * otherwise: eglSwapBuffers submits with its own native fence (SF waits
      * GPU-side before scanout), frame_done goes out at submit time so the
      * client's next frame overlaps this one's GPU composite. */
     glDisable(GL_BLEND);
     int rel = frame_release_fence();
     if (rel < 0) glFinish();
-    for (int i = 0; i < n; i++) {
-        if (!q[i]) continue;
-        if (head[i] && head[i]->dmabuf_fd >= 0)
-            awl_bufferqueue_set_release_fence(q[i], rel);
-        awl_bufferqueue_arm(q[i]);   /* pending incomplete frame: its fence, not the next vsync, releases the head */
-        awl_bufferqueue_unlock(q[i]);
-        awl_bufferqueue_unref(q[i]);
-    }
+    for (int i = 0; i < n; i++) awl_bufferqueue_put(head[i], rel);
     if (rel >= 0) close(rel);
     /* a newer frame arrived while we drew but was not complete yet: present
-     * it as soon as the swap returns (the waiter above hands buffers back,
-     * this re-arm keeps the screen current) */
+     * it as soon as the swap returns (the waiter hands buffers back, this
+     * re-arm keeps the screen current) */
     if (more) awl_renderer_request_render(w->id);
     if (!eglSwapBuffers(g.display, w->surface)) {
         LOGE("eglSwapBuffers: 0x%x", eglGetError());

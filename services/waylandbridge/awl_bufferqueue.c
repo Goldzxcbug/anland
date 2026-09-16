@@ -1,14 +1,19 @@
-/* awl_bufferqueue.c — bounded ring of dma-buf frames with lock-free push and
- * locked pop (see awl_bufferqueue.h for the model).
+/* awl_bufferqueue.c — bounded ring of dma-buf frames with lock-free push,
+ * locked pop and per-element references (see awl_bufferqueue.h).
  *
- * Ring: head/tail are monotonically increasing counters (slot = idx % CAP).
- * Producers reserve a slot with a CAS on tail, fill it, then publish it with
- * a release-store to the slot's `ready` flag. The consumer (under the head
- * lock) only sees consecutive ready slots from head; it clears `ready` before
- * advancing head (release-store), so a producer that observes the new head
- * (acquire) is the only writer of that slot again. No element is ever read
- * by a producer and no slot is ever written by the consumer, so the only
- * shared words are the two counters and the per-slot flag.
+ * Ring: head/tail are monotonically increasing counters (slot = idx % CAP)
+ * holding element pointers. Producers reserve a slot with a CAS on tail,
+ * store the element, then publish it with a release-store to the slot's
+ * `ready` flag. The consumer (under the head lock) only sees consecutive
+ * ready slots from head; it clears `ready` before advancing head
+ * (release-store), so a producer that observes the new head (acquire) is
+ * the only writer of that slot again. The only shared words are the two
+ * counters and the per-slot flag.
+ *
+ * Element life: refs = 1 (ring) at push, +1 per gethead. The ring's ref goes
+ * at pop (drain/flush), a consumer's at put. Last ref → release callback →
+ * close fds → free. Every element also pins the queue object, so a queue is
+ * never freed while a consumer still holds one of its frames.
  *
  * Readiness = the acquire fence signaled (poll POLLIN with zero timeout), or
  * for elements without an explicit fence the dma-buf's own write fences
@@ -22,11 +27,12 @@
 #include <linux/dma-buf.h>
 #include <linux/sync_file.h>
 #include <poll.h>
-#include <sys/epoll.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/epoll.h>
 #include <sys/ioctl.h>
 #include <time.h>
 #include <unistd.h>
@@ -41,8 +47,15 @@
                          * immediate release, frame dropped) instead of
                          * deadlocking */
 
+struct awl_bq_elem {
+    struct awl_bq_buffer pub;      /* first: gethead hands out &pub */
+    atomic_int refs;
+    atomic_int rel_fd;             /* merged consumer fences (CAS merge, put) */
+    struct awl_bufferqueue* q;     /* +1 ref while the element lives */
+};
+
 struct awl_bq_slot {
-    struct awl_bq_buffer e;
+    struct awl_bq_elem* e;
     atomic_int ready;
 };
 
@@ -57,71 +70,6 @@ struct awl_bufferqueue {
     atomic_int timeouts;           /* gethead fence timeouts (rate-limited log) */
     atomic_int armed;              /* a fence watch is registered (awl_bufferqueue_arm) */
 };
-
-/* ---------------- fence waiter ----------------
- * One epoll thread for every queue: an armed queue contributes the fd of the
- * first incomplete frame behind its head (own dup; EPOLLONESHOT, explicitly
- * DEL'd before close — dma-buf/sync_file fds are shared open file
- * descriptions with the client, a plain close would leave the entry live).
- * On signal: drain (releases the superseded head), re-arm if a further
- * frame is still incomplete. */
-struct bq_arm {
-    int fd;
-    struct awl_bufferqueue* q;    /* +1 ref while registered */
-};
-
-static struct {
-    pthread_mutex_t lock;
-    int epfd;
-    int started;
-    pthread_t th;
-} g_waiter = { PTHREAD_MUTEX_INITIALIZER, -1, 0, 0 };
-
-static void* waiter_thread(void* arg) {
-    (void)arg;
-    for (;;) {
-        struct epoll_event ev[16];
-        int n = epoll_wait(g_waiter.epfd, ev, 16, -1);
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            LOGE("fence waiter: epoll_wait %s — waiter exiting", strerror(errno));
-            return NULL;
-        }
-        for (int i = 0; i < n; i++) {
-            struct bq_arm* a = ev[i].data.ptr;
-            epoll_ctl(g_waiter.epfd, EPOLL_CTL_DEL, a->fd, NULL);
-            close(a->fd);
-            struct awl_bufferqueue* q = a->q;
-            free(a);
-            atomic_store(&q->armed, 0);
-            awl_bufferqueue_lock(q);      /* the render thread's locked span is import+draw only */
-            awl_bufferqueue_drain(q);
-            awl_bufferqueue_arm(q);
-            awl_bufferqueue_unlock(q);
-            awl_bufferqueue_unref(q);
-        }
-    }
-}
-
-static int waiter_start(void) {
-    pthread_mutex_lock(&g_waiter.lock);
-    if (!g_waiter.started) {
-        g_waiter.epfd = epoll_create1(EPOLL_CLOEXEC);
-        if (g_waiter.epfd >= 0 &&
-            pthread_create(&g_waiter.th, NULL, waiter_thread, NULL) == 0) {
-            g_waiter.started = 1;
-        } else {
-            LOGE("fence waiter: start failed (%s) — releases fall back to commit/vsync drains",
-                 strerror(errno));
-            if (g_waiter.epfd >= 0) close(g_waiter.epfd);
-            g_waiter.epfd = -1;
-            g_waiter.started = -1;   /* don't retry every frame */
-        }
-    }
-    int ok = g_waiter.started == 1;
-    pthread_mutex_unlock(&g_waiter.lock);
-    return ok;
-}
 
 /* ---------------- sync helpers ---------------- */
 
@@ -196,7 +144,7 @@ int awl_fence_is_sync_file(int fd) {
     return ioctl(fd, SYNC_IOC_FILE_INFO, &info) == 0;
 }
 
-/* ---------------- ring ---------------- */
+/* ---------------- elements ---------------- */
 
 static inline int elem_ready(const struct awl_bq_buffer* e) {
     if (e->dmabuf_fd < 0) return 1;                       /* NULL marker */
@@ -214,6 +162,86 @@ static void close_fd(int* fd) {
     *fd = -1;
 }
 
+/* Drop one reference; the last one hands the frame back and frees. */
+static void elem_unref(struct awl_bq_elem* e) {
+    if (atomic_fetch_sub_explicit(&e->refs, 1, memory_order_acq_rel) != 1) return;
+    struct awl_bufferqueue* q = e->q;
+    e->pub.release_fd = atomic_load(&e->rel_fd);
+    if (q->release) q->release(&e->pub, q->ctx);
+    close_fd(&e->pub.dmabuf_fd);
+    close_fd(&e->pub.acquire_fd);
+    close_fd(&e->pub.release_fd);
+    free(e);
+    awl_bufferqueue_unref(q);
+}
+
+/* ---------------- fence waiter ----------------
+ * One epoll thread for every queue: an armed queue contributes the fd of the
+ * first incomplete frame behind its head (own dup; EPOLLONESHOT, explicitly
+ * DEL'd before close — dma-buf/sync_file fds are shared open file
+ * descriptions with the client, a plain close would leave the entry live).
+ * On signal: drain (releases the superseded head), re-arm if a further
+ * frame is still incomplete. */
+struct bq_arm {
+    int fd;
+    struct awl_bufferqueue* q;    /* +1 ref while registered */
+};
+
+static struct {
+    pthread_mutex_t lock;
+    int epfd;
+    int started;                  /* 0 = not yet, 1 = running, -1 = failed (don't retry) */
+    pthread_t th;
+} g_waiter = { PTHREAD_MUTEX_INITIALIZER, -1, 0, 0 };
+
+static void* waiter_thread(void* arg) {
+    (void)arg;
+    for (;;) {
+        struct epoll_event ev[16];
+        int n = epoll_wait(g_waiter.epfd, ev, 16, -1);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            LOGE("fence waiter: epoll_wait %s — waiter exiting", strerror(errno));
+            return NULL;
+        }
+        for (int i = 0; i < n; i++) {
+            struct bq_arm* a = ev[i].data.ptr;
+            epoll_ctl(g_waiter.epfd, EPOLL_CTL_DEL, a->fd, NULL);
+            close(a->fd);
+            struct awl_bufferqueue* q = a->q;
+            free(a);
+            atomic_store(&q->armed, 0);
+            awl_bufferqueue_lock(q);      /* consumers hold it for microseconds */
+            awl_bufferqueue_drain(q);
+            awl_bufferqueue_arm(q);
+            awl_bufferqueue_unlock(q);
+            awl_bufferqueue_unref(q);
+        }
+    }
+}
+
+static int waiter_start(void) {
+    pthread_mutex_lock(&g_waiter.lock);
+    if (!g_waiter.started) {
+        g_waiter.epfd = epoll_create1(EPOLL_CLOEXEC);
+        if (g_waiter.epfd >= 0 &&
+            pthread_create(&g_waiter.th, NULL, waiter_thread, NULL) == 0) {
+            g_waiter.started = 1;
+        } else {
+            LOGE("fence waiter: start failed (%s) — releases fall back to commit/vsync drains",
+                 strerror(errno));
+            if (g_waiter.epfd >= 0) close(g_waiter.epfd);
+            g_waiter.epfd = -1;
+            g_waiter.started = -1;
+        }
+    }
+    int ok = g_waiter.started == 1;
+    pthread_mutex_unlock(&g_waiter.lock);
+    return ok;
+}
+
+/* ---------------- ring ---------------- */
+
 /* Consecutive published elements from head (consumer side, under lock). */
 static unsigned visible(struct awl_bufferqueue* q) {
     unsigned h = atomic_load_explicit(&q->head, memory_order_relaxed);
@@ -225,17 +253,19 @@ static unsigned visible(struct awl_bufferqueue* q) {
     return n;
 }
 
-/* Under lock, visible() >= 1: release the head element and advance. */
+static inline struct awl_bq_elem* at(struct awl_bufferqueue* q, unsigned idx) {
+    return q->slots[idx % AWL_BQ_CAP].e;
+}
+
+/* Under lock, visible() >= 1: pop the head (drops the ring's reference). */
 static void pop_head(struct awl_bufferqueue* q) {
     unsigned h = atomic_load_explicit(&q->head, memory_order_relaxed);
     struct awl_bq_slot* s = &q->slots[h % AWL_BQ_CAP];
-    struct awl_bq_buffer e = s->e;   /* copy out: the callback runs without slot ownership questions */
+    struct awl_bq_elem* e = s->e;
+    s->e = NULL;
     atomic_store_explicit(&s->ready, 0, memory_order_relaxed);
     atomic_store_explicit(&q->head, h + 1, memory_order_release);   /* slot reusable by producers */
-    if (q->release) q->release(&e, q->ctx);
-    close_fd(&e.dmabuf_fd);
-    close_fd(&e.acquire_fd);
-    close_fd(&e.release_fd);
+    elem_unref(e);
 }
 
 struct awl_bufferqueue* awl_bufferqueue_create(awl_bq_release_fn fn, void* ctx) {
@@ -257,34 +287,40 @@ void awl_bufferqueue_ref(struct awl_bufferqueue* q) {
 }
 
 void awl_bufferqueue_unref(struct awl_bufferqueue* q) {
-    if (!q || atomic_fetch_sub(&q->refs, 1) != 1) return;
-    pthread_mutex_lock(&q->lock);
-    /* everything, published or not (no producer can be alive at the last
-     * unref — the owner dropped its reference after detaching all producers) */
-    for (;;) {
-        unsigned h = atomic_load(&q->head), t = atomic_load(&q->tail);
-        if (h == t) break;
-        if (atomic_load(&q->slots[h % AWL_BQ_CAP].ready)) pop_head(q);
-        else atomic_store(&q->head, h + 1);   /* reserved, never published: skip */
-    }
-    pthread_mutex_unlock(&q->lock);
+    if (!q || atomic_fetch_sub_explicit(&q->refs, 1, memory_order_acq_rel) != 1) return;
+    /* every live element pins the queue → at zero the ring holds nothing
+     * published; a slot reserved by a producer that never published cannot
+     * exist either (producers hold the owner's reference) */
+    if (atomic_load(&q->head) != atomic_load(&q->tail))
+        LOGE("bufferqueue freed with %u slots reserved", atomic_load(&q->tail) - atomic_load(&q->head));
     pthread_mutex_destroy(&q->lock);
     free(q);
 }
 
 int awl_bufferqueue_push(struct awl_bufferqueue* q, const struct awl_bq_buffer* e) {
+    struct awl_bq_elem* el = malloc(sizeof(*el));
+    if (!el) return 0;
+    el->pub = *e;
+    el->pub.release_fd = -1;
+    atomic_init(&el->refs, 1);
+    atomic_init(&el->rel_fd, e->release_fd);   /* a producer-supplied fence is merged like a consumer's */
+    el->q = q;
     unsigned t = atomic_load_explicit(&q->tail, memory_order_relaxed);
     for (;;) {
         unsigned h = atomic_load_explicit(&q->head, memory_order_acquire);
-        if (t - h >= AWL_BQ_CAP) return 0;   /* full */
+        if (t - h >= AWL_BQ_CAP) {   /* full */
+            free(el);
+            return 0;
+        }
         if (atomic_compare_exchange_weak_explicit(&q->tail, &t, t + 1,
                                                   memory_order_acq_rel,
                                                   memory_order_relaxed))
             break;
         /* t reloaded by the failed CAS */
     }
+    awl_bufferqueue_ref(q);   /* the element pins the queue */
     struct awl_bq_slot* s = &q->slots[t % AWL_BQ_CAP];
-    s->e = *e;
+    s->e = el;
     atomic_store_explicit(&s->ready, 1, memory_order_release);
     return 1;
 }
@@ -303,47 +339,55 @@ int awl_bufferqueue_drain(struct awl_bufferqueue* q) {
     int n = 0;
     while (visible(q) >= 2) {
         unsigned h = atomic_load_explicit(&q->head, memory_order_relaxed);
-        const struct awl_bq_buffer* next = &q->slots[(h + 1) % AWL_BQ_CAP].e;
-        if (!elem_ready(next)) break;   /* FIFO completion: nothing behind it is ready either */
+        if (!elem_ready(&at(q, h + 1)->pub)) break;   /* FIFO completion: nothing behind it is ready either */
         pop_head(q);
         n++;
     }
     return n;
 }
 
-const struct awl_bq_buffer* awl_bufferqueue_gethead(struct awl_bufferqueue* q,
-                                                    int timeout_ms) {
+struct awl_bq_buffer* awl_bufferqueue_gethead(struct awl_bufferqueue* q, int timeout_ms) {
     if (visible(q) == 0) return NULL;
     unsigned h = atomic_load_explicit(&q->head, memory_order_relaxed);
-    struct awl_bq_buffer* e = &q->slots[h % AWL_BQ_CAP].e;
-    if (!elem_ready(e)) {
-        int r = elem_wait(e, timeout_ms);
+    struct awl_bq_elem* e = at(q, h);
+    if (!elem_ready(&e->pub)) {
+        int r = elem_wait(&e->pub, timeout_ms);
         if (r == 1) {
             int n = atomic_fetch_add(&q->timeouts, 1) + 1;
             if (n <= 3 || (n % 100) == 0)
                 LOGE("gethead: acquire fence not signaled in %dms (%ux%u ino=%llu, %s fence) — presenting anyway (#%d)",
-                     timeout_ms, e->width, e->height, (unsigned long long)e->ino,
-                     e->acquire_fd >= 0 ? "explicit" : "implicit", n);
+                     timeout_ms, e->pub.width, e->pub.height, (unsigned long long)e->pub.ino,
+                     e->pub.acquire_fd >= 0 ? "explicit" : "implicit", n);
         }
     }
-    return e;
+    atomic_fetch_add_explicit(&e->refs, 1, memory_order_relaxed);   /* consumer's reference */
+    return &e->pub;
 }
 
-void awl_bufferqueue_set_release_fence(struct awl_bufferqueue* q, int fence_fd) {
-    if (fence_fd < 0 || visible(q) == 0) return;
-    unsigned h = atomic_load_explicit(&q->head, memory_order_relaxed);
-    struct awl_bq_buffer* e = &q->slots[h % AWL_BQ_CAP].e;
-    if (e->dmabuf_fd < 0) return;   /* NULL marker: nothing was sampled */
-    int merged = awl_fence_merge(e->release_fd, fence_fd);   /* dup when none yet */
-    if (merged < 0) return;         /* keep the older fence rather than none */
-    close_fd(&e->release_fd);
-    e->release_fd = merged;
+void awl_bufferqueue_put(struct awl_bq_buffer* pub, int fence_fd) {
+    if (!pub) return;
+    struct awl_bq_elem* e = (struct awl_bq_elem*)pub;   /* pub is the first member */
+    if (fence_fd >= 0 && pub->dmabuf_fd >= 0) {
+        /* lock-free merge: several consumers (cursor image crossing windows)
+         * may put the same element — CAS the merged fd in, retry on a race */
+        for (;;) {
+            int old = atomic_load(&e->rel_fd);
+            int merged = awl_fence_merge(old, fence_fd);   /* dup when none yet */
+            if (merged < 0) break;                          /* keep what is there */
+            if (atomic_compare_exchange_strong(&e->rel_fd, &old, merged)) {
+                if (old >= 0) close(old);
+                break;
+            }
+            close(merged);
+        }
+    }
+    elem_unref(e);
 }
 
 void awl_bufferqueue_arm(struct awl_bufferqueue* q) {
     if (visible(q) < 2) return;
     unsigned h = atomic_load_explicit(&q->head, memory_order_relaxed);
-    const struct awl_bq_buffer* next = &q->slots[(h + 1) % AWL_BQ_CAP].e;
+    const struct awl_bq_buffer* next = &at(q, h + 1)->pub;
     if (elem_ready(next)) return;   /* drain will take it at the next opportunity */
     if (atomic_exchange(&q->armed, 1)) return;
     if (!waiter_start()) { atomic_store(&q->armed, 0); return; }
