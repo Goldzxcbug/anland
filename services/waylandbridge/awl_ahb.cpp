@@ -431,6 +431,13 @@ AHardwareBuffer* awl_ahb_wrap(const struct awl_bq_buffer* b,
 
     size_t total = (13 + kc->num_ints) * 4;
     int32_t* wire = (int32_t*)malloc(total);
+    if (!wire) {
+        LOGE("wire OOM (%zu bytes)", total);
+        close(pix);
+        close(blb);
+        AHardwareBuffer_release(donor);
+        return NULL;
+    }
     memcpy(wire, head, sizeof(head));
     memcpy(wire + 13, ints, (size_t)kc->num_ints * 4);
 

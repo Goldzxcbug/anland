@@ -70,19 +70,21 @@ struct awl_ime_obj {
     /* v3 double-buffered pending (applied on commit) */
     bool pend_enabled;            /* pending.enabled: set by enable/disable, not reset by commit (kwin) */
     bool pend_enable_req;         /* an enable request arrived since the last commit (re-enable while enabled → re-show the panel) */
-    char pend_text[AWL_IME_TEXT_MAX + 1];
+    char* pend_text;              /* heap, AWL_IME_TEXT_MAX+1, lazily allocated on first write (an
+                                     * object whose client never sends surrounding text pays nothing);
+                                     * NULL == empty — same representation as below */
     uint32_t pend_cursor, pend_anchor;
     uint32_t pend_hint, pend_purpose;
     int32_t pend_cx, pend_cy, pend_cw, pend_ch;
 
     /* effective content (source for cb_ime_state push) */
-    char text[AWL_IME_TEXT_MAX + 1];
+    char* text;                   /* heap, lazily allocated on first write; NULL == empty */
     uint32_t cursor, anchor;
     uint32_t hint, purpose;
     int32_t cx, cy, cw, ch;
 
     /* v3 current preedit (re-sent with every done, kwin) */
-    char pre_text[AWL_IME_TEXT_MAX + 1];
+    char* pre_text;               /* heap, lazily allocated on first write; NULL == empty */
     int32_t pre_cb, pre_ce;
 
     uint32_t serial;              /* v1: last commit_state serial (echoed in events); v3: commit count (done serial) */
@@ -111,12 +113,24 @@ static void focus_snapshot(struct wl_client** c, uint64_t* win) {
 
 /* ---------------- state push / show-hide (callbacks) ---------------- */
 
+/* Lazily allocate a text buffer at its first write; kept until object
+ * destruction (preedit/surrounding updates are per-keystroke — freeing on
+ * clear would just churn the allocator). NULL return = OOM: callers keep the
+ * previous content. Buffers start zeroed, so "never written" == empty. */
+static char* ime_txt(char** slot) {
+    if (!*slot) *slot = calloc(1, AWL_IME_TEXT_MAX + 1);
+    return *slot;
+}
+
 /* resource destruction (client disconnect / v3 destroy request) → unlink */
 static void ime_obj_destroy(struct wl_resource* res) {
     struct awl_ime_obj* o = wl_resource_get_user_data(res);
     if (!o) return;
     pthread_rwlock_wrlock(&g_srv.rwl);
     wl_list_remove(&o->link);
+    free(o->pend_text);
+    free(o->text);
+    free(o->pre_text);
     free(o);
     pthread_rwlock_unlock(&g_srv.rwl);
 }
@@ -149,7 +163,7 @@ static void push_state_impl(struct awl_ime_obj* o, uint32_t flags) {
     int32_t cy = (int32_t)(((double)o->cy - gy) * sy + oy);
     int32_t cw = (int32_t)((double)o->cw * sx);
     int32_t ch = (int32_t)((double)o->ch * sy);
-    g_srv.cbs.ime_state(g_srv.cbs.user, s->id, o->text,
+    g_srv.cbs.ime_state(g_srv.cbs.user, s->id, o->text ? o->text : "",
                         (int32_t)o->cursor, (int32_t)o->anchor,
                         o->hint, o->purpose, cx, cy, cw, ch,
                         flags);
@@ -174,7 +188,7 @@ static void push_hide(struct awl_ime_obj* o) {
 /* ---------------- zwp_text_input_v3 ---------------- */
 
 static void ti3_reset_pending(struct awl_ime_obj* o) {
-    o->pend_text[0] = 0;
+    if (o->pend_text) o->pend_text[0] = 0;
     o->pend_cursor = o->pend_anchor = 0;
     o->pend_hint = o->pend_purpose = 0;
     o->pend_cx = o->pend_cy = o->pend_cw = o->pend_ch = 0;
@@ -186,8 +200,9 @@ static void ti3_reset_pending(struct awl_ime_obj* o) {
  * sent after every commit"; the preedit is re-sent because event state is
  * double-buffered on the client — a done without preedit_string resets it. */
 static void ti3_send_done(struct awl_ime_obj* o) {
-    if (o->pre_text[0] || o->pre_cb || o->pre_ce)
-        zwp_text_input_v3_send_preedit_string(o->res, o->pre_text, o->pre_cb, o->pre_ce);
+    if ((o->pre_text && o->pre_text[0]) || o->pre_cb || o->pre_ce)
+        zwp_text_input_v3_send_preedit_string(o->res, o->pre_text ? o->pre_text : "",
+                                              o->pre_cb, o->pre_ce);
     zwp_text_input_v3_send_done(o->res, o->serial);
 }
 
@@ -222,7 +237,8 @@ static void ti3_set_surrounding_text(struct wl_client* c, struct wl_resource* re
                                      const char* text, int32_t cursor, int32_t anchor) {
     struct awl_ime_obj* o = wl_resource_get_user_data(res);
     if (!o || !o->pend_enabled) return;
-    snprintf(o->pend_text, sizeof(o->pend_text), "%s", text ? text : "");
+    char* b = ime_txt(&o->pend_text);
+    if (b) snprintf(b, AWL_IME_TEXT_MAX + 1, "%s", text ? text : "");
     o->pend_cursor = cursor > 0 ? (uint32_t)cursor : 0;
     o->pend_anchor = anchor > 0 ? (uint32_t)anchor : o->pend_cursor;
 }
@@ -258,7 +274,12 @@ static void ti3_commit(struct wl_client* c, struct wl_resource* res) {
 
     /* apply the double-buffered content (only meaningful while enabled;
      * copying unconditionally is harmless — pushes happen only when enabled) */
-    memcpy(o->text, o->pend_text, sizeof(o->text));
+    if (o->pend_text) {
+        char* b = ime_txt(&o->text);
+        if (b) memcpy(b, o->pend_text, AWL_IME_TEXT_MAX + 1);
+    } else if (o->text) {
+        o->text[0] = 0;
+    }
     o->cursor = o->pend_cursor; o->anchor = o->pend_anchor;
     o->hint = o->pend_hint; o->purpose = o->pend_purpose;
     o->cx = o->pend_cx; o->cy = o->pend_cy; o->cw = o->pend_cw; o->ch = o->pend_ch;
@@ -267,7 +288,7 @@ static void ti3_commit(struct wl_client* c, struct wl_resource* res) {
     struct awl_surface* s = o->entered ? obj_surface(o) : NULL;
     if (s) pthread_mutex_lock(&s->ev_lock);
     if (!o->enabled) {   /* disable drops the composition */
-        o->pre_text[0] = 0;
+        if (o->pre_text) o->pre_text[0] = 0;
         o->pre_cb = o->pre_ce = 0;
     }
     ti3_send_done(o);   /* done after EVERY commit (serial handshake, see file header) */
@@ -439,7 +460,8 @@ static void ti1_set_surrounding_text(struct wl_client* c, struct wl_resource* re
                                      const char* text, uint32_t cursor, uint32_t anchor) {
     struct awl_ime_obj* o = wl_resource_get_user_data(res);
     if (!o) return;
-    snprintf(o->text, sizeof(o->text), "%s", text ? text : "");
+    char* b = ime_txt(&o->text);
+    if (b) snprintf(b, AWL_IME_TEXT_MAX + 1, "%s", text ? text : "");
     o->cursor = cursor;
     o->anchor = anchor;
     ti1_push_now(o);
@@ -629,18 +651,21 @@ void awl_ime_text(uint64_t id, uint32_t op, const char* text, int32_t a, int32_t
             switch (op) {
             case AWL_IME_COMMIT:
                 /* commit replaces the composition: no preedit in this done group */
-                o->pre_text[0] = 0;
+                if (o->pre_text) o->pre_text[0] = 0;
                 o->pre_cb = o->pre_ce = 0;
                 zwp_text_input_v3_send_commit_string(o->res, text);
                 zwp_text_input_v3_send_done(o->res, o->serial);
                 break;
-            case AWL_IME_PREEDIT:
-                snprintf(o->pre_text, sizeof(o->pre_text), "%s", text);
+            case AWL_IME_PREEDIT: {
+                char* pb = ime_txt(&o->pre_text);
+                if (pb) snprintf(pb, AWL_IME_TEXT_MAX + 1, "%s", text);
                 o->pre_cb = a;
                 o->pre_ce = b;
-                zwp_text_input_v3_send_preedit_string(o->res, o->pre_text, a, b);
+                zwp_text_input_v3_send_preedit_string(
+                        o->res, o->pre_text ? o->pre_text : "", a, b);
                 zwp_text_input_v3_send_done(o->res, o->serial);
                 break;
+            }
             case AWL_IME_DELETE:
                 zwp_text_input_v3_send_delete_surrounding_text(
                         o->res, (uint32_t)(a > 0 ? a : 0),

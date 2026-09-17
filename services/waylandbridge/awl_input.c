@@ -1343,7 +1343,6 @@ static void constr_create(struct wl_client* client, struct wl_resource* mgr,
             constr_app_rect(root, has, x, y, w, h, c->r);
             pthread_mutex_unlock(&root->ev_lock);
         }
-        wl_list_insert(g_constrs.prev, &c->link);
         pthread_mutex_unlock(&g_constr_lock);
         /* activation = creation (sync model): the event once, in the same
          * ev_lock group as the pointer stream of that window */
@@ -1357,6 +1356,12 @@ static void constr_create(struct wl_client* client, struct wl_resource* mgr,
             pthread_mutex_unlock(&root->ev_lock);
         }
     }
+    /* always linked (dead ones too): constr_res_destroy removes
+     * unconditionally — an unlinked entry would crash the teardown (same
+     * shape as awl_idle.c) */
+    pthread_mutex_lock(&g_constr_lock);
+    wl_list_insert(g_constrs.prev, &c->link);
+    pthread_mutex_unlock(&g_constr_lock);
     wl_resource_set_implementation(
             obj,
             mode == AWL_CAPTURE_LOCK ? (const void*)&locked_iface

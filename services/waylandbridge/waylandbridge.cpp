@@ -251,7 +251,9 @@ struct awl_win_state {
      * C_IME_SHOW(+state snapshot) to reopen the input method. */
     bool ime_active;
     uint32_t ime_hint, ime_purpose;
-    char ime_text[4001];  /* UTF-8 surrounding (client set_surrounding_text) */
+    char* ime_text = nullptr;  /* UTF-8 surrounding (client set_surrounding_text);
+                                 * heap strdup — NULL == empty (keeps the map node small;
+                                 * length stays bounded by the 4000-byte cap upstream in awl_ime.c) */
     int32_t ime_cursor, ime_anchor;   /* byte offsets (Activity side converts to chars) */
     int32_t ime_cx, ime_cy, ime_cw, ime_ch;   /* cursor rectangle (surface coords) */
 
@@ -277,6 +279,26 @@ struct death_link {
     std::vector<uint64_t> ids;
 };
 static std::vector<death_link*> g_links;   /* guarded by g_state_lock */
+
+/* Retired links: ids emptied, unlinked + strong ref dropped, but the struct
+ * itself is kept — AIBinder_unlinkToDeath gives no guarantee that an
+ * already-dispatched death callback won't still run with our cookie, so the
+ * memory must outlive the (unknowable) in-flight window. on_token_died
+ * matching a retired entry frees it; entries whose process never dies stay
+ * here (a ~40B node with no binder pin, vs the unbounded strong-ref
+ * accumulation this retirement prevents). */
+static std::vector<death_link*> g_links_retired;   /* guarded by g_state_lock */
+
+/* Unlink + drop the strong ref of an empty link (caller holds g_state_lock).
+ * Same lock nesting as the link-up side in SURFACE handling. */
+static AIBinder_DeathRecipient* k_death = nullptr;
+static void retire_link_locked(death_link* dl) {
+    AIBinder_unlinkToDeath(dl->token, k_death, dl);
+    AIBinder_decStrong(dl->token);
+    for (auto it = g_links.begin(); it != g_links.end(); ++it)
+        if (*it == dl) { g_links.erase(it); break; }
+    g_links_retired.push_back(dl);
+}
 
 /* Any window still attached? (caller holds g_state_lock) — foreground
  * scheduling keeps the daemon boosted while the attach count is non-zero */
@@ -573,6 +595,18 @@ static void on_token_died(void* cookie) {
     std::vector<uint64_t> ids;
     {
         std::lock_guard<std::mutex> lk(g_state_lock);
+        bool live = false;
+        for (death_link* l : g_links)
+            if (l == dl) { live = true; break; }
+        if (!live) {
+            /* already retired (or a duplicate notification): if the death
+             * raced with retire_link_locked, claim the retired node here;
+             * otherwise it was handled — nothing left to do either way */
+            for (auto it = g_links_retired.begin(); it != g_links_retired.end(); ++it) {
+                if (*it == dl) { g_links_retired.erase(it); delete dl; break; }
+            }
+            return;
+        }
         ids = dl->ids;
         for (auto it = g_links.begin(); it != g_links.end(); ++it) {
             if (*it == dl) { g_links.erase(it); break; }
@@ -778,13 +812,17 @@ static void cb_window_destroyed(void* user, uint64_t id) {
             ctrl = it->second.ctrl;
             it->second.ctrl = nullptr;    /* ownership transferred to this send */
             sched_drop = it->second.attached;
+            free(it->second.ime_text);
         }
         g_wins.erase(id);
         sched_none_left = sched_drop && !any_attached_locked();
+        std::vector<death_link*> retire;   /* retired after the scan (no mid-iteration erase) */
         for (death_link* dl : g_links) {
             for (auto it2 = dl->ids.begin(); it2 != dl->ids.end(); ++it2)
                 if (*it2 == id) { dl->ids.erase(it2); break; }
+            if (dl->ids.empty()) retire.push_back(dl);
         }
+        for (death_link* dl : retire) retire_link_locked(dl);
     }
     /* foreground scheduling restore: this callback still runs before the
      * logic layer unlinks the surface, so the id resolves to its client even
@@ -898,8 +936,8 @@ static void cb_ime_state(void* user, uint64_t id, const char* text,
         std::lock_guard<std::mutex> lk(g_state_lock);
         auto it = g_wins.find(id);
         if (it == g_wins.end()) return;
-        snprintf(it->second.ime_text, sizeof(it->second.ime_text), "%s",
-                 text ? text : "");
+        free(it->second.ime_text);
+        it->second.ime_text = strdup(text ? text : "");   /* NULL on OOM == empty */
         it->second.ime_cursor = cursor;
         it->second.ime_anchor = anchor;
         it->second.ime_hint = hint;
@@ -929,6 +967,9 @@ static void ime_reopen_on_attach(uint64_t id) {
         if (it == g_wins.end() || !it->second.ime_active || !it->second.ctrl)
             return;
         snap = it->second;
+        /* deep copy: the map entry (and its ime_text) may be erased after
+         * the lock is dropped while the snapshot is still in use */
+        snap.ime_text = it->second.ime_text ? strdup(it->second.ime_text) : nullptr;
         ctrl = it->second.ctrl;
         AIBinder_incStrong(ctrl);
     }
@@ -937,7 +978,9 @@ static void ime_reopen_on_attach(uint64_t id) {
     int32_t state[9] = { (int32_t)snap.ime_hint, (int32_t)snap.ime_purpose,
                          snap.ime_cursor, snap.ime_anchor,
                          snap.ime_cx, snap.ime_cy, snap.ime_cw, snap.ime_ch, 0 };
-    ctrl_send_ints(ctrl, AWL_C_IME_STATE, state, 9, snap.ime_text);
+    ctrl_send_ints(ctrl, AWL_C_IME_STATE, state, 9,
+                   snap.ime_text ? snap.ime_text : "");
+    free(snap.ime_text);
     AIBinder_decStrong(ctrl);
     LOGI("window %llu: ime reopened on attach (input state kept alive)",
          (unsigned long long)id);
@@ -1366,7 +1409,6 @@ static int cfg_set(const std::string& key, int32_t val) {
 /* ---------------- binder service ---------------- */
 
 static AIBinder_Class* k_binder_class = nullptr;
-static AIBinder_DeathRecipient* k_death = nullptr;
 
 /* AParcel_readString allocator (string16 wire → UTF-8 std::string).
  * length includes the trailing NUL; a null string arrives as length=-1 +
@@ -1609,11 +1651,14 @@ static binder_status_t host_on_transact(AIBinder* binder, transaction_code_t cod
                 ws.attached = true;
                 if (host) ws.host = host;
                 /* link convergence: the id stays only on this token's chain (stale members pruned from other chains) */
+                std::vector<death_link*> retire;   /* retired after the scan (no mid-iteration erase) */
                 for (death_link* dl : g_links) {
                     if (token && dl->token == token) continue;
                     for (auto it2 = dl->ids.begin(); it2 != dl->ids.end(); ++it2)
                         if (*it2 == id) { dl->ids.erase(it2); break; }
+                    if (dl->ids.empty()) retire.push_back(dl);
                 }
+                for (death_link* dl : retire) retire_link_locked(dl);
             }
         }
         if (evicted) {
