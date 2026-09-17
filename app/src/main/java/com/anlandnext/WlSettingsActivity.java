@@ -267,6 +267,29 @@ public class WlSettingsActivity extends Activity {
         root.addView(sizes);
         showSz.run();
 
+        /* ---- Compositor backend (daemon config sc_enabled: on = the SC
+         *      path — wayland layers become sibling ASurfaceControls
+         *      composed by SurfaceFlinger/HWC, dma-buf scanout when
+         *      allowed; off = the per-window GL renderer fallback.
+         *      Windows already attached keep their backend until
+         *      re-attach — effective for windows attached from now on.) */
+        android.widget.Space gap4 = new android.widget.Space(this);
+        gap4.setMinimumHeight(64);
+        root.addView(gap4);
+
+        TextView scTip = new TextView(this);
+        scTip.setText(R.string.sc_backend_tip);
+        root.addView(scTip);
+
+        android.widget.Switch scSw = new android.widget.Switch(this);
+        scSw.setText(R.string.sc_backend);
+        int gotSc = WlBinder.configGet("sc_enabled");
+        scSw.setChecked(gotSc != 0);   /* daemon down / unknown → on (the daemon default) */
+        /* listener AFTER the initial state: opening the page must not fire a
+         * write back to the daemon */
+        scSw.setOnCheckedChangeListener((b, on) -> WlBinder.configSet("sc_enabled", on ? 1 : 0));
+        root.addView(scSw);
+
         setContentView(root);
     }
 

@@ -30,4 +30,6 @@
     <string name="init_size_tip">Initial window size (first-frame placeholder before Android sizes the window, applies to new windows):</string>
     <string name="init_size_w">Width</string>
     <string name="init_size_h">Height</string>
+    <string name="sc_backend_tip">Compositor backend (on = SC/HWC: wayland layers are composed by SurfaceFlinger, zero-copy scanout when possible; off = per-window GL renderer fallback. Applies to windows attached from now on):</string>
+    <string name="sc_backend">SC compositor backend (HWC)</string>
 </resources>

@@ -28,4 +28,8 @@
     <string name="init_size_tip">初始窗口尺寸（Android 定尺寸前的首帧占位, 仅对新窗口生效）:</string>
     <string name="init_size_w">宽</string>
     <string name="init_size_h">高</string>
+    <string name="auto_attach_tip">自动 attach（wayland 窗口创建时 daemon 自动拉起宿主窗口; 关 = 窗口等待其应用发来 binder SURFACE）:</string>
+    <string name="auto_attach">自动 attach 新窗口</string>
+    <string name="sc_backend_tip">合成后端（开 = SC/HWC: wayland 图层交由 SurfaceFlinger 合成, 允许时零拷贝扫描输出; 关 = 回退逐窗口 GL 渲染。对之后 attach 的窗口生效）:</string>
+    <string name="sc_backend">SC 合成后端（HWC）</string>
 </resources>
