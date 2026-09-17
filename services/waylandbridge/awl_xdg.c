@@ -61,7 +61,7 @@ static void toplevel_set_title(struct wl_client* c, struct wl_resource* res,
                                const char* title) {
     struct awl_surface* s = wl_resource_get_user_data(res);
     if (!s) return;
-    snprintf(s->title, sizeof(s->title), "%s", title ? title : "");
+    awl_surface_set_title(s, title);
     if (s->mapped && g_srv.cbs.window_title)
         g_srv.cbs.window_title(g_srv.cbs.user, s->id, s->title);
 }
@@ -443,7 +443,7 @@ static void xdg_surface_get_toplevel(struct wl_client* c,
     s->role = AWL_ROLE_TOPLEVEL;
     s->xdg_role_res = t;
     s->xdg_surface_res = res;
-    s->title[0] = '\0';
+    awl_surface_set_title(s, NULL);
 
     /* Initial configure: daemon-config placeholder init_w/init_h (#33, not the
      * display's physical size — in external-screen scenarios like Samsung DeX

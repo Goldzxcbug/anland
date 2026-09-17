@@ -549,6 +549,7 @@ static void surface_destroy_impl(struct wl_resource* res) {
     wl_list_remove(&s->link);
     struct awl_bufferqueue* q = s->q;   /* renderer may still hold its own ref: unref after unlink */
     s->q = NULL;
+    free(s->title);
     pthread_mutex_destroy(&s->ev_lock);
     free(s);
     pthread_rwlock_unlock(&g_srv.rwl);
@@ -886,6 +887,15 @@ static const struct wl_surface_interface surface_iface = {
     .set_buffer_scale = surface_set_buffer_scale,
     .damage_buffer = surface_damage_buffer,
 };
+
+/* Toplevel title storage: heap, owned by the surface (client dispatch
+ * thread only — set_title / role setup / destroy; the render thread never
+ * reads it). Full string kept, no truncation; empty/NULL and strdup failure
+ * all mean "no title" (consumers treat NULL like ""). */
+void awl_surface_set_title(struct awl_surface* s, const char* title) {
+    free(s->title);
+    s->title = (title && title[0]) ? strdup(title) : NULL;
+}
 
 static void compositor_create_surface(struct wl_client* client,
                                       struct wl_resource* res, uint32_t id) {

@@ -89,48 +89,25 @@ struct awl_frame_cb {
     struct wl_list link;
 };
 
+/* Field order = alignment groups: 8-byte members (serials/pointers/lists/
+ * ev_lock) first, then 4-byte state, then the bools last — zero internal
+ * padding (pahole-verified arm64/bionic: 688B; the original declaration was
+ * 976B with 45B of holes + a 256B inline title array). Add new fields to
+ * the group matching their size. */
 struct awl_surface {
     uint64_t id;                     /* window id (globally unique; same id on the Java side) */
     struct wl_resource* resource;
     struct wl_list link;             /* server.surfaces */
     pthread_mutex_t ev_lock;         /* per-window event send lock (recursive): fields + send order for that client */
 
-    enum awl_role role;
     struct wl_resource* xdg_surface_res;    /* associated xdg_surface */
     struct wl_resource* xdg_role_res;       /* xdg_toplevel / xdg_popup */
     struct wl_resource* xwayland_res;       /* xwayland_surface_v1 (#32) */
     uint64_t xwayland_serial;               /* association serial from set_serial (= the X-side
                                               * WL_SURFACE_SERIAL ClientMessage;
                                               * mini-wm pairs the X window by this; 0=not associated) */
-
-    /* xdg state machine */
-    bool configured;                 /* a configure has been sent */
-    bool acked;                      /* client has acked (set after the first configure) */
-    uint32_t configure_serial;       /* serial of the most recent configure */
-    bool mapped;                     /* first frame buffer committed */
-    bool window_live;                /* window_created went out for this id and
-                                      * window_destroyed is still owed. Decoupled
-                                      * from `role`: a client closes a window by
-                                      * destroying the xdg_toplevel (role → NONE)
-                                      * before the wl_surface — a role test at
-                                      * surface death never fires and the window
-                                      * table keeps a zombie (2026-09-17). */
-    int32_t conf_w, conf_h;          /* most recent configure contents */
-    int32_t pend_w, pend_h;          /* cached when resize precedes map (Android owns sizing entirely) */
-    bool has_pending;
-    /* xdg window geometry (buffer coords, double-buffered, applied on commit)
-     * = the window's visible content region (the chrome buffer carries
-     * 16/10px shadow margins; geometry states where the content sits). The
-     * render dst and the input view→buffer mapping share this origin —
-     * ignoring it misplaces content to bottom-right and systematically
-     * offsets input coords (2026-09-09 restore-bubble unclickable, verified). */
-    int32_t geom_x, geom_y, geom_w, geom_h;
-    int geom_valid;
-    int32_t pend_gx, pend_gy, pend_gw, pend_gh;
-    int pend_geom;
-    bool activated;                  /* xdg ACTIVATED state (Android foreground focus) */
-    int32_t popup_x, popup_y;        /* popup anchoring result */
-    char title[256];
+    char* title;                     /* heap: toplevel/Xwayland title (awl_surface_set_title; NULL = none —
+                                      * client dispatch thread only, the render thread never reads it) */
 
     /* ---- zoom (#31: wp_viewporter + wp_fractional_scale_v1, kwin-isomorphic) ----
      * Coordinate model: all layer-stack/geometry/popup/input coords = logical
@@ -138,21 +115,9 @@ struct awl_surface {
      * buffer/buf_scale (isomorphic to kwin SurfaceInterfacePrivate::applyState
      * surfaceSize); toplevel logical size = phys/zoom (the configure-issued
      * value). viewport state is double-buffered, applied on the same commit
-     * as the buffer (kwin pending→current). */
-    int32_t phys_w, phys_h;          /* Android window size (recorded by awl_window_resize; 0=unknown) */
-    int32_t buf_scale;               /* wl_surface.set_buffer_scale (default 1; bookkeeping only) */
-    int32_t buf_transform;           /* wl_surface.set_buffer_transform, current (wl_output.transform
-                                      * 0..7; 90/270 swap the logical size). Applied on commit like
-                                      * viewport state — the render side reads it per frame. */
-    int32_t pend_buf_transform;      /* -1 = nothing pending */
+     * as the buffer (kwin pending→current). Sizes/uv floats: 4-byte group. */
     struct wl_resource* viewport_res;/* wp_viewport (at most 1 per surface; NULL=none) */
     struct wl_resource* frac_res;    /* zwp_fractional_scale_v1 (at most 1 per surface) */
-    int32_t vp_dst_w, vp_dst_h;      /* viewport dst logical size (0=unset) */
-    int32_t pend_vpd_w, pend_vpd_h;
-    int vp_has_dst, pend_vpd;
-    float vp_sx, vp_sy, vp_sw, vp_sh;      /* source rectangle (buffer×buf_scale coords) */
-    float pend_vps_x, pend_vps_y, pend_vps_w, pend_vps_h;
-    int vp_has_src, pend_vps;
 
     /* subsurface role (chrome WaylandBubble=tooltip/selection handles, GTK4 popover):
      * Topology is owned by g_srv.rwl. Like KWin, each parent has current
@@ -160,7 +125,7 @@ struct awl_surface {
      * place_above/place_below. `sub_children` owns every direct child; it is
      * independent of z order.
      * sub_x/sub_y are owned by this surface's ev_lock (render snapshot reads,
-     * set_position writes).
+     * set_position writes) — positions/flags live in the 4-byte group below.
      *
      * sync semantics aligned with kwin-6.6.5 (src/wayland/{subcompositor,surface}.cpp):
      *   - sub_sync defaults to 1 (protocol default sync); the effective value
@@ -179,16 +144,7 @@ struct awl_surface {
     struct wl_list sub_child_link;        /* linked into sub_parent->sub_children */
     struct wl_list sub_link;              /* linked into current below/above */
     struct wl_list sub_pend_link;         /* linked into pending below/above */
-    int sub_above_parent;                 /* current link belongs to parent's above stack */
-    int sub_pend_above;                   /* pending link belongs to parent's above stack */
-    int sub_stack_pending;                /* this parent has a pending z order */
-    int sub_sync;                         /* 1=sync mode (protocol default) */
-    int sub_latched;                      /* latched (sync) pending state exists */
     struct wl_resource* latched_buffer_res;   /* latched buffer (never sampled) */
-    int latched_attach;                   /* latched cycle contains an attach (without one, applying leaves current alone) */
-    int32_t sub_x, sub_y;                 /* applied position (buffer pixels, Y down) */
-    int32_t pend_sub_x, pend_sub_y;       /* set_position double-buffered value (applied on parent commit) */
-    int sub_pos_pending;
 
     /* Double-buffered state. Protocol semantics (2026-09-09 black-screen
      * deadlock, verified): pending state persists across commits — a commit
@@ -197,26 +153,8 @@ struct awl_surface {
      * cycle attached (empty commit / ack commit must not clear current). */
     struct wl_resource* pending_buffer_res;
     struct wl_resource* current_buffer_res;
-    int pending_attached;
-    int32_t pending_offset_x, pending_offset_y;
-
-    /* damage (wl_surface.damage/damage_buffer accumulated in pending —
-     * surface-local px, bbox merge; moved to cur on the commit/latch-apply).
-     * cur_* = damage since a backend last uploaded the wl_shm content
-     * (awl_surface_shm_begin/end) — dmabuf layers never read it (the GPU
-     * samples the memory in place):
-     *   NONE    nothing changed since the last upload
-     *   RECT    the bbox rect needs re-uploading
-     *   FULL    a commit attached a buffer with NO damage — protocol
-     *           default: whole surface (client gave no information)
-     * Over-copy is always safe, under-copy never. All owned by ev_lock. */
-    int32_t pd_x, pd_y, pd_w, pd_h;
-    int pending_damage_empty;
-    int32_t cur_damage_x, cur_damage_y, cur_damage_w, cur_damage_h;
-    int cd_state;               /* AWL_DMG_* (NONE = 0, calloc-init) */
 
     struct wl_list frame_callbacks;
-    bool dirty;                      /* awaiting render after commit */
 
     /* ---- frame stream (awl_bufferqueue.h) ----
      * Every presented dmabuf state change of this surface becomes one queue
@@ -228,7 +166,6 @@ struct awl_surface {
      * / zwp_linux_buffer_release_v1 go out when the element leaves the queue
      * (bq_release_cb in awl_surface.c) — never from a "presented" hook. */
     struct awl_bufferqueue* q;
-    int q_last_dmabuf;               /* the newest push was a dmabuf frame (ev_lock) */
 
     /* ---- wl_shm frame source ----
      * A wl_shm commit never enters the queue and is never copied here: the
@@ -236,29 +173,101 @@ struct awl_surface {
      * end, this ev_lock held across the upload — the damage rect only, into
      * its own GPU texture) and wl_buffer.release goes out when that read is
      * done. All ev_lock. */
-    int shm_live;                    /* the committed content is a shm buffer (cleared by attach(NULL) / a dmabuf attach) */
     uint64_t shm_serial;             /* bumps on every commit that changed shm content (attach or damage); a consumer skips unchanged */
     struct wl_resource* shm_res;     /* the shm wl_buffer whose release is owed (NULL = none / destroyed) */
-    int shm_release_pending;         /* wl_buffer.release for shm_res not sent yet */
     struct wl_resource* shm_release_res;   /* zwp_linux_buffer_release_v1 of that commit (immediate_release once read; cleared by awl_surface_shm_release_gone) */
-    atomic_int attached;             /* root only: an Android window is attached (renderer
-                                      * alive). Commit-time drain is skipped while 0 so a
-                                      * minimized window's client parks on buffer starvation
-                                      * instead of spinning. Adapter writes (awl_window_attached). */
 
     /* ---- zwp_linux_explicit_synchronization_v1 (awl_esync.c) ----
      * Double-buffered like the buffer itself: pend_* is applied on the commit
      * that carries the attach (sync-subsurface latching moves it to
      * latched_*). Ownership of an acquire fd moves into the queue element. */
     struct wl_resource* sync_res;            /* zwp_linux_surface_synchronization_v1 (≤ 1) */
-    int pend_acquire_fd;                     /* -1 = none */
     struct wl_resource* pend_release_res;    /* zwp_linux_buffer_release_v1 for this cycle */
-    int latched_acquire_fd;
     struct wl_resource* latched_release_res;
     struct wl_list esync_all;                /* every live release object of this surface
                                               * (awl_esync_release::all_link; dispatch thread) */
     struct wl_list esync_gc;                 /* delivered ones awaiting wl_resource_destroy on
                                               * the dispatch thread (gc_link; g_bufref_lock) */
+
+    /* ---- 4-byte state: xdg configure / geometry / zoom sizes / uv / damage ---- */
+    enum awl_role role;
+    uint32_t configure_serial;       /* serial of the most recent configure */
+    int32_t conf_w, conf_h;          /* most recent configure contents */
+    int32_t pend_w, pend_h;          /* cached when resize precedes map (Android owns sizing entirely) */
+    /* xdg window geometry (buffer coords, double-buffered, applied on commit)
+     * = the window's visible content region (the chrome buffer carries
+     * 16/10px shadow margins; geometry states where the content sits). The
+     * render dst and the input view→buffer mapping share this origin —
+     * ignoring it misplaces content to bottom-right and systematically
+     * offsets input coords (2026-09-09 restore-bubble unclickable, verified). */
+    int32_t geom_x, geom_y, geom_w, geom_h;
+    int32_t pend_gx, pend_gy, pend_gw, pend_gh;
+    int32_t popup_x, popup_y;        /* popup anchoring result */
+    int32_t phys_w, phys_h;          /* Android window size (recorded by awl_window_resize; 0=unknown) */
+    int32_t buf_scale;               /* wl_surface.set_buffer_scale (default 1; bookkeeping only) */
+    int32_t buf_transform;           /* wl_surface.set_buffer_transform, current (wl_output.transform
+                                      * 0..7; 90/270 swap the logical size). Applied on commit like
+                                      * viewport state — the render side reads it per frame. */
+    int32_t pend_buf_transform;      /* -1 = nothing pending */
+    int32_t vp_dst_w, vp_dst_h;      /* viewport dst logical size (0=unset) */
+    int32_t pend_vpd_w, pend_vpd_h;
+    float vp_sx, vp_sy, vp_sw, vp_sh;      /* source rectangle (buffer×buf_scale coords) */
+    float pend_vps_x, pend_vps_y, pend_vps_w, pend_vps_h;
+    int32_t sub_x, sub_y;                 /* applied position (buffer pixels, Y down) */
+    int32_t pend_sub_x, pend_sub_y;       /* set_position double-buffered value (applied on parent commit) */
+    int32_t pending_offset_x, pending_offset_y;
+    /* damage (wl_surface.damage/damage_buffer accumulated in pending —
+     * surface-local px, bbox merge; moved to cur on the commit/latch-apply).
+     * cur_* = damage since a backend last uploaded the wl_shm content
+     * (awl_surface_shm_begin/end) — dmabuf layers never read it (the GPU
+     * samples the memory in place):
+     *   NONE    nothing changed since the last upload
+     *   RECT    the bbox rect needs re-uploading
+     *   FULL    a commit attached a buffer with NO damage — protocol
+     *           default: whole surface (client gave no information)
+     * Over-copy is always safe, under-copy never. All owned by ev_lock. */
+    int32_t pd_x, pd_y, pd_w, pd_h;
+    int32_t cur_damage_x, cur_damage_y, cur_damage_w, cur_damage_h;
+
+    /* ---- 4-byte flags ---- */
+    int geom_valid;
+    int pend_geom;
+    int sub_above_parent;                 /* current link belongs to parent's above stack */
+    int sub_pend_above;                   /* pending link belongs to parent's above stack */
+    int sub_stack_pending;                /* this parent has a pending z order */
+    int sub_sync;                         /* 1=sync mode (protocol default) */
+    int sub_latched;                      /* latched (sync) pending state exists */
+    int latched_attach;                   /* latched cycle contains an attach (without one, applying leaves current alone) */
+    int sub_pos_pending;
+    int pending_attached;
+    int pending_damage_empty;
+    int cd_state;               /* AWL_DMG_* (NONE = 0, calloc-init) */
+    int q_last_dmabuf;               /* the newest push was a dmabuf frame (ev_lock) */
+    int shm_live;                    /* the committed content is a shm buffer (cleared by attach(NULL) / a dmabuf attach) */
+    int shm_release_pending;         /* wl_buffer.release for shm_res not sent yet */
+    int vp_has_dst, pend_vpd;
+    int vp_has_src, pend_vps;
+    int pend_acquire_fd;                     /* -1 = none */
+    int latched_acquire_fd;
+    atomic_int attached;             /* root only: an Android window is attached (renderer
+                                      * alive). Commit-time drain is skipped while 0 so a
+                                      * minimized window's client parks on buffer starvation
+                                      * instead of spinning. Adapter writes (awl_window_attached). */
+
+    /* ---- bools (1 byte) + the align-1 tail array ---- */
+    bool configured;                 /* a configure has been sent */
+    bool acked;                      /* client has acked (set after the first configure) */
+    bool mapped;                     /* first frame buffer committed */
+    bool window_live;                /* window_created went out for this id and
+                                      * window_destroyed is still owed. Decoupled
+                                      * from `role`: a client closes a window by
+                                      * destroying the xdg_toplevel (role → NONE)
+                                      * before the wl_surface — a role test at
+                                      * surface death never fires and the window
+                                      * table keeps a zombie (2026-09-17). */
+    bool has_pending;
+    bool activated;                  /* xdg ACTIVATED state (Android foreground focus) */
+    bool dirty;                      /* awaiting render after commit */
 };
 
 /* Buffer / release-object liveness lock (awl_surface.c): guards
@@ -441,6 +450,10 @@ extern struct awl_server g_srv;
 void awl_surface_setup(void);
 struct awl_surface* awl_surface_by_id(uint64_t id);
 struct awl_surface* awl_surface_from_res(struct wl_resource* res);
+/* Replace the toplevel title (heap; NULL/"" = none). Client dispatch thread
+ * only; the adapter copies synchronously inside window_created/
+ * window_title, so the pointer never outlives the callback. */
+void awl_surface_set_title(struct awl_surface* s, const char* title);
 /* wl_region bounding box snapshot (returns 1 = at least one rectangle was
  * added; 0 = empty region — callers treat it as "unconstrained/whole") */
 int awl_region_bbox(struct wl_resource* region, int32_t* x, int32_t* y,

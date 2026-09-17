@@ -43,7 +43,7 @@ static void xsurf_set_serial(struct wl_client* client, struct wl_resource* res,
     pthread_mutex_unlock(&s->ev_lock);
     LOGI("xwayland surface %llu associated (serial=%llu)",
             (unsigned long long)s->id, (unsigned long long)s->xwayland_serial);
-    snprintf(s->title, sizeof(s->title), "Xwayland");
+    awl_surface_set_title(s, "Xwayland");
 }
 
 static const struct xwayland_surface_v1_interface xsurf_iface = {

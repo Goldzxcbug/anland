@@ -61,13 +61,13 @@ struct awl_bq_slot {
 
 struct awl_bufferqueue {
     atomic_int refs;
+    atomic_int timeouts;           /* gethead fence timeouts (rate-limited log) */
     awl_bq_release_fn release;
     void* ctx;
     pthread_mutex_t lock;          /* head lock */
     atomic_uint head;              /* consumer-owned (advanced under lock) */
     atomic_uint tail;              /* producer CAS */
     struct awl_bq_slot slots[AWL_BQ_CAP];
-    atomic_int timeouts;           /* gethead fence timeouts (rate-limited log) */
     atomic_int armed;              /* a fence watch is registered (awl_bufferqueue_arm) */
     atomic_uint superseded;        /* frames drain popped unshown, monotonic (consumer pacing hint) */
 };

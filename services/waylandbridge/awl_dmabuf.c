@@ -99,10 +99,10 @@ static struct awl_buffer* dmabuf_buffer_create(struct wl_client* client,
 
 struct awl_params {
     struct wl_resource* resource;
-    int fd;
+    uint64_t modifier;
     uint32_t width, height, stride;
     uint32_t format;
-    uint64_t modifier;
+    int fd;
     int has_fd, has_geometry, has_format;
 };
 
