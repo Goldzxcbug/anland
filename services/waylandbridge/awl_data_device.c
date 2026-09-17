@@ -444,8 +444,7 @@ static void dd_start_drag(struct wl_client* c, struct wl_resource* res,
     g_drag.mods = 0;
     g_drag.icon = icon;
     if (icon) {   /* root layer stack tail = topmost (KWin: icon above all layers) */
-        wl_list_insert(root->sub_children.prev, &icon->sub_link);
-        icon->sub_parent = root;
+        awl_subsurface_link_immediate_above_locked(icon, root);
         pthread_mutex_lock(&icon->ev_lock);
         icon->sub_x = 0;
         icon->sub_y = 0;
@@ -949,10 +948,8 @@ void awl_datadev_drag_end(void) {
         struct awl_surface* icon = g_drag.icon;
         drag_drop_locked();
         g_drag.icon = NULL;
-        if (icon && icon->sub_parent) {
-            wl_list_remove(&icon->sub_link);
-            icon->sub_parent = NULL;
-        }
+        if (icon && icon->sub_parent)
+            awl_subsurface_unlink_locked(icon);
     }
     pthread_mutex_unlock(&g_srv.dd_lock);
     pthread_rwlock_unlock(&g_srv.rwl);
@@ -973,10 +970,8 @@ void awl_datadev_drag_cancel(void) {
         struct awl_surface* icon = g_drag.icon;
         drag_cancel_locked();
         g_drag.icon = NULL;
-        if (icon && icon->sub_parent) {
-            wl_list_remove(&icon->sub_link);
-            icon->sub_parent = NULL;
-        }
+        if (icon && icon->sub_parent)
+            awl_subsurface_unlink_locked(icon);
         LOGI("drag cancelled");
     }
     pthread_mutex_unlock(&g_srv.dd_lock);

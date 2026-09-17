@@ -66,8 +66,11 @@
  * per-layer BufferState SCs fed from the bufferqueue, SurfaceFlinger/HWC
  * composites (awl_sc); 0 = GL renderer fallback (awl_renderer). Read at
  * attach time: a flip re-routes each window when it re-attaches
- * (pause/resume, re-SURFACE, evict). request_render maps to a vsync kick
- * on the SC path (the choreographer loop runs continuously). */
+ * (pause/resume, re-SURFACE, evict). request_render on the SC path first
+ * reconciles the window's layer-SC set with the wayland stack (every
+ * topology mutation ends in a window_dirty, so the SC tree never lags the
+ * surface tree — awl_sc_sync) and then kicks the vsync loop (which runs
+ * continuously; the kick only forces a transaction for frame_done parity). */
 static std::atomic<bool> g_cfg_sc{true};
 static int backend_attach(uint64_t id, ANativeWindow* nw) {
     return g_cfg_sc.load(std::memory_order_relaxed)
@@ -75,8 +78,12 @@ static int backend_attach(uint64_t id, ANativeWindow* nw) {
                : awl_renderer_attach(id, nw);
 }
 static void backend_request_render(uint64_t id) {
-    if (g_cfg_sc.load(std::memory_order_relaxed)) awl_sc_kick(id);
-    else awl_renderer_request_render(id);
+    if (g_cfg_sc.load(std::memory_order_relaxed)) {
+        awl_sc_sync(id);
+        awl_sc_kick(id);
+    } else {
+        awl_renderer_request_render(id);
+    }
 }
 
 #define AWL_TAG "anland-daemon"

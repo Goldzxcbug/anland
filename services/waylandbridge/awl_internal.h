@@ -148,7 +148,10 @@ struct awl_surface {
     int vp_has_src, pend_vps;
 
     /* subsurface role (chrome WaylandBubble=tooltip/selection handles, GTK4 popover):
-     * Topology (sub_parent / sub_children stack order) is owned by g_srv.rwl;
+     * Topology is owned by g_srv.rwl. Like KWin, each parent has current
+     * below/above stacks around its own content and a pending copy for
+     * place_above/place_below. `sub_children` owns every direct child; it is
+     * independent of z order.
      * sub_x/sub_y are owned by this surface's ev_lock (render snapshot reads,
      * set_position writes).
      *
@@ -163,8 +166,15 @@ struct awl_surface {
      * and current are read concurrently (render thread) under ev_lock. */
     struct wl_resource* subsurface_res;   /* wl_subsurface object (drop the reference if the surface dies first) */
     struct awl_surface* sub_parent;
-    struct wl_list sub_children;          /* child stack order: head=bottom, tail=top */
-    struct wl_list sub_link;              /* linked into sub_parent->sub_children */
+    struct wl_list sub_children;          /* all direct children, ownership only */
+    struct wl_list sub_below, sub_above;  /* current stack around this surface */
+    struct wl_list pend_sub_below, pend_sub_above; /* pending parent state */
+    struct wl_list sub_child_link;        /* linked into sub_parent->sub_children */
+    struct wl_list sub_link;              /* linked into current below/above */
+    struct wl_list sub_pend_link;         /* linked into pending below/above */
+    int sub_above_parent;                 /* current link belongs to parent's above stack */
+    int sub_pend_above;                   /* pending link belongs to parent's above stack */
+    int sub_stack_pending;                /* this parent has a pending z order */
     int sub_sync;                         /* 1=sync mode (protocol default) */
     int sub_latched;                      /* latched (sync) pending state exists */
     struct wl_resource* latched_buffer_res;   /* latched buffer (never sampled) */
@@ -571,6 +581,12 @@ int awl_subsurface_maybe_latch(struct awl_surface* s);
  * — the moment sync children take effect): child double-buffered positions
  * apply + latched sync state cascades; returns 1 = some child buffer applied */
 int awl_subsurface_parent_applied(struct awl_surface* s);
+/* Caller holds g_srv.rwl for write. Popup and drag layers intentionally enter
+ * the current top stack immediately; wl_subsurface place requests instead
+ * modify the parent's pending stack. */
+void awl_subsurface_link_immediate_above_locked(struct awl_surface* child,
+                                                struct awl_surface* parent);
+void awl_subsurface_unlink_locked(struct awl_surface* child);
 /* Input hit test (caller holds rwl.rd): root buffer coords → first layer
  * containing the point, top-down in render stack order, coords translated to
  * layer-local; prefer>0 = touch/pointer grab forces that layer (translation

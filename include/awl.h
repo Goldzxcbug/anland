@@ -335,7 +335,8 @@ void awl_window_attached(uint64_t id, int attached);
 #define AWL_MAX_LAYERS 16
 
 typedef struct awl_layer_info {
-    uint64_t surface_id;   /* layer surface (root is always the first element) */
+    uint64_t surface_id;   /* layer surface (bottom→top; the root is first only
+                            * when no child is placed below it — kwin order) */
     float x, y;            /* root logical coordinates (Y down; root=(0,0)) */
     float w, h;            /* layer logical size (input hit-testing; 0 = no buffer on this layer) */
     float u0, v0, su, sv;  /* normalized uv transform of the sample region (viewport source; default = whole image) */
@@ -343,9 +344,13 @@ typedef struct awl_layer_info {
                             * applied on commit; 90/270 swap the logical size) */
 } awl_layer_info_t;
 
-/* Returns the layer count (root first, sublayers in stack order bottom→top;
- * nested sublayers follow their parent). No root / over the limit →
- * truncated (>0 is enough to render). */
+/* Returns the layer count in render order bottom→top. The order is the
+ * wl_subsurface stacking model as kwin traverses it (SurfaceInterface::
+ * traverseTree / SurfaceItemWayland z): for every surface its below-children
+ * (each with its own subtree), then the surface itself, then its
+ * above-children. A child placed below its parent (place_below parent) is
+ * therefore emitted BEFORE the parent. No root / over the limit → truncated
+ * (>0 is enough to render). */
 int  awl_surface_get_layers(uint64_t root_id, awl_layer_info_t* out, int max);
 
 /* Client cursor layer of this window (wl_pointer.set_cursor surface; render

@@ -2,31 +2,46 @@
  *
  * Layer SCs are created straight from the window (ASurfaceControl_
  * createFromWindow siblings — the device-verified shape): the window Surface
- * itself is the root of the layer tree and the root WAYLAND layer is simply
- * the first sibling (z=0); wl stacking order is pure setZOrder order over
- * the siblings. The daemon never composites: every layer's queue head is
- * forged into an AHardwareBuffer (awl_ahb) and latched with one
- * ASurfaceTransaction per window per vsync — SurfaceFlinger/HWC does the rest.
- * Frame source = the same per-surface bufferqueue the GL renderer drains.
+ * itself is the root of the layer tree and every wayland layer (root surface,
+ * subsurfaces, popups, drag icon, cursor) is one sibling; wl stacking order is
+ * pure setZOrder order over the siblings. The daemon never composites: every
+ * layer's queue head is forged into an AHardwareBuffer (awl_ahb) and latched
+ * with one ASurfaceTransaction per window per vsync — SurfaceFlinger/HWC does
+ * the rest. Frame source = the same per-surface bufferqueue the GL renderer
+ * drains.
  *
- * Frame loop (render thread, per vsync, per attached window):
- *   snapshot get_layers + cursor_layer + view_xform (logic-layer APIs)
- *   → stack diff: vanished layers deleted DIRECTLY (SC release + element
- *     put(-1), no z recompute — holes in the z numbering are harmless, the
- *     relative order is untouched); new layers get a record (SC created
- *     asynchronously by the z-worker) — order change/add wakes the z-worker,
- *     which tree-traverses the snapshot and assigns setZOrder
- *   → per layer: queue lock → drain → gethead (contract: complete head) →
- *     arm → unlock; a NEW element forges/looks up its AHB (awl_ahb cache)
- *     and latches via setBuffer(sc, ahb, -1) — the acquire fence is already
- *     signaled, so SF gets no fence
- *   → geometry per the same math the GL renderer uses (awl_geom.h):
- *     position/scale (+crop for a viewport source region, transform for
- *     set_buffer_transform, opaque for XR24); zoom/scale_mode/resize flow
- *     through the view-xform snapshot every frame
- *   → one transaction per window per vsync (+setFrameTimeline on 33+,
- *     vsyncId from the choreographer callback); nothing changed → no
- *     transaction (a kicked window forces one for frame_done parity)
+ * Two owners, one lock (sc_window::m):
+ *
+ *   event path (awl_sc_sync, from window_dirty on the client's dispatch /
+ *   input / shm threads, and from attach): owns the LAYER SC LIFECYCLE. It
+ *   snapshots the logic layer's stack (get_layers + cursor_layer — the same
+ *   kwin below→surface→above traversal the hit-test uses), creates an SC for
+ *   every layer that entered the stack, retires the SC of every layer that
+ *   left it, and reassigns z = traversal index, all in ONE transaction. So an
+ *   SC lives exactly as long as its surface is part of an attached window's
+ *   tree — created the moment get_subsurface/get_popup/set_cursor links it,
+ *   gone the moment the surface/role/link dies — never a frame later, never
+ *   from the render thread.
+ *
+ *   render thread (choreographer vsync loop, one for all windows): owns only
+ *   BUFFER STATE. Per layer: queue lock → drain → tryhead (never waits: an
+ *   unsignaled acquire fence leaves the previous buffer on screen and the
+ *   layer is re-checked next vsync — one client's GPU must not stall every
+ *   window) → arm → unlock; a NEW element forges/looks up its AHB and latches
+ *   via setBuffer(sc, ahb, -1). The layer geometry (position/scale/crop/
+ *   transform/opacity) is applied in the SAME transaction as the buffer: it
+ *   is a function of the latched buffer's dimensions and wl_surface.commit is
+ *   atomic — buffer and geometry of one commit must land in one SF frame,
+ *   which is why geometry is not pushed from the event path.
+ *
+ * Layer removal contract (NDK surface_control.h): ASurfaceControl_release
+ * only drops our reference — "the surface and its children may remain on
+ * display as long as their parent remains on display". Under a live
+ * SurfaceView parent a released-but-not-reparented layer keeps showing its
+ * last buffer forever (device dumpsys 2026-09-17: generations of
+ * `handleNotAlive` awl-layers stacked at z=1..3 under the SurfaceView). A
+ * layer therefore leaves through hide + reparent(NULL) in a transaction, and
+ * the reference is dropped only after that transaction is applied.
  *
  * Release chain: the element latched on an SC is kept referenced until SF is
  * done with it. On 36+ (dlsym) setBufferWithRelease gives a per-buffer
@@ -52,13 +67,13 @@
 #include <android/native_window.h>
 #include <android/surface_control.h>
 #include <dlfcn.h>
+#include <errno.h>
 #include <math.h>
 #include <sched.h>
 #include <string.h>
 #include <unistd.h>
 
 #include <atomic>
-#include <condition_variable>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -175,13 +190,14 @@ static void sc_on_buffer_release(void* context, int release_fence_fd) {
 
 struct sc_rlayer {
     uint64_t surface_id;
-    ASurfaceControl* sc = nullptr;     /* created by the z-worker (31+) */
-    int64_t z = -1;                    /* traversal index (holes allowed) */
+    ASurfaceControl* sc = nullptr;     /* created by the event-path sync */
+    int64_t z = -1;                    /* stack index last pushed via setZOrder */
 
-    /* render-thread state (guarded by the window's m) */
+    /* buffer state (render thread; guarded by the window's m) */
     struct awl_bq_buffer* current = nullptr;   /* element latched on the SC */
     struct awl_ahb_cache* ahb = nullptr;       /* per-layer forge cache */
     bool has_buffer = false;                   /* a buffer is latched+visible */
+    unsigned stall = 0;                        /* consecutive vsyncs the head was incomplete */
     /* last applied geometry (skip unchanged) */
     bool geo_valid = false;
     int32_t gx = 0, gy = 0, gw = 0, gh = 0;
@@ -194,14 +210,9 @@ struct sc_rlayer {
 struct sc_window {
     uint64_t id;
     ANativeWindow* nw = nullptr;       /* self-held reference: the parent of
-                                        * every layer SC (createFromWindow —
-                                        * the device-verified pattern: the
-                                        * window surface IS the root; the
-                                        * root wayland layer is simply the
-                                        * first window-rooted SC, z=0) */
+                                        * every layer SC (createFromWindow) */
     std::mutex m;                      /* layers + teardown */
     std::map<uint64_t, std::unique_ptr<sc_rlayer>> layers;
-    std::vector<uint64_t> last_stack;  /* last snapshot order (change detect) */
     std::atomic<bool> dead{false};
     std::atomic<bool> kick{false};     /* window_dirty: force a txn this frame */
     uint64_t frame_clock = 0;          /* AHB LRU clock */
@@ -214,23 +225,8 @@ static std::map<uint64_t, std::shared_ptr<sc_window>> g_windows;
 
 static std::atomic<bool> g_running{false};
 static std::thread g_render_th;
-static std::thread g_z_th;
 static ALooper* g_lo = nullptr;
 static AChoreographer* g_ch = nullptr;
-
-/* z-worker wakeup */
-static std::mutex g_z_lock;
-static std::condition_variable g_z_cv;
-static bool g_z_wake = false;
-static bool g_z_stop = false;
-
-static void z_kick(void) {
-    {
-        std::lock_guard<std::mutex> lk(g_z_lock);
-        g_z_wake = true;
-    }
-    g_z_cv.notify_all();
-}
 
 static std::vector<std::shared_ptr<sc_window>> snapshot_windows(void) {
     std::vector<std::shared_ptr<sc_window>> v;
@@ -239,87 +235,143 @@ static std::vector<std::shared_ptr<sc_window>> snapshot_windows(void) {
     return v;
 }
 
-/* ---------------- z-worker: layer SC lifecycle + z ----------------
- * Wakes on stack changes (render-thread diff / attach). Tree-traverses the
- * current snapshot (get_layers + cursor), creates SCs for new layers and
- * assigns z = traversal index in ONE transaction. Deletion is NOT its
- * business — the render thread deletes records directly (no z recompute,
- * holes are harmless). */
-static void zworker_pass(const std::shared_ptr<sc_window>& w) {
-    awl_layer_info_t lay[AWL_MAX_LAYERS + 1];
-    int n = awl_surface_get_layers(w->id, lay, AWL_MAX_LAYERS);
-    if (n <= 0) return;
-    if (awl_pointer_cursor_layer(w->id, &lay[n])) n++;   /* cursor: topmost */
-
-    std::unique_lock<std::mutex> lk(w->m);
-    if (w->dead || !w->nw) return;
-    bool created = false, z_changed = false;
-    for (int i = 0; i < n; i++) {
-        auto it = w->layers.find(lay[i].surface_id);
-        if (it == w->layers.end()) continue;   /* record not yet there (next pass) */
-        sc_rlayer* L = it->second.get();
-        if (!L->sc) {
-            /* window-rooted SC (device-verified shape): every layer — the
-             * root wayland layer included — is a sibling createFromWindow
-             * child; stacking is pure setZOrder order, root = index 0 */
-            L->sc = ASurfaceControl_createFromWindow(w->nw, "awl-layer");
-            if (L->sc) created = true;
-            else LOGE("window %llu: createFromWindow(layer %llu) failed",
-                      (unsigned long long)w->id, (unsigned long long)L->surface_id);
-        }
-        if (L->z != i) { L->z = i; z_changed = true; }
-    }
-    if (!created && !z_changed) return;
-    ASurfaceTransaction* txn = ASurfaceTransaction_create();
-    for (int i = 0; i < n; i++) {
-        auto it = w->layers.find(lay[i].surface_id);
-        if (it == w->layers.end() || !it->second->sc) continue;
-        ASurfaceTransaction_setZOrder(txn, it->second->sc, (int32_t)i);
-    }
-    ASurfaceTransaction_apply(txn);
-    ASurfaceTransaction_delete(txn);
-    LOGD("z-worker: window %llu z pass (created=%d z_changed=%d n=%d)",
-         (unsigned long long)w->id, created, z_changed, n);
+static std::shared_ptr<sc_window> find_window(uint64_t id) {
+    std::lock_guard<std::mutex> lk(g_map_lock);
+    auto it = g_windows.find(id);
+    return it == g_windows.end() ? nullptr : it->second;
 }
 
-static void zworker_loop(void) {
-    for (;;) {
-        std::unique_lock<std::mutex> lk(g_z_lock);
-        g_z_cv.wait(lk, [] { return g_z_wake || g_z_stop; });
-        bool stop = g_z_stop;
-        g_z_wake = false;
-        lk.unlock();
-        if (stop) return;
-        for (auto& w : snapshot_windows()) {
-            if (!w->dead.load()) zworker_pass(w);
+/* ---------------- layer SC lifecycle (event path) ----------------
+ * Everything below runs with the window lock held and batches into one
+ * transaction: retire + create + z. */
+
+struct sc_sync_txn {
+    ASurfaceTransaction* txn = nullptr;
+    sc_txn* ctx = nullptr;
+    std::vector<ASurfaceControl*> dropped;   /* released after apply */
+
+    ASurfaceTransaction* get(void) {
+        if (!txn) {
+            txn = ASurfaceTransaction_create();
+            ctx = new sc_txn();
         }
+        return txn;
     }
-}
+    /* Apply (if anything was queued) and drop the retired SC references —
+     * after the apply, so the reparent(NULL) travels on a live handle. */
+    void finish(void) {
+        if (txn) {
+            if (!ctx->retiring.empty())
+                ASurfaceTransaction_setOnComplete(txn, ctx, sc_on_complete);
+            else
+                delete ctx;
+            ASurfaceTransaction_apply(txn);
+            ASurfaceTransaction_delete(txn);
+            txn = nullptr;
+            ctx = nullptr;
+        }
+        for (ASurfaceControl* sc : dropped) ASurfaceControl_release(sc);
+        dropped.clear();
+    }
+};
 
-/* ---------------- render frame ---------------- */
-
-static void layer_release_locked(sc_window* w, sc_rlayer* L) {
-    /* window lock held: the record is going away — release its SC and hand
-     * the latched element straight back (stats mode; no fence: SF's release
-     * for a destroyed SC is not waited on — a rare extra client-visible
-     * latency at layer death, never a correctness issue). In 36-mode the
-     * element's reference belongs to its OnRelease context — SF fires it
-     * when the destroyed layer's buffer drops, putting it there. */
+/* The layer left the window's tree: hide + reparent(NULL) through the
+ * transaction (see the file header for why release alone is not removal),
+ * hand back / park the latched element, drop the forge cache. Stats mode:
+ * the element retires with THIS transaction's stats; 36-mode: its reference
+ * belongs to its OnRelease context — SF fires it when the destroyed layer
+ * drops the buffer. */
+static void layer_retire_locked(sc_sync_txn& st, sc_rlayer* L) {
     if (L->sc) {
-        ASurfaceControl_release(L->sc);
+        ASurfaceTransaction* txn = st.get();
+        ASurfaceTransaction_setVisibility(txn, L->sc, ASURFACE_TRANSACTION_VISIBILITY_HIDE);
+        ASurfaceTransaction_reparent(txn, L->sc, nullptr);
+        if (L->current && !g_api.set_buffer_with_release) {
+            ASurfaceControl_acquire(L->sc);
+            st.ctx->retiring.push_back({ L->sc, L->current });
+        }
+        st.dropped.push_back(L->sc);
         L->sc = nullptr;
+    } else if (L->current && !g_api.set_buffer_with_release) {
+        awl_bufferqueue_put(L->current, -1);   /* never latched anywhere */
     }
-    if (L->current && !g_api.set_buffer_with_release) {
-        awl_bufferqueue_put(L->current, -1);
-        L->current = nullptr;
-    }
+    L->current = nullptr;
     if (L->ahb) {
         awl_ahb_cache_destroy(L->ahb);
         L->ahb = nullptr;
     }
     L->has_buffer = false;
-    (void)w;
 }
+
+/* Reconcile the window's SC set with the logic layer's CURRENT stack. The
+ * only place that creates, retires or reorders layer SCs. Called on every
+ * window_dirty (topology mutations, commits, cursor changes all end there)
+ * and at attach — cheap when nothing changed (snapshot + map walk, no
+ * transaction). */
+static void sc_sync_window(const std::shared_ptr<sc_window>& w) {
+    awl_layer_info_t lay[AWL_MAX_LAYERS + 1];
+    int n = awl_surface_get_layers(w->id, lay, AWL_MAX_LAYERS);
+    if (n < 0) n = 0;
+    if (n > 0 && awl_pointer_cursor_layer(w->id, &lay[n])) n++;   /* cursor: topmost */
+
+    std::unique_lock<std::mutex> lk(w->m);
+    if (w->dead || !w->nw) return;
+
+    sc_sync_txn st;
+
+    /* layers that left the stack */
+    for (auto it = w->layers.begin(); it != w->layers.end();) {
+        bool found = false;
+        for (int i = 0; i < n && !found; i++)
+            found = lay[i].surface_id == it->first;
+        if (!found) {
+            LOGD("window %llu: layer %llu left the stack — SC retired",
+                 (unsigned long long)w->id, (unsigned long long)it->first);
+            layer_retire_locked(st, it->second.get());
+            it = w->layers.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    /* layers that entered / moved */
+    bool z_dirty = false;
+    for (int i = 0; i < n; i++) {
+        auto it = w->layers.find(lay[i].surface_id);
+        if (it == w->layers.end()) {
+            auto L = std::make_unique<sc_rlayer>();
+            L->surface_id = lay[i].surface_id;
+            it = w->layers.emplace(lay[i].surface_id, std::move(L)).first;
+        }
+        sc_rlayer* L = it->second.get();
+        if (!L->sc) {
+            L->sc = ASurfaceControl_createFromWindow(w->nw, "awl-layer");
+            if (!L->sc) {
+                LOGE("window %llu: createFromWindow(layer %llu) failed — retried on the next dirty",
+                     (unsigned long long)w->id, (unsigned long long)L->surface_id);
+                continue;
+            }
+            L->z = -1;
+            z_dirty = true;
+        }
+        if (L->z != i) {
+            L->z = i;
+            z_dirty = true;
+        }
+    }
+    if (z_dirty) {
+        ASurfaceTransaction* txn = st.get();
+        for (int i = 0; i < n; i++) {
+            auto it = w->layers.find(lay[i].surface_id);
+            if (it != w->layers.end() && it->second->sc)
+                ASurfaceTransaction_setZOrder(txn, it->second->sc, (int32_t)i);
+        }
+        LOGD("window %llu: z pass (n=%d)", (unsigned long long)w->id, n);
+    }
+    st.finish();
+}
+
+/* ---------------- render frame (buffer state only) ---------------- */
 
 static void sc_render_window(const std::shared_ptr<sc_window>& w, int64_t vsync_id) {
     awl_layer_info_t lay[AWL_MAX_LAYERS + 1];
@@ -332,37 +384,6 @@ static void sc_render_window(const std::shared_ptr<sc_window>& w, int64_t vsync_
     std::unique_lock<std::mutex> lk(w->m);
     if (w->dead || !w->nw) return;
 
-    /* ---- stack diff: deletions direct, additions recorded + z-kick ---- */
-    bool stack_changed = false;
-    {
-        std::vector<uint64_t> snap;
-        snap.reserve(n);
-        for (int i = 0; i < n; i++) snap.push_back(lay[i].surface_id);
-        if (snap != w->last_stack) {
-            stack_changed = true;
-            w->last_stack = snap;
-        }
-        for (auto it = w->layers.begin(); it != w->layers.end();) {
-            bool found = false;
-            for (int i = 0; i < n && !found; i++)
-                found = (lay[i].surface_id == it->first);
-            if (!found) {
-                layer_release_locked(w.get(), it->second.get());
-                it = w->layers.erase(it);
-            } else {
-                ++it;
-            }
-        }
-        for (int i = 0; i < n; i++) {
-            if (w->layers.find(lay[i].surface_id) == w->layers.end()) {
-                sc_rlayer* L = new sc_rlayer();
-                L->surface_id = lay[i].surface_id;
-                w->layers.emplace(lay[i].surface_id, L);
-                stack_changed = true;
-            }
-        }
-    }
-    if (stack_changed) z_kick();
     w->frame_clock++;
     bool kicked = w->kick.exchange(false);
 
@@ -372,21 +393,37 @@ static void sc_render_window(const std::shared_ptr<sc_window>& w, int64_t vsync_
 
     for (int i = 0; i < n; i++) {
         auto it = w->layers.find(lay[i].surface_id);
-        if (it == w->layers.end()) continue;
+        if (it == w->layers.end()) continue;   /* entered after the last sync — next dirty creates it */
         sc_rlayer* L = it->second.get();
-        if (!L->sc) continue;   /* z-worker has not created it yet */
+        if (!L->sc) continue;
 
         /* frame source: the layer's queue — drain superseded frames, take a
-         * referenced COMPLETE head (the queue's contract), arm the waiter. */
+         * referenced complete head WITHOUT waiting (an incomplete head keeps
+         * the latched buffer on screen; re-checked next vsync), arm the
+         * waiter for the frame behind the head. */
         struct awl_bq_buffer* head = nullptr;
+        int pending = 0;
         struct awl_bufferqueue* q = awl_surface_queue_ref(lay[i].surface_id);
         if (q) {
             awl_bufferqueue_lock(q);
             awl_bufferqueue_drain(q);
-            head = awl_bufferqueue_gethead(q, 100);
+            head = awl_bufferqueue_tryhead(q);
+            pending = awl_bufferqueue_count(q);
             awl_bufferqueue_arm(q);
             awl_bufferqueue_unlock(q);
             awl_bufferqueue_unref(q);
+        }
+        if (!head && pending > 0) {
+            /* the head exists but its writer is not done: rate-limited
+             * diagnostic (a fence that never signals would otherwise be a
+             * silent frozen layer — the old blocking wait froze every window) */
+            L->stall++;
+            if (L->stall == 60 || (L->stall % 600) == 0)
+                LOGE("window %llu layer %llu: acquire fence pending for %u vsyncs — "
+                     "keeping the previous buffer on screen",
+                     (unsigned long long)w->id, (unsigned long long)L->surface_id, L->stall);
+        } else {
+            L->stall = 0;
         }
 
         if (head && head->dmabuf_fd < 0) {
@@ -411,8 +448,9 @@ static void sc_render_window(const std::shared_ptr<sc_window>& w, int64_t vsync_
             continue;
         }
 
-        if (!head) continue;    /* nothing committed yet */
+        if (!head) continue;    /* nothing committed yet / head incomplete */
 
+        const struct awl_bq_buffer* sample = head;   /* what the SC shows after this txn */
         if (head != L->current) {
             if (!L->ahb) L->ahb = awl_ahb_cache_create(nullptr);
             struct awl_ahb_slot* slot =
@@ -447,20 +485,25 @@ static void sc_render_window(const std::shared_ptr<sc_window>& w, int64_t vsync_
             ctx->presented.push_back(lay[i].surface_id);
         } else {
             /* same element still current: keep it displayed, our extra
-             * reference goes back; geometry (cursor moves) still applies */
+             * reference goes back; geometry (cursor moves, resize, zoom)
+             * still applies against the latched buffer */
+            sample = L->current;
             awl_bufferqueue_put(head, -1);
             ctx->presented.push_back(lay[i].surface_id);
         }
 
-        /* ---- geometry (the GL renderer's math, via awl_geom.h) ---- */
+        /* ---- geometry (the GL renderer's math, via awl_geom.h) ----
+         * Atomic with the buffer above: one commit = one SF transaction. */
         double rsw, rsh;
-        awl_layer_sampled(&lay[i], head->width, head->height, &rsw, &rsh);
-        int32_t X = (int32_t)round(((double)lay[i].x - (double)xf.gox) * xf.sx + xf.ox);
-        int32_t Y = (int32_t)round(((double)lay[i].y - (double)xf.goy) * xf.sy + xf.oy);
+        awl_layer_sampled(&lay[i], sample->width, sample->height, &rsw, &rsh);
         int32_t Wd = awl_snap_extent(lay[i].w, xf.sx, rsw);
         int32_t Hd = awl_snap_extent(lay[i].h, xf.sy, rsh);
+        double scx = rsw > 0.0 ? (double)Wd / rsw : 1.0;
+        double scy = rsh > 0.0 ? (double)Hd / rsh : 1.0;
+        double X = ((double)lay[i].x - (double)xf.gox) * xf.sx + xf.ox;
+        double Y = ((double)lay[i].y - (double)xf.goy) * xf.sy + xf.oy;
         int32_t atr = k_wl_to_android_xform[lay[i].transform & 7];
-        bool opaque = head->format == AWL_FOURCC_XRGB8888;
+        bool opaque = sample->format == AWL_FOURCC_XRGB8888;
         bool has_crop = !(lay[i].u0 <= 0.0 && lay[i].v0 <= 0.0 &&
                           lay[i].su >= 1.0 && lay[i].sv >= 1.0);
         int32_t cl = 0, ct = 0, cr = 0, cb = 0;
@@ -469,20 +512,28 @@ static void sc_render_window(const std::shared_ptr<sc_window>& w, int64_t vsync_
             sample_crop_rect(lay[i].transform & 7, lay[i].u0, lay[i].v0,
                              lay[i].su, lay[i].sv, &x0, &y0, &x1, &y1);
             /* layer-space axes: odd transforms carry the swapped buffer axes */
-            double ax = (lay[i].transform & 1) ? (double)head->height : (double)head->width;
-            double ay = (lay[i].transform & 1) ? (double)head->width : (double)head->height;
+            double ax = (lay[i].transform & 1) ? (double)sample->height : (double)sample->width;
+            double ay = (lay[i].transform & 1) ? (double)sample->width : (double)sample->height;
             cl = (int32_t)lround(x0 * ax);
             ct = (int32_t)lround(y0 * ay);
             cr = (int32_t)lround(x1 * ax);
             cb = (int32_t)lround(y1 * ay);
+            /* setCrop clips in layer space, it does not move the clipped
+             * region to the layer origin: SF's screen bounds are
+             * transform(bufferBounds ∩ crop) (Layer::computeBounds), i.e.
+             * the source region would land at position + crop.origin ×
+             * scale. Pull the position back by that much so the viewport
+             * source region sits where the logical rect says. */
+            X -= (double)cl * scx;
+            Y -= (double)ct * scy;
         }
-        if (!L->geo_valid || X != L->gx || Y != L->gy || Wd != L->gw || Hd != L->gh ||
+        int32_t Xi = (int32_t)lround(X);
+        int32_t Yi = (int32_t)lround(Y);
+        if (!L->geo_valid || Xi != L->gx || Yi != L->gy || Wd != L->gw || Hd != L->gh ||
             atr != L->gxform || opaque != L->gopaque || has_crop != L->gcrop ||
             cl != L->gcrop_l || ct != L->gcrop_t || cr != L->gcrop_r || cb != L->gcrop_b) {
-            ASurfaceTransaction_setPosition(txn, L->sc, X, Y);
-            ASurfaceTransaction_setScale(txn, L->sc,
-                                         rsw > 0.0 ? (float)((double)Wd / rsw) : 1.0f,
-                                         rsh > 0.0 ? (float)((double)Hd / rsh) : 1.0f);
+            ASurfaceTransaction_setPosition(txn, L->sc, Xi, Yi);
+            ASurfaceTransaction_setScale(txn, L->sc, (float)scx, (float)scy);
             ASurfaceTransaction_setBufferTransform(txn, L->sc, atr);
             ASurfaceTransaction_setBufferTransparency(
                 txn, L->sc, opaque ? ASURFACE_TRANSACTION_TRANSPARENCY_OPAQUE
@@ -490,9 +541,12 @@ static void sc_render_window(const std::shared_ptr<sc_window>& w, int64_t vsync_
             if (has_crop) {
                 ARect rc = { cl, ct, cr, cb };
                 ASurfaceTransaction_setCrop(txn, L->sc, rc);
+            } else if (L->gcrop) {
+                ARect none = { 0, 0, 0, 0 };   /* viewport source reset: empty crop = uncropped */
+                ASurfaceTransaction_setCrop(txn, L->sc, none);
             }
             L->geo_valid = true;
-            L->gx = X; L->gy = Y; L->gw = Wd; L->gh = Hd;
+            L->gx = Xi; L->gy = Yi; L->gw = Wd; L->gh = Hd;
             L->gxform = atr; L->gopaque = opaque;
             L->gcrop = has_crop;
             L->gcrop_l = cl; L->gcrop_t = ct; L->gcrop_r = cr; L->gcrop_b = cb;
@@ -590,12 +644,7 @@ static void threads_start(void) {
     if (g_running.load()) return;
     api_init();
     g_running.store(true);
-    {
-        std::lock_guard<std::mutex> zlk(g_z_lock);
-        g_z_stop = false;
-    }
     g_render_th = std::thread(sc_render_thread);
-    g_z_th = std::thread(zworker_loop);
 }
 
 /* ---------------- public API ---------------- */
@@ -613,16 +662,21 @@ static void sc_detach_internal(uint64_t id) {
     {
         std::lock_guard<std::mutex> lk(w->m);
         w->dead.store(true);
+        /* every layer leaves through the same hide + reparent(NULL) path —
+         * a re-SURFACE onto a still-live SurfaceView must not inherit the
+         * previous generation's layers */
+        sc_sync_txn st;
         for (auto& kv : w->layers)
-            layer_release_locked(w.get(), kv.second.get());
+            layer_retire_locked(st, kv.second.get());
         w->layers.clear();
+        st.finish();
     }
     if (w->nw) {
         ANativeWindow_release(w->nw);
         w->nw = nullptr;
     }
-    /* transactions already applied keep their self-contained contexts; the
-     * shared_ptr dies when the render/z workers drop their references */
+    /* Transactions already applied keep their self-contained contexts; the
+     * shared_ptr dies after the render thread drops its frame snapshot. */
 }
 
 int awl_sc_attach(uint64_t id, ANativeWindow* nw) {
@@ -642,24 +696,18 @@ int awl_sc_attach(uint64_t id, ANativeWindow* nw) {
         std::lock_guard<std::mutex> lk(g_map_lock);
         g_windows[id] = w;
     }
-    /* layer SCs are created by the z-worker straight from the window
-     * (createFromWindow siblings, root wayland layer = z 0) — the
-     * device-verified shape; nothing to pre-instantiate here */
-    z_kick();
-    LOGI("window %llu: SC attached (window-rooted layer SCs)",
+    sc_sync_window(w);   /* the current stack gets its SCs right here */
+    LOGI("window %llu: SC attached (event-path layer tree)",
          (unsigned long long)id);
     return 0;
 }
 
 void awl_sc_kick(uint64_t id) {
-    std::shared_ptr<sc_window> w;
-    {
-        std::lock_guard<std::mutex> lk(g_map_lock);
-        auto it = g_windows.find(id);
-        if (it == g_windows.end()) return;
-        w = it->second;
-    }
-    w->kick.store(true);
+    if (auto w = find_window(id)) w->kick.store(true);
+}
+
+void awl_sc_sync(uint64_t id) {
+    if (auto w = find_window(id)) sc_sync_window(w);
 }
 
 void awl_sc_shutdown(void) {
@@ -670,14 +718,8 @@ void awl_sc_shutdown(void) {
     }
     for (uint64_t id : ids) sc_detach_internal(id);
     if (g_running.exchange(false)) {
-        {
-            std::lock_guard<std::mutex> lk(g_z_lock);
-            g_z_stop = true;
-            g_z_cv.notify_all();
-        }
         if (g_lo) ALooper_wake(g_lo);
         if (g_render_th.joinable()) g_render_th.join();
-        if (g_z_th.joinable()) g_z_th.join();
         g_lo = nullptr;
         g_ch = nullptr;
     }

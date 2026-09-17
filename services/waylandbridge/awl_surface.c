@@ -396,7 +396,9 @@ static void surface_destroy_impl(struct wl_resource* res) {
      * in flight, teardown is safe. A cursor-role surface never owned a
      * window (it may carry mapped=1 from a buffer committed before
      * set_cursor). */
-    if (s->mapped && s->role != AWL_ROLE_CURSOR && g_srv.cbs.window_destroyed)
+    if (s->mapped &&
+        (s->role == AWL_ROLE_TOPLEVEL || s->role == AWL_ROLE_XWAYLAND) &&
+        g_srv.cbs.window_destroyed)
         g_srv.cbs.window_destroyed(g_srv.cbs.user, s->id);
 
     /* Frame stream: hand every queued frame back (release events go out
@@ -465,8 +467,7 @@ static void surface_destroy_impl(struct wl_resource* res) {
         struct awl_surface* root = awl_subsurface_root(s);
         sub_root_id = root->id;
         sub_dirty = root->mapped;
-        wl_list_remove(&s->sub_link);
-        s->sub_parent = NULL;
+        awl_subsurface_unlink_locked(s);
     }
     if (s->sub_latched && s->latched_attach) {   /* latched buffer never presented — release directly */
         latched_drop = s->latched_buffer_res;
@@ -481,9 +482,8 @@ static void surface_destroy_impl(struct wl_resource* res) {
     {
         struct awl_surface* ch;
         struct awl_surface* ctmp;
-        wl_list_for_each_safe(ch, ctmp, &s->sub_children, sub_link) {
-            wl_list_remove(&ch->sub_link);
-            ch->sub_parent = NULL;
+        wl_list_for_each_safe(ch, ctmp, &s->sub_children, sub_child_link) {
+            awl_subsurface_unlink_locked(ch);
         }
     }
     wl_list_remove(&s->link);
@@ -861,7 +861,14 @@ static void compositor_create_surface(struct wl_client* client,
         pthread_mutexattr_destroy(&attr);
     }
     wl_list_init(&s->frame_callbacks);
-    wl_list_init(&s->sub_children);   /* may serve as a subsurface parent (child layers link in) */
+    wl_list_init(&s->sub_children);
+    wl_list_init(&s->sub_below);
+    wl_list_init(&s->sub_above);
+    wl_list_init(&s->pend_sub_below);
+    wl_list_init(&s->pend_sub_above);
+    wl_list_init(&s->sub_child_link);
+    wl_list_init(&s->sub_link);
+    wl_list_init(&s->sub_pend_link);
     pthread_rwlock_wrlock(&g_srv.rwl);   /* topology write */
     wl_list_insert(g_srv.surfaces.prev, &s->link);
     pthread_rwlock_unlock(&g_srv.rwl);

@@ -492,8 +492,10 @@ static int frame_release_fence(void) {
  * parallelism */
 
 static void render_frame(wl_window* w) {
-    /* Layer snapshot (root first, child layers in render stack order bottom→top);
-     * layers that fail to fetch / have no buffer are skipped.
+    /* Layer snapshot in render stack order bottom→top (kwin traversal: a
+     * surface's below-children, the surface, its above-children — the root is
+     * the first element only when nothing is placed below it); layers that
+     * fail to fetch / have no buffer are skipped.
      * #31 zoom: coordinates/sizes are root logical pixels; dst = (logical −
      * geometry origin) × s + o with the root's view transform (1:1 at Z for
      * content following the configure, scale_mode placement otherwise),
@@ -528,7 +530,7 @@ static void render_frame(wl_window* w) {
     }
     int vw = w->cur_vw;
     int vh = w->cur_vh;
-    LOGD("win %llu render: view=%dx%d n=%d root=%llu xf(s=%.3f,%.3f o=%.1f,%.1f go=%d,%d)",
+    LOGD("win %llu render: view=%dx%d n=%d bottom=%llu xf(s=%.3f,%.3f o=%.1f,%.1f go=%d,%d)",
          (unsigned long long)w->id, vw, vh, n,
          (unsigned long long)lay[0].surface_id,
          xf.sx, xf.sy, xf.ox, xf.oy, xf.gox, xf.goy);
@@ -586,8 +588,12 @@ static void render_frame(wl_window* w) {
         bool ok = import_dmabuf_texture(&t, b, w->frame_no);
         if (!ok) continue;
 
-        /* first layer (root) writes directly with blend off; child layers stack on top with premultiplied alpha */
-        if (i == 0 || !drew) glDisable(GL_BLEND);
+        /* The stack is kwin order (below children → surface → above children),
+         * so the root is not necessarily first: the first layer drawn writes
+         * with blend off (nothing beneath it), XR24 layers are opaque by
+         * protocol (their alpha byte is undefined — never blend on it), every
+         * other layer stacks with premultiplied alpha. */
+        if (!drew || b->format == AWL_FOURCC_XRGB8888) glDisable(GL_BLEND);
         else {
             glEnable(GL_BLEND);
             glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);

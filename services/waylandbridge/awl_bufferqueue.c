@@ -371,6 +371,15 @@ struct awl_bq_buffer* awl_bufferqueue_gethead(struct awl_bufferqueue* q, int tim
     return &e->pub;
 }
 
+struct awl_bq_buffer* awl_bufferqueue_tryhead(struct awl_bufferqueue* q) {
+    if (visible(q) == 0) return NULL;
+    unsigned h = atomic_load_explicit(&q->head, memory_order_relaxed);
+    struct awl_bq_elem* e = at(q, h);
+    if (!elem_ready(&e->pub)) return NULL;   /* writer still busy: nothing to present yet */
+    atomic_fetch_add_explicit(&e->refs, 1, memory_order_relaxed);   /* consumer's reference */
+    return &e->pub;
+}
+
 void awl_bufferqueue_put(struct awl_bq_buffer* pub, int fence_fd) {
     if (!pub) return;
     struct awl_bq_elem* e = (struct awl_bq_elem*)pub;   /* pub is the first member */

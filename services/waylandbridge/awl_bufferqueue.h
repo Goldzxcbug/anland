@@ -100,6 +100,13 @@ int awl_bufferqueue_drain(struct awl_bufferqueue* q);
  * poll immediately; only a real wait error gives up). NULL = empty. The
  * returned element is referenced: pair with awl_bufferqueue_put. */
 struct awl_bq_buffer* awl_bufferqueue_gethead(struct awl_bufferqueue* q, int timeout_ms);
+/* Caller holds the lock. gethead without the wait: NULL when the ring is
+ * empty OR the head's acquire fence has not signaled yet — the consumer keeps
+ * presenting what it already holds and re-checks at its own cadence. For a
+ * consumer that serves every window from one thread (the SurfaceControl
+ * compositor's vsync loop) a blocking head would stall every other window's
+ * frames behind one client's GPU. Referenced like gethead: pair with put. */
+struct awl_bq_buffer* awl_bufferqueue_tryhead(struct awl_bufferqueue* q);
 /* Any thread, no lock. fence_fd is dup'd/merged (caller keeps its fd). */
 void awl_bufferqueue_put(struct awl_bq_buffer* e, int fence_fd);
 /* Caller holds the lock, after drain. No-op when nothing incomplete is

@@ -27,12 +27,25 @@
  *     bubble swapping frames at a high rate) overwriting a dmabuf under
  *     sampling is another source of tearing/flicker.
  *
- * Composition: child surface commit → dirty the "root" window (child layers get
- * no Activity); the render side snapshots via awl_surface_get_layers then
- * composites the layers on the GPU (awl_renderer.cpp), pulling each layer's
- * frame from its own queue.
+ * Stacking (kwin SurfaceInterfacePrivate below/above + SurfaceItemWayland z):
+ * every parent keeps a CURRENT below stack and above stack around its own
+ * content plus a PENDING copy of both; place_above/place_below edit the
+ * pending copy (the parent itself is a legal reference: "just below the
+ * first above child" / "just above the last below child") and the parent's
+ * next commit promotes it atomically (sub_apply_stack). get_subsurface
+ * appends to the top of both copies (kwin addChild), a popup / drag icon
+ * enters the same way (awl_subsurface_link_immediate_above_locked). Render
+ * order = recursive below-subtrees → surface → above-subtrees
+ * (awl_surface_get_layers), the same list the hit-test walks top-down.
  *
- * Locks: topology (sub_parent / sub_children render stack order) = g_srv.rwl
+ * Composition: child surface commit / topology change → dirty the "root"
+ * window (child layers get no Activity); both backends snapshot via
+ * awl_surface_get_layers — the GL renderer composites the layers on the GPU
+ * (awl_renderer.cpp), the SurfaceControl backend reconciles its per-layer
+ * SC set + z order on that same dirty (awl_sc.cpp awl_sc_sync) and latches
+ * each layer's queue head at vsync.
+ *
+ * Locks: topology (sub_parent / active+pending below/above stacks) = g_srv.rwl
  * (readers and writers alike); sub_x / sub_y / latched = child
  * surface ev_lock. The sub_sync / sub_latched flags are read/written only by the
  * client dispatch thread (a wl_subsurface tree is always one client) — no lock.
@@ -47,6 +60,82 @@ struct awl_surface* awl_subsurface_root(struct awl_surface* s) {
     int d = 0;
     while (s->sub_parent && d++ < 32) s = s->sub_parent;
     return s;
+}
+
+static void list_remove_init(struct wl_list* link) {
+    if (link->next != link) wl_list_remove(link);
+    wl_list_init(link);
+}
+
+/* KWin's SurfaceInterfacePrivate keeps current and pending below/above lists.
+ * Keep the same representation here: wl_subsurface place requests mutate only
+ * the pending order; a parent commit atomically promotes it to current. */
+static void sub_pending_rebuild_locked(struct awl_surface* parent) {
+    struct awl_surface* ch;
+    wl_list_for_each(ch, &parent->sub_children, sub_child_link) {
+        list_remove_init(&ch->sub_pend_link);
+        ch->sub_pend_above = 0;
+    }
+    wl_list_for_each(ch, &parent->sub_below, sub_link) {
+        wl_list_insert(parent->pend_sub_below.prev, &ch->sub_pend_link);
+        ch->sub_pend_above = 0;
+    }
+    wl_list_for_each(ch, &parent->sub_above, sub_link) {
+        wl_list_insert(parent->pend_sub_above.prev, &ch->sub_pend_link);
+        ch->sub_pend_above = 1;
+    }
+}
+
+void awl_subsurface_link_immediate_above_locked(struct awl_surface* child,
+                                                struct awl_surface* parent) {
+    if (child->sub_parent) awl_subsurface_unlink_locked(child);
+    child->sub_parent = parent;
+    wl_list_insert(parent->sub_children.prev, &child->sub_child_link);
+    wl_list_insert(parent->sub_above.prev, &child->sub_link);
+    child->sub_above_parent = 1;
+    /* KWin addChild appends to both current and pending stacks. This preserves
+     * any ordered place_* requests already waiting on the parent. */
+    wl_list_insert(parent->pend_sub_above.prev, &child->sub_pend_link);
+    child->sub_pend_above = 1;
+}
+
+void awl_subsurface_unlink_locked(struct awl_surface* child) {
+    if (!child->sub_parent) return;
+    list_remove_init(&child->sub_link);
+    list_remove_init(&child->sub_pend_link);
+    list_remove_init(&child->sub_child_link);
+    child->sub_parent = NULL;
+    child->sub_above_parent = 0;
+    child->sub_pend_above = 0;
+}
+
+static int sub_apply_stack(struct awl_surface* parent) {
+    int changed = 0;
+    pthread_rwlock_wrlock(&g_srv.rwl);
+    if (!parent->sub_stack_pending) {
+        pthread_rwlock_unlock(&g_srv.rwl);
+        return 0;
+    }
+
+    struct awl_surface* ch;
+    struct awl_surface* tmp;
+    wl_list_for_each(ch, &parent->sub_children, sub_child_link)
+        list_remove_init(&ch->sub_link);
+    wl_list_for_each_safe(ch, tmp, &parent->pend_sub_below, sub_pend_link) {
+        list_remove_init(&ch->sub_pend_link);
+        wl_list_insert(parent->sub_below.prev, &ch->sub_link);
+        ch->sub_above_parent = 0;
+    }
+    wl_list_for_each_safe(ch, tmp, &parent->pend_sub_above, sub_pend_link) {
+        list_remove_init(&ch->sub_pend_link);
+        wl_list_insert(parent->sub_above.prev, &ch->sub_link);
+        ch->sub_above_parent = 1;
+    }
+    parent->sub_stack_pending = 0;
+    sub_pending_rebuild_locked(parent);
+    changed = 1;
+    pthread_rwlock_unlock(&g_srv.rwl);
+    return changed;
 }
 
 /* Effective sync: self or any ancestor is in sync mode (called only from the
@@ -129,10 +218,10 @@ static void sub_apply_state(struct awl_surface* ch) {
  * own child transactions immediately).
  * Return 1 = some child layer's buffer state was applied (caller uses this to
  * decide whether to trigger presentation). */
-int awl_subsurface_parent_applied(struct awl_surface* s) {
+static int sub_parent_apply_list(struct wl_list* list) {
     int applied = 0;
     struct awl_surface* ch;
-    wl_list_for_each(ch, &s->sub_children, sub_link) {
+    wl_list_for_each(ch, list, sub_link) {
         pthread_mutex_lock(&ch->ev_lock);
         int apply = ch->sub_latched;
         if (ch->sub_pos_pending) {          /* KWin parentApplyState */
@@ -148,6 +237,13 @@ int awl_subsurface_parent_applied(struct awl_surface* s) {
             applied |= awl_subsurface_parent_applied(ch);
         }
     }
+    return applied;
+}
+
+int awl_subsurface_parent_applied(struct awl_surface* s) {
+    int applied = sub_apply_stack(s);
+    applied |= sub_parent_apply_list(&s->sub_below);
+    applied |= sub_parent_apply_list(&s->sub_above);
     return applied;
 }
 
@@ -180,8 +276,7 @@ static void sub_res_destroy(struct wl_resource* res) {
         struct awl_surface* root = awl_subsurface_root(s);
         root_id = root->id;
         dirty = root->mapped;
-        wl_list_remove(&s->sub_link);
-        s->sub_parent = NULL;
+        awl_subsurface_unlink_locked(s);
     }
     s->role = AWL_ROLE_NONE;
     pthread_rwlock_unlock(&g_srv.rwl);
@@ -225,44 +320,66 @@ static void sub_set_position(struct wl_client* client, struct wl_resource* res,
     pthread_mutex_unlock(&s->ev_lock);
 }
 
-/* Only same-parent siblings accepted; cross-parent silently ignored (protocol has no matching error enum, log it) */
-static void sub_place_above(struct wl_client* client, struct wl_resource* res,
-                            struct wl_resource* sibling_res) {
+/* place_above / place_below (KWin SurfaceInterfacePrivate::raiseChild /
+ * lowerChild): the reference may be a sibling OR the parent itself — the
+ * parent counts as the element sitting between the below and above stacks.
+ * Pending state only (parent->sub_stack_pending): the parent's next commit
+ * promotes it (sub_apply_stack). Anything else is a protocol error, as in
+ * kwin (error_bad_surface "incorrect sibling"). */
+static void sub_place(struct wl_resource* res, struct wl_resource* sibling_res,
+                      int above) {
     struct awl_surface* s = wl_resource_get_user_data(res);
-    struct awl_surface* sib = wl_resource_get_user_data(sibling_res);
-    if (!s || !sib || s == sib || !s->sub_parent ||
-        sib->sub_parent != s->sub_parent) {
-        LOGI("place_above: non-sibling ignored");
+    struct awl_surface* sib = sibling_res ? wl_resource_get_user_data(sibling_res) : NULL;
+    pthread_rwlock_wrlock(&g_srv.rwl);
+    struct awl_surface* parent = s ? s->sub_parent : NULL;
+    if (!s || !sib || s == sib || !parent ||
+        (sib != parent && sib->sub_parent != parent)) {
+        pthread_rwlock_unlock(&g_srv.rwl);
+        if (s)
+            wl_resource_post_error(res, WL_SUBSURFACE_ERROR_BAD_SURFACE,
+                                   "reference surface is not the parent or a sibling");
         return;
     }
-    pthread_rwlock_wrlock(&g_srv.rwl);
-    wl_list_remove(&s->sub_link);
-    wl_list_insert(&sib->sub_link, &s->sub_link);   /* s right after sib = above it */
+    list_remove_init(&s->sub_pend_link);
+    if (sib == parent) {
+        if (above) {   /* parent = just before the first element of above */
+            wl_list_insert(&parent->pend_sub_above, &s->sub_pend_link);
+            s->sub_pend_above = 1;
+        } else {       /* parent = just after the last element of below */
+            wl_list_insert(parent->pend_sub_below.prev, &s->sub_pend_link);
+            s->sub_pend_above = 0;
+        }
+    } else {           /* sibling: same stack (below/above) as the anchor, right after/before it */
+        wl_list_insert(above ? &sib->sub_pend_link : sib->sub_pend_link.prev,
+                       &s->sub_pend_link);
+        s->sub_pend_above = sib->sub_pend_above;
+    }
+    parent->sub_stack_pending = 1;
     pthread_rwlock_unlock(&g_srv.rwl);
-    dirty_root(s);
+}
+
+static void sub_place_above(struct wl_client* client, struct wl_resource* res,
+                            struct wl_resource* sibling_res) {
+    sub_place(res, sibling_res, 1);
 }
 
 static void sub_place_below(struct wl_client* client, struct wl_resource* res,
                             struct wl_resource* sibling_res) {
-    struct awl_surface* s = wl_resource_get_user_data(res);
-    struct awl_surface* sib = wl_resource_get_user_data(sibling_res);
-    if (!s || !sib || s == sib || !s->sub_parent ||
-        sib->sub_parent != s->sub_parent) {
-        LOGI("place_below: non-sibling ignored");
-        return;
-    }
-    pthread_rwlock_wrlock(&g_srv.rwl);
-    wl_list_remove(&s->sub_link);
-    wl_list_insert(sib->sub_link.prev, &s->sub_link);   /* s right before sib = below it */
-    pthread_rwlock_unlock(&g_srv.rwl);
-    dirty_root(s);
+    sub_place(res, sibling_res, 0);
 }
 
 /* set_desync cascade flush: the latched state of self + descendants whose
  * effective sync has been released applies immediately (KWin parentDesynchronized → transaction->commit) */
 static void sub_desync_flush(struct awl_surface* s) {
     struct awl_surface* ch;
-    wl_list_for_each(ch, &s->sub_children, sub_link) {
+    wl_list_for_each(ch, &s->sub_below, sub_link) {
+        if (ch->sub_latched && !sub_effective_sync(ch)) {
+            sub_apply_state(ch);
+            dirty_root(ch);
+        }
+        sub_desync_flush(ch);
+    }
+    wl_list_for_each(ch, &s->sub_above, sub_link) {
         if (ch->sub_latched && !sub_effective_sync(ch)) {
             sub_apply_state(ch);
             dirty_root(ch);
@@ -343,7 +460,7 @@ static void subcompositor_get_subsurface(struct wl_client* client,
     pthread_rwlock_wrlock(&g_srv.rwl);
     s->role = AWL_ROLE_SUBSURFACE;
     s->subsurface_res = ss;
-    s->sub_parent = parent;
+    awl_subsurface_link_immediate_above_locked(s, parent);
     s->sub_sync = 1;   /* protocol default: sync */
     s->sub_latched = 0;
     s->latched_buffer_res = NULL;
@@ -351,7 +468,6 @@ static void subcompositor_get_subsurface(struct wl_client* client,
     s->sub_x = 0;
     s->sub_y = 0;
     s->sub_pos_pending = 0;
-    wl_list_insert(parent->sub_children.prev, &s->sub_link);   /* stack top */
     pthread_rwlock_unlock(&g_srv.rwl);
     LOGI("surface %llu -> subsurface of %llu (stack top)",
             (unsigned long long)s->id, (unsigned long long)parent->id);
@@ -386,13 +502,15 @@ void awl_subsurface_setup(void) {
  * scales by the window-physical / root-logical ratio; input hit-testing uses the
  * same stack. */
 
-static void layers_collect(struct awl_surface* parent, float bx, float by,
-                           awl_layer_info_t* out, int* n, int max, int depth) {
-    if (depth > 8) return;
+static void layers_collect(struct awl_surface* s, float x, float y,
+                           awl_layer_info_t* out, int* n, int max, int depth);
+
+static void layers_collect_children(struct wl_list* children, float bx, float by,
+                                    awl_layer_info_t* out, int* n, int max, int depth) {
     struct awl_surface* ch;
-    wl_list_for_each(ch, &parent->sub_children, sub_link) {
+    wl_list_for_each(ch, children, sub_link) {
         if (*n >= max) return;
-        pthread_mutex_lock(&ch->ev_lock);   /* serialize against set_position / buffer swap */
+        pthread_mutex_lock(&ch->ev_lock);
         float x = bx + (float)ch->sub_x;
         float y = by + (float)ch->sub_y;
         /* A popup's sub_* is the window origin (geometry semantics, product of
@@ -403,25 +521,34 @@ static void layers_collect(struct awl_surface* parent, float bx, float by,
             x -= (float)ch->geom_x;
             y -= (float)ch->geom_y;
         }
-        float w = 0, h = 0;
-        awl_surface_logical_size(ch, &w, &h);
-        float u0, v0, su, sv;   /* sample region (viewport source) → normalized uv, awl_viewport.c */
-        awl_surface_layer_uv(ch, &u0, &v0, &su, &sv);
-        int32_t xform = ch->buf_transform;
         pthread_mutex_unlock(&ch->ev_lock);
-        out[*n].surface_id = ch->id;
-        out[*n].x = x;
-        out[*n].y = y;
-        out[*n].w = w;
-        out[*n].h = h;
-        out[*n].u0 = u0;
-        out[*n].v0 = v0;
-        out[*n].su = su;
-        out[*n].sv = sv;
-        out[*n].transform = xform;
-        (*n)++;
         layers_collect(ch, x, y, out, n, max, depth + 1);
     }
+}
+
+/* Render order is recursive below subtrees, this surface, then above
+ * subtrees. This is the wl_subsurface stacking model: a child may be above or
+ * below its parent, not merely above its siblings. */
+static void layers_collect(struct awl_surface* s, float x, float y,
+                           awl_layer_info_t* out, int* n, int max, int depth) {
+    if (depth > 8 || *n >= max) return;
+    layers_collect_children(&s->sub_below, x, y, out, n, max, depth);
+    if (*n >= max) return;
+
+    pthread_mutex_lock(&s->ev_lock);
+    float w = 0, h = 0;
+    awl_surface_logical_size(s, &w, &h);
+    out[*n].surface_id = s->id;
+    out[*n].x = x;
+    out[*n].y = y;
+    out[*n].w = w;
+    out[*n].h = h;
+    awl_surface_layer_uv(s, &out[*n].u0, &out[*n].v0, &out[*n].su, &out[*n].sv);
+    out[*n].transform = s->buf_transform;
+    pthread_mutex_unlock(&s->ev_lock);
+    (*n)++;
+
+    layers_collect_children(&s->sub_above, x, y, out, n, max, depth);
 }
 
 int awl_surface_get_layers(uint64_t root_id, awl_layer_info_t* out, int max) {
@@ -434,21 +561,8 @@ int awl_surface_get_layers(uint64_t root_id, awl_layer_info_t* out, int max) {
     }
     root = awl_subsurface_root(root);   /* fault tolerance: a child layer id maps back to the root */
     int n = 0;
-    if (root->role != AWL_ROLE_SUBSURFACE) {
-        out[0].surface_id = root->id;
-        out[0].x = 0;
-        out[0].y = 0;
-        pthread_mutex_lock(&root->ev_lock);
-        float w = 0, h = 0;
-        awl_surface_logical_size(root, &w, &h);
-        awl_surface_layer_uv(root, &out[0].u0, &out[0].v0, &out[0].su, &out[0].sv);
-        out[0].w = w;
-        out[0].h = h;
-        out[0].transform = root->buf_transform;
-        pthread_mutex_unlock(&root->ev_lock);
-        n = 1;
+    if (root->role != AWL_ROLE_SUBSURFACE)
         layers_collect(root, 0, 0, out, &n, max, 1);
-    }
     pthread_rwlock_unlock(&g_srv.rwl);
     return n;
 }

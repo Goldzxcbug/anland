@@ -172,8 +172,7 @@ static void popup_res_destroy(struct wl_resource* res) {
         struct awl_surface* root = awl_subsurface_root(s);
         root_id = root->id;
         dirty = root->mapped;
-        wl_list_remove(&s->sub_link);
-        s->sub_parent = NULL;
+        awl_subsurface_unlink_locked(s);
     }
     pthread_mutex_lock(&s->ev_lock);
     s->xdg_role_res = NULL;
@@ -479,8 +478,7 @@ static void xdg_surface_get_popup(struct wl_client* c, struct wl_resource* res,
     s->role = AWL_ROLE_POPUP;
     s->xdg_role_res = pr;
     s->xdg_surface_res = res;
-    s->sub_parent = parent;
-    wl_list_insert(parent->sub_children.prev, &s->sub_link);
+    awl_subsurface_link_immediate_above_locked(s, parent);
     pthread_rwlock_unlock(&g_srv.rwl);
 
     pthread_mutex_lock(&parent->ev_lock);
