@@ -290,7 +290,10 @@ public class WlSettingsActivity extends Activity {
         scSw.setOnCheckedChangeListener((b, on) -> WlBinder.configSet("sc_enabled", on ? 1 : 0));
         root.addView(scSw);
 
-        setContentView(root);
+        android.widget.ScrollView scroll = new android.widget.ScrollView(this);
+        scroll.setFillViewport(true);
+        scroll.addView(root);
+        setContentView(scroll);
     }
 
     private static android.widget.LinearLayout.LayoutParams lp1() {
