@@ -51,6 +51,7 @@
  */
 #include "awl.h"
 #include "awl_renderer.hpp"
+#include "awl_sc.hpp"
 
 #include <android/binder_ibinder.h>
 #include <android/binder_parcel.h>
@@ -58,6 +59,25 @@
 #include <android/log.h>
 
 #include <dlfcn.h>
+#include <atomic>   /* backend mux flag (the full std include set comes later) */
+
+/* ---------------- composition backend mux ----------------
+ * sc_enabled (daemon config, default on): 1 = SurfaceControl compositor —
+ * per-layer BufferState SCs fed from the bufferqueue, SurfaceFlinger/HWC
+ * composites (awl_sc); 0 = GL renderer fallback (awl_renderer). Read at
+ * attach time: a flip re-routes each window when it re-attaches
+ * (pause/resume, re-SURFACE, evict). request_render maps to a vsync kick
+ * on the SC path (the choreographer loop runs continuously). */
+static std::atomic<bool> g_cfg_sc{true};
+static int backend_attach(uint64_t id, ANativeWindow* nw) {
+    return g_cfg_sc.load(std::memory_order_relaxed)
+               ? awl_sc_attach(id, nw)
+               : awl_renderer_attach(id, nw);
+}
+static void backend_request_render(uint64_t id) {
+    if (g_cfg_sc.load(std::memory_order_relaxed)) awl_sc_kick(id);
+    else awl_renderer_request_render(id);
+}
 
 #define AWL_TAG "anland-daemon"
 #include "awl_log.h"   /* LOGI/LOGE/LOGD (LOGD compiled out unless AWL_LOG_DEBUG) */
@@ -273,7 +293,7 @@ static void detach_window(uint64_t id) {
     bool sched_drop = false;      /* was attached → restore the client's cgroups */
     bool sched_none_left = false; /* this detach emptied the attach set → self falls back */
     awl_window_attached(id, 0);            /* logic layer: stop draining this window's queues at commit (client parks on buffer starvation) */
-    awl_renderer_attach(id, nullptr);      /* free GL resources (window and texture state stays inside the renderer) */
+    backend_attach(id, nullptr);           /* free composition resources (SC tree / GL, per the backend in effect) */
     {
         std::lock_guard<std::mutex> lk(g_state_lock);
         auto it = g_wins.find(id);
@@ -736,7 +756,7 @@ static void cb_window_destroyed(void* user, uint64_t id) {
      * unlinks the surface) — snapshot the owner for the destroy event; a
      * lookup after the erase below would read (uid_t)-1 */
     uid_t owner = awl_window_client_uid(id);
-    awl_renderer_attach(id, nullptr);
+    backend_attach(id, nullptr);
     AIBinder* ctrl = nullptr;
     bool sched_drop = false;      /* was attached → restore the client's cgroups */
     bool sched_none_left = false; /* the destroy emptied the attach set → self falls back */
@@ -1018,10 +1038,10 @@ static void cb_pointer_cursor(void* user, uint64_t id, int hidden) {
 }
 
 static void cb_window_dirty(void* user, uint64_t id) {
-    /* on detach (incl. pause) there is no render entry → no-op: send no
+    /* on detach (incl. pause) there is no backend entry → no-op: send no
      * frame_done; the client naturally parks in eglSwapBuffers waiting —
      * zero-cost keep-alive */
-    awl_renderer_request_render(id);   /* set flag + wake this window's render thread, returns immediately */
+    backend_request_render(id);   /* GL: wake the render thread; SC: vsync kick, returns immediately */
 }
 
 /* ---- clipboard bridge (#29; logic-layer data thread callback) ----
@@ -1107,6 +1127,7 @@ static bool cfg_domain(const std::string& key, int* lo, int* hi) {
     if (key == "init_h") { *lo = 100; *hi = 4320; return true; }
     if (key == "scale_mode") { *lo = 0; *hi = 2; return true; }
     if (key == "auto_attach") { *lo = 0; *hi = 1; return true; }
+    if (key == "sc_enabled") { *lo = 0; *hi = 1; return true; }
     return false;
 }
 
@@ -1166,10 +1187,11 @@ static void cfg_save_locked(void) {
     FILE* f = fopen(tmp, "w");
     if (!f) { LOGE("config save open %s: %s", tmp, strerror(errno)); return; }
     fprintf(f, "{\n  \"zoom\": %d,\n  \"init_w\": %d,\n  \"init_h\": %d,\n"
-               "  \"scale_mode\": %d,\n  \"auto_attach\": %d,\n"
+               "  \"scale_mode\": %d,\n  \"auto_attach\": %d,\n  \"sc_enabled\": %d,\n"
                "  \"runtime_dir\": \"%s\",\n  \"socket_listen\": %d\n}\n",
             g_cfg_zoom, g_cfg_init_w, g_cfg_init_h, g_cfg_scale_mode,
-            g_cfg_auto_attach ? 1 : 0, rt, sl);
+            g_cfg_auto_attach ? 1 : 0, g_cfg_sc.load(std::memory_order_relaxed) ? 1 : 0,
+            rt, sl);
     if (fclose(f) != 0)
         LOGE("config save flush: %s", strerror(errno));
     if (rename(tmp, AWL_CFG_PATH) != 0)
@@ -1258,6 +1280,14 @@ static void cfg_load_and_apply(void) {
     } else if (aa != -1) {
         LOGE("config: auto_attach=%d out of range (0..1), ignored", aa);
     }
+    int sc = cfg_parse_int(buf, "sc_enabled");
+    if (sc == 0 || sc == 1) {
+        g_cfg_sc.store(sc != 0, std::memory_order_relaxed);
+        LOGI("config: sc_enabled=%s (applied at startup — windows attaching from now on)",
+             sc ? "true (SC/HWC backend)" : "false (GL fallback)");
+    } else if (sc != -1) {
+        LOGE("config: sc_enabled=%d out of range (0..1), ignored", sc);
+    }
 }
 
 /* set: apply → persist (apply first, write second; a write failure only warns — the live value stays in effect) */
@@ -1301,7 +1331,7 @@ static int cfg_set(const std::string& key, int32_t val) {
             for (auto& [id, ws] : g_wins)
                 if (ws.attached) ids.push_back(id);
         }
-        for (uint64_t id : ids) awl_renderer_request_render(id);
+        for (uint64_t id : ids) backend_request_render(id);
         LOGI("config set scale_mode=%d (applied + persisted)", val);
     } else if (key == "auto_attach") {
         /* effective for windows created from now on — nothing live to apply */
@@ -1309,6 +1339,15 @@ static int cfg_set(const std::string& key, int32_t val) {
         g_cfg_auto_attach = val != 0;
         cfg_save_locked();
         LOGI("config set auto_attach=%d (applied + persisted)", val ? 1 : 0);
+    } else if (key == "sc_enabled") {
+        /* effective for windows attaching from now on — a live window keeps
+         * its backend until it re-attaches (pause/resume, re-SURFACE, evict) */
+        g_cfg_sc.store(val != 0, std::memory_order_relaxed);
+        {
+            std::lock_guard<std::mutex> lk(g_cfg_lock);
+            cfg_save_locked();
+        }
+        LOGI("config set sc_enabled=%d (new attaches + persisted)", val);
     }
     return 0;
 }
@@ -1516,16 +1555,16 @@ static binder_status_t host_on_transact(AIBinder* binder, transaction_code_t cod
             if (!known) dl->ids.push_back(id);
         }
 
-        /* re-attach: the renderer internally tears down the old entry with
+        /* re-attach: the backend internally tears down the old entry with
          * the same id first (rebuilt after pause/evict; concurrent SURFACE
          * can't leak via overwrite either) */
-        if (awl_renderer_attach(id, anw) != 0) {
-            LOGE("SURFACE %llu: renderer attach failed", (unsigned long long)id);
+        if (backend_attach(id, anw) != 0) {
+            LOGE("SURFACE %llu: backend attach failed", (unsigned long long)id);
             ANativeWindow_release(anw);
             AParcel_writeInt32(out, -1);
             return STATUS_OK;
         }
-        ANativeWindow_release(anw);          /* renderer holds its own reference */
+        ANativeWindow_release(anw);          /* backend holds its own reference */
         awl_window_attached(id, 1);          /* logic layer: commit-time queue drains resume (mailbox) */
 
         /* single atomic decision point (mutually exclusive with cb_window_destroyed / concurrent SURFACE) */
@@ -1576,7 +1615,7 @@ static binder_status_t host_on_transact(AIBinder* binder, transaction_code_t cod
             evt_dispatch(awl_window_client_uid(id), id, AWL_E_DETACHED, nullptr);
         }
         if (gone) {
-            awl_renderer_attach(id, nullptr);   /* rollback (outside the lock; join holds no lock) */
+            backend_attach(id, nullptr);   /* rollback (outside the lock; join holds no lock) */
             LOGE("SURFACE %llu: window destroyed during attach → rollback",
                  (unsigned long long)id);
             AParcel_writeInt32(out, -1);
@@ -1598,7 +1637,7 @@ static binder_status_t host_on_transact(AIBinder* binder, transaction_code_t cod
         awl_output_grow((uint32_t)w, (uint32_t)h);   /* X screen must cover the X window before it is resized to us */
         awl_window_resize(id, w, h);         /* Android fully owns sizing (initial + subsequent) */
         xwm_resize_window(id, w, h);         /* Xwayland window: sync initial size to the X side */
-        awl_renderer_request_render(id);     /* render a first frame */
+        backend_request_render(id);          /* render a first frame */
         evt_dispatch(awl_window_client_uid(id), id, AWL_E_ATTACHED, nullptr);
         LOGI("SURFACE %llu %dx%d → attached (host=%lld)",
              (unsigned long long)id, w, h, (long long)host);
@@ -1729,7 +1768,7 @@ static binder_status_t host_on_transact(AIBinder* binder, transaction_code_t cod
         awl_output_grow((uint32_t)w, (uint32_t)h);
         awl_window_resize((uint64_t)id64, w, h);
         xwm_resize_window((uint64_t)id64, w, h);
-        awl_renderer_request_render((uint64_t)id64);
+        backend_request_render((uint64_t)id64);
         AParcel_writeInt32(out, 0);
         return STATUS_OK;
     }
@@ -1896,6 +1935,7 @@ static binder_status_t host_on_transact(AIBinder* binder, transaction_code_t cod
             std::lock_guard<std::mutex> lk(g_cfg_lock);
             v = g_cfg_auto_attach ? 1 : 0;
         }
+        else if (key == "sc_enabled") v = g_cfg_sc.load(std::memory_order_relaxed) ? 1 : 0;
         else LOGE("config get: unknown key '%s'", key.c_str());
         AParcel_writeInt32(out, v);
         return STATUS_OK;

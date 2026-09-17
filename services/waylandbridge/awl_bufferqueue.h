@@ -94,10 +94,11 @@ void awl_bufferqueue_unlock(struct awl_bufferqueue* q);
 
 /* Caller holds the lock. Returns the number of elements popped. */
 int awl_bufferqueue_drain(struct awl_bufferqueue* q);
-/* Caller holds the lock. Waits up to timeout_ms for the head's acquire fence
- * (a timeout is logged and the head is returned anyway — never stall the
- * pipeline on a broken client fence). NULL = empty. The returned element is
- * referenced: pair with awl_bufferqueue_put. */
+/* Caller holds the lock. Waits up to timeout_ms for the head's acquire fence,
+ * then BLOCKS until it signals (the timeout only tunes the rate-limited
+ * warning) — the returned head is always a complete frame (dead fds end the
+ * poll immediately; only a real wait error gives up). NULL = empty. The
+ * returned element is referenced: pair with awl_bufferqueue_put. */
 struct awl_bq_buffer* awl_bufferqueue_gethead(struct awl_bufferqueue* q, int timeout_ms);
 /* Any thread, no lock. fence_fd is dup'd/merged (caller keeps its fd). */
 void awl_bufferqueue_put(struct awl_bq_buffer* e, int fence_fd);

@@ -355,9 +355,16 @@ struct awl_bq_buffer* awl_bufferqueue_gethead(struct awl_bufferqueue* q, int tim
         if (r == 1) {
             int n = atomic_fetch_add(&q->timeouts, 1) + 1;
             if (n <= 3 || (n % 100) == 0)
-                LOGE("gethead: acquire fence not signaled in %dms (%ux%u ino=%llu, %s fence) — presenting anyway (#%d)",
+                LOGE("gethead: acquire fence not signaled in %dms (%ux%u ino=%llu, %s fence) — waiting for completion (#%d)",
                      timeout_ms, e->pub.width, e->pub.height, (unsigned long long)e->pub.ino,
                      e->pub.acquire_fd >= 0 ? "explicit" : "implicit", n);
+            /* the contract is a COMPLETE head: after the warning threshold,
+             * block on the fence until the writer is done. (A dead fd ends
+             * the poll immediately; only a real wait error gives up —
+             * presenting an incomplete buffer would show garbage.) */
+            if (elem_wait(&e->pub, -1) < 0)
+                LOGE("gethead: fence wait failed (%s) — returning the head anyway",
+                     strerror(errno));
         }
     }
     atomic_fetch_add_explicit(&e->refs, 1, memory_order_relaxed);   /* consumer's reference */

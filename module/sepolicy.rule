@@ -126,6 +126,14 @@ allow awl_daemon binder_device chr_file { read write open getattr ioctl map }
 allow surfaceflinger awl_daemon fd use
 allow system_server awl_daemon fd use
 allow hal_graphics_composer_default awl_daemon fd use
+# ---- SC/HWC 合成路径：daemon 直接对 SurfaceFlinger 的 binder 事务 ----
+# （ASurfaceControl_createFromWindow / ASurfaceTransaction_apply / AChoreographer
+# 的 DisplayEventConnection——vsync 事件通道）。servicemanager 的 find 是
+# 用户态 AVC：permissive awl_daemon 救不了缺失的 allow（同上 audioserver 教训，
+# 表现即 waitForService null / createDisplayEventConnection FAILED_TRANSACTION）。
+allow awl_daemon surfaceflinger_service service_manager find
+allow awl_daemon surfaceflinger binder { call transfer }
+allow surfaceflinger awl_daemon binder { call transfer }
 # 客户端/调试域 ↔ daemon（Chrome 在 droidspacesd 域里，其 dmabuf 由 daemon 导入）
 allow droidspacesd awl_daemon fd use
 allow awl_daemon droidspacesd fd use
