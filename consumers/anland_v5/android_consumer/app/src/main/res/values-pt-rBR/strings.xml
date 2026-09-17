@@ -15,7 +15,7 @@
     <!-- Settings home: category rows and back navigation -->
     <string name="nav_back">‹ Voltar</string>
     <string name="cat_keyboard_title">Teclado e Teclas</string>
-    <string name="cat_keyboard_subtitle">Mapeamento de teclas, modo imersivo, acessibilidade e barra de teclas extras</string>
+    <string name="cat_keyboard_subtitle">Mapeamento de teclas, acessibilidade e barra de teclas extras</string>
     <string name="cat_touchpad_title">Touchpad e Mouse</string>
     <string name="cat_touchpad_subtitle">Modo touchpad, captura de ponteiro e sensibilidade</string>
     <string name="cat_connection_subtitle">Socket, root, mic, câmera e latência do áudio</string>
@@ -44,8 +44,8 @@
     <string name="scancode_unknown">Scan code %1$d</string>
 
     <!-- Immersive mode -->
-    <string name="section_immersive">Modo Imersivo (Experimental)</string>
-    <string name="immersive_switch">Ativar Modo Imersivo (Experimental)</string>
+    <string name="section_immersive">Modo Imersivo</string>
+    <string name="immersive_switch">Ativar Modo Imersivo</string>
     <string name="immersive_hint">Envia toque, teclado e mouse diretamente para o desktop Linux, mantendo os gestos do Android fora do caminho. Precisa de root. Defina uma tecla de alternância abaixo: pressione uma vez para entrar e novamente para sair. O modo também termina quando você troca de app.</string>
     <string name="bind_immersive_key_button">Mapear Tecla do Modo Imersivo</string>
     <string name="immersive_entering">Modo imersivo: toda a entrada vai para o desktop. Pressione %1$s novamente para sair.</string>
@@ -54,6 +54,7 @@
     <string name="immersive_failed">Não foi possível iniciar o modo imersivo: root foi negado ou está indisponível</string>
     <string name="immersive_no_devices">Não foi possível iniciar o modo imersivo: nenhum dispositivo de entrada pôde ser assumido</string>
     <string name="immersive_interrupted">Modo imersivo encerrado; a entrada voltou para o Android</string>
+    <string name="immersive_inputs_system_power">✕ %1$s — mantido no Android para preservar o controle do botão liga/desliga</string>
 
     <!-- Accessibility -->
     <string name="accessibility_switch">Interceptação das Teclas via Acessibilidade</string>

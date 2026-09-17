@@ -351,6 +351,45 @@ static void stop_event_thread(struct consumer_state *s)
 }
 
 /*
+ * Appends `in` to `out` as one shell word, separated from whatever is already
+ * there: single-quoted, with embedded quotes escaped as '\''. This is what makes
+ * the result safe to hand to `su -c` -- without it, a socket path containing a
+ * shell metacharacter is a command run as root, and the socket path comes from
+ * the saved preference or from the launch Intent, neither of which is ours.
+ *
+ * Returns false when the result would not fit. The caller must then refuse
+ * rather than run it: a truncated command line is a different command.
+ */
+static bool append_quoted(char *out, size_t out_size, size_t *used, const char *in)
+{
+    if (*used > 0) {
+        if (*used + 1 >= out_size)
+            return false;
+        out[(*used)++] = ' ';
+    }
+    if (*used + 1 >= out_size)
+        return false;
+    out[(*used)++] = '\'';
+    for (const char *p = in; *p != '\0'; p++) {
+        if (*p == '\'') {
+            if (*used + 4 >= out_size)
+                return false;
+            memcpy(out + *used, "'\\''", 4);
+            *used += 4;
+        } else {
+            if (*used + 1 >= out_size)
+                return false;
+            out[(*used)++] = *p;
+        }
+    }
+    if (*used + 2 >= out_size)
+        return false;
+    out[(*used)++] = '\'';
+    out[*used] = '\0';
+    return true;
+}
+
+/*
  * "Connect with root" handshake. The app cannot connect() to a root-owned
  * daemon socket directly, so it listens on a bridge socket, launches the bundled
  * helper through `su -c`, and the helper (as root) connects to the daemon and
@@ -395,10 +434,19 @@ static int recv_fd_via_root_helper(const char *daemon_sock,
         return -1;
     }
 
-    /* Build the command su runs: "<helper> <daemon_sock> <bridge_path>". */
-    char inner[1100];
-    snprintf(inner, sizeof(inner), "%s %s %s",
-             helper_path, daemon_sock, bridge_path);
+    /* Build the command su runs: "<helper> <daemon_sock> <bridge_path>", each
+     * argument quoted so none of them can be read as shell syntax. */
+    char inner[2048];
+    size_t used = 0;
+    inner[0] = '\0';
+    if (!append_quoted(inner, sizeof(inner), &used, helper_path)
+            || !append_quoted(inner, sizeof(inner), &used, daemon_sock)
+            || !append_quoted(inner, sizeof(inner), &used, bridge_path)) {
+        LOGE("root helper: command line too long to quote safely");
+        close(lfd);
+        unlink(bridge_path);
+        return -1;
+    }
 
     pid_t pid = fork();
     if (pid < 0) {
