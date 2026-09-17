@@ -310,16 +310,49 @@ void awl_datadev_android_clip(const char* utf8);
  * (awl_bufferqueue.h — dma-buf fd + acquire fence + geometry, nothing
  * else): every layer of a window has one. Per frame the renderer does, for
  * each layer, queue_ref → lock → drain → gethead → GL → set_release_fence →
- * unlock → unref. wl_shm buffers never reach it: the logic layer converts
- * them to dma-buf internally (awl_shmblit.c) and pushes the result. Buffer
- * release / explicit-sync release are the queue's business (they fire when
- * a frame leaves it), not the renderer's.
+ * unlock → unref. wl_shm buffers never enter it: the backend reads them in
+ * place (awl_surface_shm_begin/end below). Buffer release / explicit-sync
+ * release of dmabuf frames are the queue's business (they fire when a frame
+ * leaves it), not the renderer's.
  *
  * awl_surface_queue_ref: +1 reference on the layer's queue (NULL = unknown
  * surface); the caller must awl_bufferqueue_unref it after the frame. The
  * reference keeps a locked queue alive across a concurrent surface death. */
 struct awl_bufferqueue;
 struct awl_bufferqueue* awl_surface_queue_ref(uint64_t id);
+
+/* ---- wl_shm frame source (render thread) ----
+ * A wl_shm commit is neither queued nor copied by the logic layer: it only
+ * accumulates the surface's damage. The backend uploads the client's pixels
+ * itself, straight from the pool into its own GPU texture, damage rect only
+ * (one copy), at its frame cadence:
+ *
+ *   begin(id, have_serial, &f)
+ *     0  the layer has no shm content (never committed, unmapped, or a
+ *        dmabuf surface) — show nothing from shm
+ *     2  shm content exists but nothing changed since `have_serial`, or the
+ *        client already destroyed the wl_buffer (content persists: keep the
+ *        last upload) — no lock held, do NOT call end
+ *     1  *f describes the buffer to (re)upload; the surface is LOCKED until
+ *        end (its client's commit waits, nothing else does): upload
+ *        promptly, then end(consumed=1) — the damage accumulator resets and
+ *        wl_buffer.release (+ the explicit-sync release object) goes to the
+ *        client, i.e. "we are done reading". end(consumed=0) = the upload
+ *        failed, everything stays pending.
+ * f.damage: the rows/cols changed since the last consumed upload (dmg_full =
+ * whole buffer; w/h 0 = nothing recorded — a consumer whose texture is new
+ * uploads everything regardless). Any thread; `priv` is the lock handle. */
+typedef struct awl_shm_frame {
+    uint32_t width, height, stride;   /* stride in bytes */
+    uint32_t format;                  /* DRM fourcc: 'AR24' / 'XR24' (memory order B,G,R,A|X) */
+    const void* pixels;               /* valid until awl_surface_shm_end */
+    int dmg_full;
+    int32_t dmg_x, dmg_y, dmg_w, dmg_h;
+    uint64_t serial;                  /* pass back as have_serial next time */
+    void* priv;
+} awl_shm_frame_t;
+int  awl_surface_shm_begin(uint64_t id, uint64_t have_serial, awl_shm_frame_t* f);
+void awl_surface_shm_end(awl_shm_frame_t* f, int consumed);
 
 /* Adapter → logic layer: the Android window (render target) of root `id`
  * attached (1) / detached (0). While detached the commit path stops draining

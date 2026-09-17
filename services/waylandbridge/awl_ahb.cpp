@@ -39,11 +39,57 @@
 #include <string.h>
 #include <stdlib.h>
 
+#include <map>
 #include <mutex>
 #include <atomic>
 
 #define AWL_TAG "anland-rd"
 #include "awl_log.h"   /* LOGI/LOGE/LOGD (LOGD compiled out unless AWL_LOG_DEBUG) */
+
+/* ---------------- platform stride oracle ----------------
+ * gralloc's row pitch for a linear BGRA_8888 buffer of a given width under
+ * the donor usage — measured, never modeled: on the OPD2513 (Adreno 840)
+ * the rule pads pitches that land on 2 KiB multiples by 1 KiB (512→768,
+ * 1024→1280, 1536→1792, 2048→2304, 3072→3328 px) but leaves 4096 alone —
+ * an opaque libadreno_utils table. Probe = one 64-row allocation per width
+ * (the pitch does not depend on the height: 64 vs 1808 rows measured equal),
+ * released immediately; results cached for the daemon's lifetime. */
+static std::mutex g_stride_lock;
+static std::map<uint32_t, uint32_t> g_stride_cache;   /* width px → pitch px (0 = probe failed) */
+
+uint32_t awl_ahb_platform_stride_px(uint32_t width_px) {
+    if (!width_px) return 0;
+    std::lock_guard<std::mutex> lk(g_stride_lock);
+    auto it = g_stride_cache.find(width_px);
+    if (it != g_stride_cache.end()) return it->second;
+    AHardwareBuffer_Desc d = {};
+    d.width = width_px;
+    d.height = 64;
+    d.layers = 1;
+    d.format = AWL_HAL_BGRA_8888;
+    d.usage = AWL_AHB_DONOR_USAGE;
+    AHardwareBuffer* b = nullptr;
+    uint32_t stride = 0;
+    if (AHardwareBuffer_allocate(&d, &b) == 0 && b) {
+        AHardwareBuffer_Desc got;
+        AHardwareBuffer_describe(b, &got);
+        stride = got.stride;
+        AHardwareBuffer_release(b);
+    } else {
+        LOGE("stride oracle: probe allocation %ux64 failed — no scan-out verdict for this pitch",
+             width_px);
+    }
+    g_stride_cache[width_px] = stride;
+    LOGD("stride oracle: width %u px → pitch %u px", width_px, stride);
+    return stride;
+}
+
+bool awl_ahb_hwc_scanout_ok(const struct awl_bq_buffer* b) {
+    if (!b || b->stride % 4 != 0) return false;
+    uint32_t spx = b->stride / 4;
+    uint32_t want = awl_ahb_platform_stride_px(spx);
+    return want == 0 /* oracle unavailable: no verdict, keep the HWC path */ || want == spx;
+}
 
 /* Official VNDK API (vndk/hardware_buffer.h); no header in the NDK sysroot,
  * symbol exported by libnativewindow.so (already linked via CMake) */
@@ -136,7 +182,7 @@ static struct ahb_calib* ahb_calibrate(uint32_t fmt) {
         AHardwareBuffer_Desc dd = {};
         dd.width = W[i]; dd.height = H[i];
         dd.format = fmt;
-        dd.layers = 1; dd.usage = AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE;
+        dd.layers = 1; dd.usage = AWL_AHB_DONOR_USAGE;
         if (AHardwareBuffer_allocate(&dd, &d[i]) != 0) {
             LOGE("calib donor %d allocation failed", i);
             goto out;
@@ -316,7 +362,7 @@ AHardwareBuffer* awl_ahb_wrap(const struct awl_bq_buffer* b,
         AHardwareBuffer_Desc dd = {};
         dd.width = 4; dd.height = 4;
         dd.format = hal; dd.layers = 1;
-        dd.usage = AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE;
+        dd.usage = AWL_AHB_DONOR_USAGE;
         if (AHardwareBuffer_allocate(&dd, &donor) != 0) {
             LOGE("donor allocation failed");
             return NULL;
@@ -435,6 +481,22 @@ AHardwareBuffer* awl_ahb_wrap(const struct awl_bq_buffer* b,
 
 /* ---------------- per-layer slot cache ---------------- */
 
+/* Forged buffers alive in the slot caches, process-wide. Each one pins two
+ * fds; the bound is AWL_AHB_CACHE_SLOTS × live layers (a few dozen). The
+ * canary fires long before the fd table (32768) does — a growing count is a
+ * leak, and fd exhaustion is otherwise silent until every window is black. */
+static std::atomic<int> g_forged_live{0};
+
+static void forged_live_inc(void) {
+    int n = g_forged_live.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (n >= 512 && (n & (n - 1)) == 0)   /* 512, 1024, 2048, ... */
+        LOGE("forged AHardwareBuffers alive: %d — leak? (2 fds each, table is 32768)", n);
+}
+
+static void forged_live_dec(void) {
+    g_forged_live.fetch_sub(1, std::memory_order_relaxed);
+}
+
 struct awl_ahb_cache {
     void (*payload_destroy)(void*);
     struct awl_ahb_slot slot[AWL_AHB_CACHE_SLOTS];
@@ -450,9 +512,16 @@ void awl_ahb_cache_destroy(struct awl_ahb_cache* c) {
     if (!c) return;
     for (struct awl_ahb_slot& s : c->slot) {
         if (s.payload && c->payload_destroy) c->payload_destroy(s.payload);
-        if (s.ahb) AHardwareBuffer_release(s.ahb);
+        if (s.ahb) {
+            AHardwareBuffer_release(s.ahb);
+            forged_live_dec();
+        }
     }
     delete c;
+}
+
+int awl_ahb_forged_live(void) {
+    return g_forged_live.load(std::memory_order_relaxed);
 }
 
 struct awl_ahb_slot* awl_ahb_cache_get(struct awl_ahb_cache* c,
@@ -492,8 +561,22 @@ struct awl_ahb_slot* awl_ahb_cache_get(struct awl_ahb_cache* c,
     AHardwareBuffer* ahb = awl_ahb_wrap(b, usage, tmpl);
     if (!ahb) return NULL;   /* cache untouched — retry next frame */
 
+    /* Evict: the payload (EGLImage/texture holding its own buffer reference)
+     * first, then OUR reference on the forged buffer. Skipping the release
+     * was the 2026-09-17 daemon-wide black screen: every eviction leaked the
+     * forged handle's two fds (pixel dma-buf + snapalloc METADATA blob); a
+     * client that commits a fresh dma-buf per frame (Xwayland) evicts every
+     * frame → 32768 fds in minutes → every dup/socketpair/forge in the
+     * process fails → no window can latch a buffer until the daemon
+     * restarts. SF (setBuffer) and the GL driver (EGLImage) hold their own
+     * references — releasing ours never pulls a buffer from under them. */
     if (victim->payload && c->payload_destroy) c->payload_destroy(victim->payload);
+    if (victim->ahb) {
+        AHardwareBuffer_release(victim->ahb);
+        forged_live_dec();
+    }
     victim->ahb = ahb;
+    forged_live_inc();
     victim->ino = ino;
     victim->w = b->width;
     victim->h = b->height;

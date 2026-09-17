@@ -53,13 +53,9 @@ static void release_res_destroy(struct wl_resource* res) {
         wl_list_remove(&er->all_link);
         if (s->pend_release_res == res) s->pend_release_res = NULL;
         if (s->latched_release_res == res) s->latched_release_res = NULL;
-        /* the shm converter may hold it as the release object of its
-         * current/retired source buffer (ev_lock-owned words) */
-        if (s->shm) {
-            pthread_mutex_lock(&s->ev_lock);
-            awl_shmblit_release_gone_locked(s->shm, res);
-            pthread_mutex_unlock(&s->ev_lock);
-        }
+        /* a shm commit keeps it as the release object of its source buffer
+         * until a backend has read the pixels (ev_lock-owned word) */
+        awl_surface_shm_release_gone(s, res);
     }
     free(er);
 }

@@ -41,8 +41,11 @@
  * Elements own their fds: the queue closes dmabuf/acquire/release fds once the
  * release callback returned. `user` is an opaque producer cookie handed to the
  * callback (the logic layer keeps its wl_buffer/release-object bookkeeping
- * there). A dmabuf_fd of -1 is a NULL-buffer marker (wl_surface.attach(NULL)
- * commit): always "complete", the consumer draws nothing for that layer.
+ * there). A dmabuf_fd of -1 is a NULL-buffer marker ("no dmabuf frame from
+ * here on": wl_surface.attach(NULL) commit, or a wl_shm commit following
+ * dmabuf ones): always "complete", the consumer shows no dmabuf for that
+ * layer and asks the logic layer for shm content instead (awl.h
+ * awl_surface_shm_begin). wl_shm frames never enter a queue.
  *
  * Lifetime: refcounted. The owning surface holds one reference; every live
  * element holds one (so the queue outlives its owner while a consumer still
@@ -68,6 +71,9 @@ struct awl_bq_buffer {
     uint32_t width, height, stride;   /* stride in bytes */
     uint32_t format;       /* DRM fourcc */
     uint64_t modifier;
+    uint64_t seq;          /* process-wide frame sequence, stamped by push:
+                            * identity of a frame that survives the consumer's
+                            * put (an element pointer may be recycled) */
     void* user;            /* producer cookie (opaque to the queue) */
 };
 
@@ -119,6 +125,12 @@ void awl_bufferqueue_flush(struct awl_bufferqueue* q);
 /* Lock-free snapshots (any thread; advisory). */
 int awl_bufferqueue_count(struct awl_bufferqueue* q);     /* elements incl. head */
 int awl_bufferqueue_pending(struct awl_bufferqueue* q);   /* elements behind the head */
+/* Frames drain has popped without their ever being the presented head,
+ * monotonic since creation (wraps). A consumer diffing it per frame sees
+ * how many frames the client discarded in the interval: 0 = the client is
+ * paced to the consumer (frame callbacks / FIFO), ≥1 sustained = it runs
+ * ahead (mailbox / immediate) — a pacing hint, never a correctness input. */
+unsigned awl_bufferqueue_superseded(struct awl_bufferqueue* q);
 
 /* ---- sync helpers (Linux dma-buf / sync_file ioctls; no Android) ----
  * fence_signaled: 1 = signaled (or fd < 0), 0 = pending, <0 = error.

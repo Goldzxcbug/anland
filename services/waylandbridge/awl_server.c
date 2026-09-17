@@ -481,9 +481,6 @@ void awl_server_stop(void) {
      *    one sweep — main thread already stopped, no concurrent dispatch */
     wl_display_destroy_clients(g_srv.display);
 
-    /* every surface is gone (its converter detached) → stop the blit thread */
-    awl_shmblit_shutdown();
-
     wl_display_destroy(g_srv.display);
     pthread_rwlock_destroy(&g_srv.rwl);
     memset(&g_srv, 0, sizeof(g_srv));

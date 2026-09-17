@@ -72,18 +72,22 @@
  * surface tree — awl_sc_sync) and then kicks the vsync loop (which runs
  * continuously; the kick only forces a transaction for frame_done parity). */
 static std::atomic<bool> g_cfg_sc{true};
+/* Both backends are keyed by window id and mutually exclusive per id: an
+ * attach first clears the id from BOTH (unknown id = no-op — a config flip
+ * between detach and re-attach must not leave the window in the old
+ * backend) and then hands the window to the configured one; detach clears
+ * both. */
 static int backend_attach(uint64_t id, ANativeWindow* nw) {
-    return g_cfg_sc.load(std::memory_order_relaxed)
-               ? awl_sc_attach(id, nw)
-               : awl_renderer_attach(id, nw);
+    awl_renderer_attach(id, nullptr);
+    awl_sc_attach(id, nullptr);
+    if (!nw) return 0;
+    return g_cfg_sc.load(std::memory_order_relaxed) ? awl_sc_attach(id, nw)
+                                                    : awl_renderer_attach(id, nw);
 }
 static void backend_request_render(uint64_t id) {
-    if (g_cfg_sc.load(std::memory_order_relaxed)) {
-        awl_sc_sync(id);
-        awl_sc_kick(id);
-    } else {
-        awl_renderer_request_render(id);
-    }
+    awl_sc_sync(id);                    /* SC-attached window (unknown id = no-op) */
+    awl_sc_kick(id);
+    awl_renderer_request_render(id);    /* GL-attached window (same) */
 }
 
 #define AWL_TAG "anland-daemon"

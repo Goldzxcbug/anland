@@ -322,8 +322,6 @@ add_executable(waylandbridge
   awl_icon.c
   awl_sched.c
   awl_bufferqueue.c
-  awl_dmaheap.c
-  awl_shmblit.c
   awl_esync.c
   ${AWL_GENERATED}/linux-explicit-synchronization-unstable-v1-protocol.c
   ${AWL_GENERATED}/linux-explicit-synchronization-unstable-v1-server-protocol.h
@@ -351,6 +349,7 @@ add_executable(waylandbridge
   ${AWL_GENERATED}/text-input-unstable-v3-server-protocol.h
   # adaptation layer
   awl_ahb.cpp
+  awl_gl.cpp
   awl_sc.cpp
   awl_renderer.cpp
   waylandbridge.cpp

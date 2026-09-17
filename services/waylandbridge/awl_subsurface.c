@@ -205,8 +205,8 @@ static void sub_apply_state(struct awl_surface* ch) {
      * commit (the old current is released when its element is drained) */
     if (had_attach)
         awl_surface_apply_buffer(ch, ch->current_buffer_res, acquire_fd, release_res);
-    else if (ch->shm && ch->cd_state != AWL_DMG_NONE)
-        awl_shmblit_damaged_locked(ch->shm);
+    else if (ch->cd_state != AWL_DMG_NONE)
+        awl_surface_shm_damaged_locked(ch);   /* in-place redraw of a shm source */
     pthread_mutex_unlock(&ch->ev_lock);
     if (had_attach) awl_surface_commit_drain(ch);
 }

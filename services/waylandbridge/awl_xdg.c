@@ -116,13 +116,30 @@ static void toplevel_set_minimized(struct wl_client* c, struct wl_resource* res)
     /* Window minimize on the Android side is user-driven, ignore */
 }
 
+/* xdg_toplevel destroyed = the window is unmapped (xdg-shell: "destroying an
+ * xdg_toplevel unmaps the surface"; kwin tears the XdgToplevelWindow down
+ * here, not at wl_surface death). The wl_surface may live on role-less and
+ * be given a new xdg_toplevel later (GTK/Qt hide → show keep the surface):
+ * that re-maps as a NEW window — mapped resets so the next buffer commit
+ * fires window_created again. The Android side (backend detach, Activity
+ * CLOSE, lifecycle event) is taken down right here, outside ev_lock; a
+ * client that destroys the wl_surface first (disconnect order) reaches this
+ * with s == NULL and surface_destroy_impl does the same job. */
 static void toplevel_res_destroy(struct wl_resource* res) {
     struct awl_surface* s = wl_resource_get_user_data(res);
-    if (s) {
-        pthread_mutex_lock(&s->ev_lock);   /* binder thread reads fields concurrently */
-        s->xdg_role_res = NULL;
-        s->role = AWL_ROLE_NONE;
-        pthread_mutex_unlock(&s->ev_lock);
+    if (!s) return;
+    pthread_mutex_lock(&s->ev_lock);   /* binder thread reads fields concurrently */
+    s->xdg_role_res = NULL;
+    s->role = AWL_ROLE_NONE;
+    bool gone = s->window_live;
+    s->window_live = 0;
+    s->mapped = 0;
+    s->has_pending = 0;
+    pthread_mutex_unlock(&s->ev_lock);
+    if (gone) {
+        LOGI("surface %llu: xdg_toplevel destroyed → window unmapped", (unsigned long long)s->id);
+        if (g_srv.cbs.window_destroyed)
+            g_srv.cbs.window_destroyed(g_srv.cbs.user, s->id);
     }
 }
 

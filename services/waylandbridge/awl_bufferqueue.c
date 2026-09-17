@@ -69,6 +69,7 @@ struct awl_bufferqueue {
     struct awl_bq_slot slots[AWL_BQ_CAP];
     atomic_int timeouts;           /* gethead fence timeouts (rate-limited log) */
     atomic_int armed;              /* a fence watch is registered (awl_bufferqueue_arm) */
+    atomic_uint superseded;        /* frames drain popped unshown, monotonic (consumer pacing hint) */
 };
 
 /* ---------------- sync helpers ---------------- */
@@ -278,6 +279,7 @@ struct awl_bufferqueue* awl_bufferqueue_create(awl_bq_release_fn fn, void* ctx) 
     atomic_init(&q->head, 0);
     atomic_init(&q->tail, 0);
     atomic_init(&q->armed, 0);
+    atomic_init(&q->superseded, 0);
     for (unsigned i = 0; i < AWL_BQ_CAP; i++) atomic_init(&q->slots[i].ready, 0);
     return q;
 }
@@ -298,10 +300,12 @@ void awl_bufferqueue_unref(struct awl_bufferqueue* q) {
 }
 
 int awl_bufferqueue_push(struct awl_bufferqueue* q, const struct awl_bq_buffer* e) {
+    static atomic_uint_fast64_t seq;   /* never 0: consumers use 0 as "none" */
     struct awl_bq_elem* el = malloc(sizeof(*el));
     if (!el) return 0;
     el->pub = *e;
     el->pub.release_fd = -1;
+    el->pub.seq = atomic_fetch_add(&seq, 1) + 1;
     atomic_init(&el->refs, 1);
     atomic_init(&el->rel_fd, e->release_fd);   /* a producer-supplied fence is merged like a consumer's */
     el->q = q;
@@ -343,7 +347,12 @@ int awl_bufferqueue_drain(struct awl_bufferqueue* q) {
         pop_head(q);
         n++;
     }
+    if (n) atomic_fetch_add_explicit(&q->superseded, (unsigned)n, memory_order_relaxed);
     return n;
+}
+
+unsigned awl_bufferqueue_superseded(struct awl_bufferqueue* q) {
+    return atomic_load_explicit(&q->superseded, memory_order_relaxed);
 }
 
 struct awl_bq_buffer* awl_bufferqueue_gethead(struct awl_bufferqueue* q, int timeout_ms) {

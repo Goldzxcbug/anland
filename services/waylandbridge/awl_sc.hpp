@@ -4,22 +4,35 @@
  * (ASurfaceControl_createFromWindow siblings, the device-verified shape):
  * the window Surface is the root of the SC tree and every wayland layer
  * (root surface, subsurfaces, popups, drag icon, cursor) is one sibling in
- * wl stacking order via setZOrder. The daemon never composites: every
- * layer's queue head is forged into an AHardwareBuffer (awl_ahb) and latched
- * with one ASurfaceTransaction per window per vsync — SurfaceFlinger/HWC does
- * the rest. Frame source = the same per-surface bufferqueue the GL renderer
- * drains.
+ * wl stacking order via setZOrder. Frame source = the same per-surface
+ * bufferqueue the GL renderer drains.
+ *
+ * Every layer SC runs in one of three modes, decided per latched frame:
+ *   SCANOUT  the client's dma-buf itself, forged into an AHardwareBuffer
+ *            (awl_ahb), is latched with setBuffer — zero copy, HWC plane.
+ *            Precondition: the frame's pitch is one the display HAL would
+ *            compute itself (awl_ahb_hwc_scanout_ok).
+ *   EGL      a client dma-buf HWC would refuse is sampled by our GLES
+ *            context (forged AHB → EGLImage texture, pitch irrelevant for
+ *            the GPU) into a platform-allocated swapchain buffer attached to
+ *            the SC — one GPU blit for THIS layer only, the rest of the
+ *            window stays zero-copy.
+ *   EGL_SHM  wl_shm content is uploaded straight from the client's pool
+ *            into a GL texture (damage rect only; the logic layer neither
+ *            copies nor queues shm — awl_surface_shm_begin/end) and blitted
+ *            like EGL.
  *
  * Ownership split (see awl_sc.cpp header):
  *   - event path (awl_sc_sync, called from window_dirty and attach): layer SC
  *     lifecycle — create when a surface enters the window's stack, retire
  *     (hide + reparent(NULL) + release) when it leaves, setZOrder = stack
  *     index. An SC lives exactly as long as its surface is in the tree.
- *   - render thread (one AChoreographer vsync loop for all windows): buffer
- *     state only — setBuffer + the geometry that depends on that buffer, never
+ *   - render thread (one AChoreographer vsync loop for all windows, owner of
+ *     the backend's GLES context): buffer state only — mode decision,
+ *     setBuffer / EGL blit + the geometry that depends on that buffer, never
  *     blocking on a client fence.
  *   - OnComplete/OnRelease callbacks (SF threads): self-contained contexts
- *     (frame_done + the element release chain).
+ *     (frame_done + the release chains of client elements and EGL targets).
  * API floor 31 (device contract): ≤31 calls are unguarded; setFrameTimeline
  * (33) is SDKINT-gated, setBufferWithRelease (36) is dlsym-probed. */
 #ifndef AWL_SC_HPP

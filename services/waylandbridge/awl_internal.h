@@ -18,8 +18,8 @@
 #include "awl_bufferqueue.h"
 #include "awl_log.h"   /* AWL_TAG "anland-wl" + LOGI/LOGE/LOGD (see awl_log.h) */
 
-/* Damage state of a surface since the shm converter last consumed it
- * (awl_surface.cd_state; NONE = calloc default) */
+/* Damage state of a surface since a composition backend last uploaded its
+ * wl_shm content (awl_surface.cd_state; NONE = calloc default) */
 enum {
     AWL_DMG_NONE = 0,
     AWL_DMG_RECT = 1,
@@ -108,6 +108,13 @@ struct awl_surface {
     bool acked;                      /* client has acked (set after the first configure) */
     uint32_t configure_serial;       /* serial of the most recent configure */
     bool mapped;                     /* first frame buffer committed */
+    bool window_live;                /* window_created went out for this id and
+                                      * window_destroyed is still owed. Decoupled
+                                      * from `role`: a client closes a window by
+                                      * destroying the xdg_toplevel (role → NONE)
+                                      * before the wl_surface — a role test at
+                                      * surface death never fires and the window
+                                      * table keeps a zombie (2026-09-17). */
     int32_t conf_w, conf_h;          /* most recent configure contents */
     int32_t pend_w, pend_h;          /* cached when resize precedes map (Android owns sizing entirely) */
     bool has_pending;
@@ -195,10 +202,11 @@ struct awl_surface {
 
     /* damage (wl_surface.damage/damage_buffer accumulated in pending —
      * surface-local px, bbox merge; moved to cur on the commit/latch-apply).
-     * cur_* = damage since the shm converter (awl_shmblit.c) last consumed
-     * it — dmabuf layers never read it (the GPU samples the memory in place):
-     *   NONE    nothing changed since the last copy
-     *   RECT    the bbox rect needs re-copying
+     * cur_* = damage since a backend last uploaded the wl_shm content
+     * (awl_surface_shm_begin/end) — dmabuf layers never read it (the GPU
+     * samples the memory in place):
+     *   NONE    nothing changed since the last upload
+     *   RECT    the bbox rect needs re-uploading
      *   FULL    a commit attached a buffer with NO damage — protocol
      *           default: whole surface (client gave no information)
      * Over-copy is always safe, under-copy never. All owned by ev_lock. */
@@ -211,16 +219,28 @@ struct awl_surface {
     bool dirty;                      /* awaiting render after commit */
 
     /* ---- frame stream (awl_bufferqueue.h) ----
-     * Every presented buffer state change of this surface becomes one queue
+     * Every presented dmabuf state change of this surface becomes one queue
      * element: dmabuf commits push the client's fd + acquire fence directly
-     * (commit path, awl_surface_apply_buffer); shm commits go through the
-     * shm→dmabuf converter (awl_shmblit.c), which pushes the converted frame
-     * at vsync cadence; attach(NULL) pushes a NULL marker. The renderer is
-     * the consumer (lock → drain → gethead → GL → unlock). wl_buffer.release
+     * (commit path, awl_surface_apply_buffer); attach(NULL) pushes a NULL
+     * marker, and so does the first shm commit after a dmabuf one (the
+     * consumer must stop showing the stale dmabuf head). The backend is the
+     * consumer (lock → drain → gethead → GL/SC → unlock). wl_buffer.release
      * / zwp_linux_buffer_release_v1 go out when the element leaves the queue
      * (bq_release_cb in awl_surface.c) — never from a "presented" hook. */
     struct awl_bufferqueue* q;
-    struct awl_shmblit* shm;         /* created on the first shm attach; NULL = never used shm */
+    int q_last_dmabuf;               /* the newest push was a dmabuf frame (ev_lock) */
+
+    /* ---- wl_shm frame source ----
+     * A wl_shm commit never enters the queue and is never copied here: the
+     * backend reads the client's pool at frame time (awl_surface_shm_begin/
+     * end, this ev_lock held across the upload — the damage rect only, into
+     * its own GPU texture) and wl_buffer.release goes out when that read is
+     * done. All ev_lock. */
+    int shm_live;                    /* the committed content is a shm buffer (cleared by attach(NULL) / a dmabuf attach) */
+    uint64_t shm_serial;             /* bumps on every commit that changed shm content (attach or damage); a consumer skips unchanged */
+    struct wl_resource* shm_res;     /* the shm wl_buffer whose release is owed (NULL = none / destroyed) */
+    int shm_release_pending;         /* wl_buffer.release for shm_res not sent yet */
+    struct wl_resource* shm_release_res;   /* zwp_linux_buffer_release_v1 of that commit (immediate_release once read; cleared by awl_surface_shm_release_gone) */
     atomic_int attached;             /* root only: an Android window is attached (renderer
                                       * alive). Commit-time drain is skipped while 0 so a
                                       * minimized window's client parks on buffer starvation
@@ -244,7 +264,7 @@ struct awl_surface {
 /* Buffer / release-object liveness lock (awl_surface.c): guards
  * awl_buffer.resource, awl_bufref.release_res, esync_gc — the words a
  * client-side destroy (dispatch thread) races against a release being sent
- * from the render or shm thread. Leaf lock: taken with nothing else held
+ * from a render thread. Leaf lock: taken with nothing else held
  * except a bufferqueue head lock (drain callback) or rwl/ev_lock (destroy
  * handlers); never take rwl/ev_lock inside it. */
 extern pthread_mutex_t g_bufref_lock;
@@ -253,15 +273,10 @@ void awl_buffer_unref(struct awl_buffer* b);
 
 /* Queue element cookie (awl_bq_buffer.user): what the release callback needs
  * to hand the frame back to whoever produced it. */
-enum { AWL_REF_DMABUF = 1, AWL_REF_SHM = 2 };
 struct awl_bufref {
-    int kind;
-    struct awl_buffer* b;                /* DMABUF: ref'd wrapper */
+    struct awl_buffer* b;                /* ref'd dmabuf wrapper */
     struct wl_resource* release_res;     /* zwp_linux_buffer_release_v1 of the commit (g_bufref_lock; NULL = none/destroyed) */
-    struct awl_shmblit* sb;              /* SHM: ref'd converter + slot index */
-    int slot;
 };
-struct awl_bufref* awl_bufref_shm(struct awl_shmblit* sb, int slot);   /* awl_surface.c */
 /* Discard an uncommitted/unpresented explicit-sync pair: close the fence,
  * immediate_release the object (no lock held by the caller). */
 void awl_surface_discard_sync(int acquire_fd, struct wl_resource* release_res);
@@ -269,41 +284,19 @@ void awl_surface_discard_sync(int acquire_fd, struct wl_resource* release_res);
 /* Commit-path glue (awl_surface.c). apply_buffer: the double-buffered buffer
  * state of `s` just became `res` (NULL = detach); acquire_fd (owned, moved)
  * and release_res (may be NULL) are the explicit-sync state of that cycle.
- * Pushes the frame (dmabuf) / hands it to the shm converter / pushes a NULL
- * marker. Caller holds s->ev_lock. commit_drain: the opportunistic
- * trylock+drain (throttle rule inside). schedule_render: root window dirty. */
+ * Pushes the frame (dmabuf) / records the shm source (shm) / pushes a NULL
+ * marker (detach). Caller holds s->ev_lock. shm_damaged: a commit without
+ * attach carried damage for a live shm source (caller holds ev_lock).
+ * commit_drain: the opportunistic trylock+drain (throttle rule inside).
+ * schedule_render: root window dirty. */
 void awl_surface_apply_buffer(struct awl_surface* s, struct wl_resource* res,
                               int acquire_fd, struct wl_resource* release_res);
+void awl_surface_shm_damaged_locked(struct awl_surface* s);
 void awl_surface_commit_drain(struct awl_surface* s);
 void awl_surface_schedule_render(struct awl_surface* s);
-
-/* awl_shmblit.c — per-surface shm→dmabuf converter (triple-buffered, damage
- * accumulating, one global blit thread ticking at the output refresh rate).
- * Refcounted: the surface holds one reference, every queued converted frame
- * holds another (slot_released gives the slot back). All *_locked entries
- * are called with the surface's ev_lock held. */
-struct awl_shmblit* awl_shmblit_create(struct awl_surface* s);
-void awl_shmblit_ref(struct awl_shmblit* sb);
-void awl_shmblit_unref(struct awl_shmblit* sb);
-/* surface dying: stop the blit thread touching the surface (waits for an
- * in-flight copy). Call with NO logic-layer lock held, before rwl.wr. */
-void awl_shmblit_detach(struct awl_shmblit* sb);
-/* attach committed: res = the new shm wl_buffer (NULL = detach), release_res =
- * its explicit-sync release object (immediate_release when we are done
- * reading it) */
-void awl_shmblit_attach_locked(struct awl_shmblit* sb, struct wl_resource* res,
-                               struct wl_resource* release_res);
-void awl_shmblit_damaged_locked(struct awl_shmblit* sb);   /* cd_state changed (any commit) */
-void awl_shmblit_buffer_gone_locked(struct awl_shmblit* sb, struct wl_resource* res);
-void awl_shmblit_release_gone_locked(struct awl_shmblit* sb, struct wl_resource* release_res);
-void awl_shmblit_slot_released(struct awl_shmblit* sb, int slot);   /* queue release callback */
-void awl_shmblit_shutdown(void);
-
-/* awl_dmaheap.c — CPU-writable dma-buf (kernel DMA heap uapi, no gralloc) */
-int   awl_dmaheap_alloc(size_t len);              /* dma-buf fd or -1 */
-void* awl_dmabuf_map(int fd, size_t len);
-void  awl_dmabuf_unmap(void* p, size_t len);
-int   awl_dmabuf_cpu_sync(int fd, int start, int write);   /* DMA_BUF_IOCTL_SYNC */
+/* The explicit-sync release object of the shm source died before delivery
+ * (awl_esync.c destroy handler, dispatch thread, no lock held). */
+void awl_surface_shm_release_gone(struct awl_surface* s, struct wl_resource* release_res);
 
 /* awl_esync.c — zwp_linux_explicit_synchronization_v1 v2 */
 void awl_esync_setup(void);

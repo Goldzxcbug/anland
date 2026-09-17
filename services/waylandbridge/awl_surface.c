@@ -6,15 +6,18 @@
  * must be thread safe: internally these are renderer requests with
  * built-in coalescing).
  *
- * Buffer hand-off (v3, awl_bufferqueue.h): the commit does not hand the
- * renderer a pointer to "the current buffer" any more — it pushes the frame
+ * Buffer hand-off (v3, awl_bufferqueue.h): a dmabuf commit does not hand
+ * the renderer a pointer to "the current buffer" — it pushes the frame
  * (dup'd dmabuf fd + acquire fence) into the surface's queue and the
  * renderer pulls the newest complete one. wl_buffer.release and the
  * explicit-sync release go out when a frame leaves the queue (bq_release_cb
  * below), from whichever thread drained it: the render thread at frame
  * time, or this dispatch thread right at commit (opportunistic trylock
  * drain — over-speed clients get their buffers back without waiting for
- * vsync). shm buffers are converted to dmabuf first (awl_shmblit.c).
+ * vsync). A wl_shm commit is not queued and not copied: it only records the
+ * source + accumulates damage; the backend reads the client's pool in place
+ * at frame time (awl_surface_shm_begin/end, section at the end) and the
+ * release goes out when that read is done.
  *
  * Locks: list topology = g_srv.rwl (dispatch thread wr, others rd);
  *        surface fields/sends = s->ev_lock (recursive); order rwl → ev_lock
@@ -64,15 +67,6 @@ void awl_buffer_unref(struct awl_buffer* b) {
     free(b);
 }
 
-struct awl_bufref* awl_bufref_shm(struct awl_shmblit* sb, int slot) {
-    struct awl_bufref* r = calloc(1, sizeof(*r));
-    if (!r) return NULL;
-    r->kind = AWL_REF_SHM;
-    r->sb = sb;
-    r->slot = slot;
-    return r;
-}
-
 void awl_surface_discard_sync(int acquire_fd, struct wl_resource* release_res) {
     if (acquire_fd >= 0) close(acquire_fd);
     if (release_res) {
@@ -92,12 +86,6 @@ static void bq_release_cb(struct awl_bq_buffer* e, void* ctx) {
     struct awl_bufref* r = e->user;
     (void)ctx;
     if (!r) return;   /* NULL-buffer marker */
-    if (r->kind == AWL_REF_SHM) {
-        awl_shmblit_slot_released(r->sb, r->slot);
-        awl_shmblit_unref(r->sb);
-        free(r);
-        return;
-    }
     struct wl_client* c = NULL;
     pthread_mutex_lock(&g_bufref_lock);
     if (r->release_res) {
@@ -121,38 +109,82 @@ static void bq_release_cb(struct awl_bq_buffer* e, void* ctx) {
     free(r);
 }
 
+/* "We are done reading the shm source": wl_buffer.release for the buffer a
+ * release is owed for + immediate_release of that commit's explicit-sync
+ * object. Fired when a backend finished its upload, when the client
+ * superseded / detached the buffer before any backend read it, and at
+ * surface death. Caller holds ev_lock (shm_res is cleared under it by
+ * awl_surface_buffer_gone, so a non-NULL value is a live resource). */
+static void shm_release_locked(struct awl_surface* s) {
+    if (s->shm_release_pending && s->shm_res) {
+        wl_buffer_send_release(s->shm_res);
+        wl_client_flush(wl_resource_get_client(s->shm_res));
+    }
+    s->shm_release_pending = 0;
+    if (s->shm_release_res) {
+        struct wl_resource* rr = s->shm_release_res;
+        s->shm_release_res = NULL;
+        awl_surface_discard_sync(-1, rr);
+    }
+}
+
+/* NULL marker into the frame queue: "no dmabuf frame from here on" (detach,
+ * or a shm commit after dmabuf ones). Unmapping must not be lost: a full
+ * ring is flushed (bounded by one frame) and marked. Caller holds ev_lock. */
+static void q_push_null(struct awl_surface* s) {
+    struct awl_bq_buffer e;
+    memset(&e, 0, sizeof(e));
+    e.dmabuf_fd = e.acquire_fd = e.release_fd = -1;
+    if (!awl_bufferqueue_push(s->q, &e)) {
+        awl_bufferqueue_lock(s->q);
+        awl_bufferqueue_flush(s->q);
+        awl_bufferqueue_push(s->q, &e);
+        awl_bufferqueue_unlock(s->q);
+    }
+    s->q_last_dmabuf = 0;
+}
+
 /* The double-buffered buffer state just became `res` (caller holds ev_lock).
  * dmabuf → one queue element (acquire = the client's explicit fence, else a
  * sync_file exported from the dma-buf's current write fences, else the
- * queue polls the dma-buf itself); shm → the converter; NULL → NULL marker.
+ * queue polls the dma-buf itself); shm → the source is recorded (+ a NULL
+ * marker if the queue's head is a dmabuf frame); NULL → NULL marker.
  * A push into a full queue hands the buffer straight back (frame dropped —
  * the only way a client can get here is by outrunning a stalled/minimized
  * window with more buffers than the ring holds). */
 void awl_surface_apply_buffer(struct awl_surface* s, struct wl_resource* res,
                               int acquire_fd, struct wl_resource* release_res) {
     if (!res) {
-        if (s->shm) awl_shmblit_attach_locked(s->shm, NULL, NULL);
         awl_surface_discard_sync(acquire_fd, release_res);   /* commit_check already refused these; defensive */
-        struct awl_bq_buffer e;
-        memset(&e, 0, sizeof(e));
-        e.dmabuf_fd = e.acquire_fd = e.release_fd = -1;
-        if (!awl_bufferqueue_push(s->q, &e)) {
-            /* ring full: unmapping must not be lost — wait for the renderer
-             * (bounded by one frame), drop everything, then mark */
-            awl_bufferqueue_lock(s->q);
-            awl_bufferqueue_flush(s->q);
-            awl_bufferqueue_push(s->q, &e);
-            awl_bufferqueue_unlock(s->q);
-        }
+        s->shm_live = 0;
+        shm_release_locked(s);   /* an unread shm source goes back with the unmap */
+        s->shm_res = NULL;
+        q_push_null(s);
         return;
     }
     if (wl_shm_buffer_get(res)) {
         if (acquire_fd >= 0) close(acquire_fd);   /* unsupported_buffer was posted by commit_check */
-        if (!s->shm) s->shm = awl_shmblit_create(s);
-        if (s->shm) awl_shmblit_attach_locked(s->shm, res, release_res);
-        else awl_surface_discard_sync(-1, release_res);
+        if (s->shm_res != res) {
+            shm_release_locked(s);   /* superseded before any backend read it (detached window) */
+        } else if (s->shm_release_res && s->shm_release_res != release_res) {
+            /* same buffer re-committed before it was read: one wl_buffer.release
+             * covers both cycles, the older release object is done now */
+            struct wl_resource* rr = s->shm_release_res;
+            s->shm_release_res = NULL;
+            awl_surface_discard_sync(-1, rr);
+        }
+        s->shm_res = res;
+        s->shm_release_pending = 1;
+        s->shm_release_res = release_res;
+        s->shm_live = 1;
+        s->shm_serial++;
+        if (s->q_last_dmabuf) q_push_null(s);   /* the consumer must drop the dmabuf head */
         return;
     }
+    /* dmabuf: a shm source (if any) is superseded */
+    s->shm_live = 0;
+    shm_release_locked(s);
+    s->shm_res = NULL;
     struct awl_buffer* b = wl_resource_get_user_data(res);
     if (!b || b->dmabuf_fd < 0) {
         awl_surface_discard_sync(acquire_fd, release_res);
@@ -174,7 +206,6 @@ void awl_surface_apply_buffer(struct awl_surface* s, struct wl_resource* res,
     e.stride = b->stride;
     e.format = b->drm_format;
     e.modifier = b->modifier;
-    r->kind = AWL_REF_DMABUF;
     r->b = awl_buffer_ref(b);
     r->release_res = release_res;
     if (release_res) awl_esync_bind_ref(release_res, r);
@@ -184,7 +215,19 @@ void awl_surface_apply_buffer(struct awl_surface* s, struct wl_resource* res,
         bq_release_cb(&e, NULL);
         if (e.dmabuf_fd >= 0) close(e.dmabuf_fd);
         if (e.acquire_fd >= 0) close(e.acquire_fd);
+    } else {
+        s->q_last_dmabuf = 1;
     }
+}
+
+void awl_surface_shm_damaged_locked(struct awl_surface* s) {
+    if (s->shm_live) s->shm_serial++;   /* in-place redraw: the consumer re-uploads the rect */
+}
+
+void awl_surface_shm_release_gone(struct awl_surface* s, struct wl_resource* release_res) {
+    pthread_mutex_lock(&s->ev_lock);
+    if (s->shm_release_res == release_res) s->shm_release_res = NULL;
+    pthread_mutex_unlock(&s->ev_lock);
 }
 
 /* Opportunistic drain at commit time (dispatch thread / shm converter, no
@@ -277,16 +320,17 @@ uid_t awl_window_client_uid(uint64_t id) {
  * awl_dmabuf.c destroy handler): the client may destroy buffer + pool
  * without waiting for release (verified by relcross resize). Strip every
  * reference to it from each surface (pending/current/latched + the shm
- * converter's source refs), otherwise a later commit dereferences a
- * dangling resource. Queued frames are unaffected: a dmabuf element owns
- * its own fd dup + a wrapper reference, a converted shm frame owns its own
- * dma-buf. Runs on that client's dispatch thread. */
+ * source), otherwise a later commit dereferences a dangling resource.
+ * Queued dmabuf frames are unaffected (an element owns its own fd dup + a
+ * wrapper reference). A shm source's content persists in whatever a backend
+ * last uploaded (shm_live stays; kwin likewise keeps showing a destroyed
+ * shm buffer). Runs on that client's dispatch thread. */
 void awl_surface_buffer_gone(struct wl_resource* res) {
     pthread_rwlock_rdlock(&g_srv.rwl);
     struct awl_surface* s;
     wl_list_for_each(s, &g_srv.surfaces, link) {
         if (s->pending_buffer_res != res && s->current_buffer_res != res &&
-            s->latched_buffer_res != res && !s->shm)
+            s->latched_buffer_res != res && s->shm_res != res)
             continue;   /* unrelated window: skip taking ev_lock (commit unaffected) */
         pthread_mutex_lock(&s->ev_lock);
         if (s->pending_buffer_res == res) s->pending_buffer_res = NULL;
@@ -298,7 +342,17 @@ void awl_surface_buffer_gone(struct wl_resource* res) {
             if (s->latched_acquire_fd >= 0) { close(s->latched_acquire_fd); s->latched_acquire_fd = -1; }
             /* the latched release object stays: it is delivered (immediate) when the latch resolves */
         }
-        if (s->shm) awl_shmblit_buffer_gone_locked(s->shm, res);
+        if (s->shm_res == res) {
+            /* nothing left to release to; the commit's release object is
+             * delivered now (its buffer cannot be read any more) */
+            s->shm_res = NULL;
+            s->shm_release_pending = 0;
+            if (s->shm_release_res) {
+                struct wl_resource* rr = s->shm_release_res;
+                s->shm_release_res = NULL;
+                awl_surface_discard_sync(-1, rr);
+            }
+        }
         pthread_mutex_unlock(&s->ev_lock);
     }
     pthread_rwlock_unlock(&g_srv.rwl);
@@ -386,20 +440,18 @@ static void surface_destroy_impl(struct wl_resource* res) {
     LOGI("surface %llu destroyed (mapped=%d)",
             (unsigned long long)s->id, s->mapped);
 
-    /* shm converter first: after this the blit thread never touches s (it
-     * waits out an in-flight copy; must run with no logic lock held — the
-     * thread takes rwl.rd to dirty the root) */
-    if (s->shm) awl_shmblit_detach(s->shm);
-
-    /* renderer detach (joins the render thread) — its snapshots hold rd;
-     * only once they finish naturally can the wrlock be acquired → nothing
-     * in flight, teardown is safe. A cursor-role surface never owned a
-     * window (it may carry mapped=1 from a buffer committed before
-     * set_cursor). */
-    if (s->mapped &&
-        (s->role == AWL_ROLE_TOPLEVEL || s->role == AWL_ROLE_XWAYLAND) &&
-        g_srv.cbs.window_destroyed)
+    /* The window this surface created (if the role object did not already
+     * take it down — awl_xdg.c toplevel_res_destroy): backend detach (joins
+     * the GL render thread / retires the SCs — its snapshots hold rd; only
+     * once they finish naturally can the wrlock be acquired → nothing in
+     * flight, teardown is safe) + the Activity CLOSE + the lifecycle event.
+     * Keyed on window_live, never on the role: by the time a client destroys
+     * the wl_surface its xdg_toplevel is usually gone (role NONE) — and a
+     * cursor/subsurface never had a window (mapped=1 says nothing). */
+    if (s->window_live && g_srv.cbs.window_destroyed) {
+        s->window_live = 0;
         g_srv.cbs.window_destroyed(g_srv.cbs.user, s->id);
+    }
 
     /* Frame stream: hand every queued frame back (release events go out
      * here, on the dispatch thread). Waits for a render thread that still
@@ -413,6 +465,14 @@ static void surface_destroy_impl(struct wl_resource* res) {
         awl_bufferqueue_flush(s->q);
         awl_bufferqueue_unlock(s->q);
     }
+    /* shm source: the release still owed for its buffer goes out with the
+     * surface (the client outlives it; kwin drops the buffer reference at
+     * surface death). A backend mid-upload holds ev_lock — wait it out. */
+    pthread_mutex_lock(&s->ev_lock);
+    s->shm_live = 0;
+    shm_release_locked(s);
+    s->shm_res = NULL;
+    pthread_mutex_unlock(&s->ev_lock);
 
     pthread_rwlock_wrlock(&g_srv.rwl);
     /* DnD state references (drag origin/target/icon layer died →
@@ -489,13 +549,10 @@ static void surface_destroy_impl(struct wl_resource* res) {
     wl_list_remove(&s->link);
     struct awl_bufferqueue* q = s->q;   /* renderer may still hold its own ref: unref after unlink */
     s->q = NULL;
-    struct awl_shmblit* sb = s->shm;
-    s->shm = NULL;
     pthread_mutex_destroy(&s->ev_lock);
     free(s);
     pthread_rwlock_unlock(&g_srv.rwl);
     awl_bufferqueue_unref(q);
-    awl_shmblit_unref(sb);
     if (latched_drop)
         wl_buffer_send_release(latched_drop);
     if (sub_dirty && g_srv.cbs.window_dirty)   /* child layer gone → root window redraw */
@@ -731,8 +788,8 @@ static void surface_commit(struct wl_client* client, struct wl_resource* res) {
     awl_damage_merge_pending(s, attached);
     if (attached)
         awl_surface_apply_buffer(s, s->current_buffer_res, acquire_fd, release_res);
-    else if (s->shm && s->cd_state != AWL_DMG_NONE)
-        awl_shmblit_damaged_locked(s->shm);   /* in-place redraw: re-copy at the next tick */
+    else if (s->cd_state != AWL_DMG_NONE)
+        awl_surface_shm_damaged_locked(s);   /* in-place redraw of a shm source: re-upload the rect */
     /* Extract the first-map window size inside the lock: window_created
      * below is a callback outside the lock, during which shm_buffer_gone
      * may strip current to NULL (dangling dereference) */
@@ -800,6 +857,7 @@ static void surface_commit(struct wl_client* client, struct wl_resource* res) {
          * exactly the old loop thread, satisfying the migration contract) */
         awl_client_maybe_migrate(client);
         if (s->role == AWL_ROLE_TOPLEVEL || s->role == AWL_ROLE_XWAYLAND) {
+            s->window_live = 1;   /* window_destroyed owed: role death or surface death, whichever first */
             if (g_srv.cbs.window_created)
                 g_srv.cbs.window_created(g_srv.cbs.user, s->id,
                                          map_bw, map_bh, s->title, 0);
@@ -927,6 +985,75 @@ void awl_surface_get_view_xform(uint64_t id, awl_view_xform_t* out) {
         pthread_mutex_unlock(&s->ev_lock);
     }
     pthread_rwlock_unlock(&g_srv.rwl);
+}
+
+/* ---- wl_shm frame source (awl.h) ----
+ * begin resolves the surface (rwl.rd) and takes its ev_lock; both stay held
+ * until end so the buffer resource, the pool mapping and the damage words
+ * are stable across the upload. That is the same rwl.rd every render-side
+ * snapshot holds (writers = create/destroy wait a copy's worth) and the
+ * ev_lock this surface's commit takes (its client waits — kwin copies shm
+ * synchronously at commit time on the main thread; here it is the backend's
+ * frame time instead). */
+static uint32_t shm_fourcc(uint32_t wl_fmt) {
+    /* wl_shm.format: ARGB8888 = 0 and XRGB8888 = 1 are the only codes that
+     * differ from the DRM fourcc; every other value IS the fourcc */
+    if (wl_fmt == WL_SHM_FORMAT_ARGB8888) return AWL_FORMAT_ARGB8888;
+    if (wl_fmt == WL_SHM_FORMAT_XRGB8888) return AWL_FORMAT_XRGB8888;
+    return wl_fmt;
+}
+
+int awl_surface_shm_begin(uint64_t id, uint64_t have_serial, awl_shm_frame_t* f) {
+    pthread_rwlock_rdlock(&g_srv.rwl);
+    struct awl_surface* s = awl_surface_by_id(id);
+    if (!s) {
+        pthread_rwlock_unlock(&g_srv.rwl);
+        return 0;
+    }
+    pthread_mutex_lock(&s->ev_lock);
+    if (!s->shm_live) {
+        pthread_mutex_unlock(&s->ev_lock);
+        pthread_rwlock_unlock(&g_srv.rwl);
+        return 0;
+    }
+    struct wl_shm_buffer* shm =
+        s->current_buffer_res ? wl_shm_buffer_get(s->current_buffer_res) : NULL;
+    if (!shm || s->shm_serial == have_serial) {   /* nothing new / buffer already destroyed */
+        pthread_mutex_unlock(&s->ev_lock);
+        pthread_rwlock_unlock(&g_srv.rwl);
+        return 2;
+    }
+    wl_shm_buffer_begin_access(shm);
+    f->width = (uint32_t)wl_shm_buffer_get_width(shm);
+    f->height = (uint32_t)wl_shm_buffer_get_height(shm);
+    f->stride = (uint32_t)wl_shm_buffer_get_stride(shm);
+    f->format = shm_fourcc(wl_shm_buffer_get_format(shm));
+    f->pixels = wl_shm_buffer_get_data(shm);
+    f->dmg_full = s->cd_state == AWL_DMG_FULL;
+    if (s->cd_state == AWL_DMG_RECT) {
+        f->dmg_x = s->cur_damage_x; f->dmg_y = s->cur_damage_y;
+        f->dmg_w = s->cur_damage_w; f->dmg_h = s->cur_damage_h;
+    } else {
+        f->dmg_x = f->dmg_y = f->dmg_w = f->dmg_h = 0;
+    }
+    f->serial = s->shm_serial;
+    f->priv = s;
+    return 1;   /* rwl.rd + ev_lock held until end */
+}
+
+void awl_surface_shm_end(awl_shm_frame_t* f, int consumed) {
+    struct awl_surface* s = f->priv;
+    struct wl_shm_buffer* shm =
+        s->current_buffer_res ? wl_shm_buffer_get(s->current_buffer_res) : NULL;
+    if (shm) wl_shm_buffer_end_access(shm);   /* unchanged since begin: both locks held */
+    if (consumed) {
+        s->cd_state = AWL_DMG_NONE;   /* the consumer holds the pixels now */
+        shm_release_locked(s);        /* wl_buffer.release: done reading */
+    }
+    pthread_mutex_unlock(&s->ev_lock);
+    pthread_rwlock_unlock(&g_srv.rwl);
+    f->priv = NULL;
+    f->pixels = NULL;
 }
 
 /* Render thread sends directly (no longer marshaled through the event

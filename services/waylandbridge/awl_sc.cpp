@@ -4,16 +4,35 @@
  * createFromWindow siblings — the device-verified shape): the window Surface
  * itself is the root of the layer tree and every wayland layer (root surface,
  * subsurfaces, popups, drag icon, cursor) is one sibling; wl stacking order is
- * pure setZOrder order over the siblings. The daemon never composites: every
- * layer's queue head is forged into an AHardwareBuffer (awl_ahb) and latched
- * with one ASurfaceTransaction per window per vsync — SurfaceFlinger/HWC does
- * the rest. Frame source = the same per-surface bufferqueue the GL renderer
- * drains.
+ * pure setZOrder order over the siblings. SurfaceFlinger/HWC composites the
+ * siblings; the daemon composites nothing.
+ *
+ * Every layer runs in one of three modes, decided per latched frame:
+ *   SCANOUT  the client's dma-buf itself, forged into an AHardwareBuffer
+ *            (awl_ahb), is latched with setBuffer — zero copy, HWC plane.
+ *   EGL      the client's dma-buf is sampled by this backend's GLES context
+ *            (forged AHB → EGLImage texture; the GPU does not care about the
+ *            pitch) into a platform-allocated swapchain buffer attached to
+ *            the SC — one GPU blit for THIS layer only.
+ *   EGL_SHM  wl_shm content: the client's pool is uploaded straight into a
+ *            GL texture (damage rect only, awl_surface_shm_begin/end — the
+ *            logic layer neither copies nor queues shm) and blitted into the
+ *            swapchain buffer like EGL.
+ *
+ * HWC scan-out precondition (QCOM SDM, source + device 2026-09-17): the
+ * display HAL rebuilds a layer buffer's plane layout from its aligned width
+ * through gralloc's own stride rule and gives THAT pitch to DRM — a buffer
+ * whose real pitch is not a fixed point of the rule (e.g. 1024 px, which
+ * gralloc pads to 1280) fails ADDFB2 and its plane shows nothing, while GPU
+ * composition (and screencap) render it fine. SCANOUT is therefore gated by
+ * awl_ahb_hwc_scanout_ok; everything else goes through a platform-allocated
+ * target (gralloc picks the layout — trivially valid for HWC and for SF's
+ * own GPU fallback).
  *
  * Two owners, one lock (sc_window::m):
  *
  *   event path (awl_sc_sync, from window_dirty on the client's dispatch /
- *   input / shm threads, and from attach): owns the LAYER SC LIFECYCLE. It
+ *   input threads, and from attach): owns the LAYER SC LIFECYCLE. It
  *   snapshots the logic layer's stack (get_layers + cursor_layer — the same
  *   kwin below→surface→above traversal the hit-test uses), creates an SC for
  *   every layer that entered the stack, retires the SC of every layer that
@@ -21,18 +40,32 @@
  *   SC lives exactly as long as its surface is part of an attached window's
  *   tree — created the moment get_subsurface/get_popup/set_cursor links it,
  *   gone the moment the surface/role/link dies — never a frame later, never
- *   from the render thread.
+ *   from the render thread. It never touches GL: GL objects a retired layer
+ *   owned are handed to the render thread (g_gc).
  *
- *   render thread (choreographer vsync loop, one for all windows): owns only
- *   BUFFER STATE. Per layer: queue lock → drain → tryhead (never waits: an
- *   unsignaled acquire fence leaves the previous buffer on screen and the
- *   layer is re-checked next vsync — one client's GPU must not stall every
- *   window) → arm → unlock; a NEW element forges/looks up its AHB and latches
- *   via setBuffer(sc, ahb, -1). The layer geometry (position/scale/crop/
- *   transform/opacity) is applied in the SAME transaction as the buffer: it
- *   is a function of the latched buffer's dimensions and wl_surface.commit is
- *   atomic — buffer and geometry of one commit must land in one SF frame,
- *   which is why geometry is not pushed from the event path.
+ *   render thread (choreographer vsync loop, one for all windows, owner of
+ *   the backend's GLES context): owns only BUFFER STATE. Per layer: queue
+ *   lock → drain → tryhead (never waits: an unsignaled acquire fence leaves
+ *   the previous buffer on screen and the layer is re-checked next vsync —
+ *   one client's GPU must not stall every window) → arm → unlock; a NEW
+ *   frame is latched in its mode. No dmabuf frame → the shm source is asked.
+ *   The layer geometry (position/scale/crop/transform/opacity) is applied in
+ *   the SAME transaction as the buffer: it is a function of the latched
+ *   buffer's dimensions and wl_surface.commit is atomic — buffer and
+ *   geometry of one commit must land in one SF frame.
+ *
+ * Pacing (measured against the GL path with vkmark, 2026-09-17):
+ *   - frame_done goes out at the vsync TICK for every visible layer, from
+ *     the render thread — not from SF's OnComplete (one vsync later: a
+ *     frame-callback-paced client then ran at 29 fps) and not at the off-tick
+ *     apply (a callback per vsync is the contract).
+ *   - a commit wakes the render thread for one off-tick pass per window per
+ *     interval, so a paced client's frame reaches SF's next composition
+ *     instead of waiting for our tick (GL-path latency parity).
+ *   - a client that keeps running ahead of the vsync (mailbox/immediate) is
+ *     copied (EGL mode) instead of scanned out: zero-copy would leave it
+ *     with no free buffer (SF holds three, the queue head a fourth) and one
+ *     frame per vsync (123 fps vs 1300 copying). See sc_rlayer::overspeed.
  *
  * Layer removal contract (NDK surface_control.h): ASurfaceControl_release
  * only drops our reference — "the surface and its children may remain on
@@ -43,19 +76,25 @@
  * layer therefore leaves through hide + reparent(NULL) in a transaction, and
  * the reference is dropped only after that transaction is applied.
  *
- * Release chain: the element latched on an SC is kept referenced until SF is
- * done with it. On 36+ (dlsym) setBufferWithRelease gives a per-buffer
- * OnRelease callback carrying the release fence → awl_bufferqueue_put(elem,
- * fence) → the existing bq_release_cb (esync fenced_release / implicit
- * dma-buf reservation / wl_buffer.release). On 29..35 the transaction's
- * OnComplete stats provide the PREVIOUS buffer's release fence per SC: each
- * setBuffer(B2 over B1) parks B1 in the transaction context and the callback
- * puts it with the fence SF reported. The context holds only acquired
- * ASurfaceControls + queue-referenced elements + surface ids — no window
- * pointers, a detached window cannot dangle it. */
+ * Release chains — whatever is latched on an SC stays referenced until SF is
+ * done with it:
+ *   SCANOUT: the queue element. 36+ (dlsym) setBufferWithRelease gives a
+ *   per-buffer OnRelease carrying the release fence → awl_bufferqueue_put
+ *   (elem, fence) → bq_release_cb (esync fenced_release / implicit dma-buf
+ *   reservation / wl_buffer.release). 29..35: the transaction's OnComplete
+ *   stats give the PREVIOUS buffer's release fence per SC — each setBuffer
+ *   (B2 over B1) parks B1 in the transaction context.
+ *   EGL/EGL_SHM: the swapchain slot, same two mechanisms (slot goes back to
+ *   its pool with SF's fence, GPU-waited before it is drawn into again). The
+ *   source element of an EGL frame is put with the blit's native fence right
+ *   away — the client gets its buffer back as soon as the GPU read it.
+ * Contexts hold only acquired ASurfaceControls, queue-referenced elements,
+ * shared_ptrs to pools and surface ids — no window pointers, a detached
+ * window cannot dangle them. */
 #include "awl_sc.hpp"
 #include "awl.h"
 #include "awl_ahb.hpp"
+#include "awl_gl.hpp"
 #include "awl_geom.h"
 #include "awl_bufferqueue.h"
 
@@ -68,12 +107,14 @@
 #include <android/surface_control.h>
 #include <dlfcn.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <math.h>
 #include <sched.h>
 #include <string.h>
 #include <unistd.h>
 
 #include <atomic>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -83,8 +124,9 @@
 #define AWL_TAG "anland-sc"
 #include "awl_log.h"
 
-/* SC buffers need GPU_SAMPLED_IMAGE (SF may composite them) + COMPOSER_OVERLAY
- * (HWC candidate; forged handle bakes the usage into its ints). */
+/* SCANOUT buffers need GPU_SAMPLED_IMAGE (SF may composite them; EGL-mode
+ * sources are sampled by us) + COMPOSER_OVERLAY (HWC candidate; the forged
+ * handle bakes the usage into its ints). */
 #define AWL_SC_USAGE (AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE | \
                       AHARDWAREBUFFER_USAGE_COMPOSER_OVERLAY)
 
@@ -105,7 +147,7 @@ static const int32_t k_wl_to_android_xform[8] = {
 
 /* Viewport source region (buffer-normalized u0,v0,su,sv) → layer-space crop
  * rect, normalized. Derived as the inverse of the GL sample matrix
- * (k_root_xform: buffer_uv = M · display_q → the region's display-space
+ * (awl_gl_xform: buffer_uv = M · display_q → the region's display-space
  * preimage is Mᵀ·region — every case is an axis permutation/mirror). */
 static void sample_crop_rect(int t, double u0, double v0, double su, double sv,
                              double* x0, double* y0, double* x1, double* y1) {
@@ -146,40 +188,158 @@ static void api_init(void) {
     LOGI("SC backend: sdk=%d", g_api.sdk);
 }
 
+/* ---------------- GL garbage (render-thread destruction) ----------------
+ * GL objects orphaned off the render thread — a layer retired on the event
+ * path, a swapchain whose last reference dropped on an SF callback thread —
+ * are destroyed here, on the render thread with its context current. */
+static std::mutex g_gc_lock;
+static std::vector<std::function<void()>> g_gc;
+
+static void gc_push(std::function<void()> f) {
+    std::lock_guard<std::mutex> lk(g_gc_lock);
+    g_gc.push_back(std::move(f));
+}
+
+static void gc_run(void) {
+    std::vector<std::function<void()>> v;
+    {
+        std::lock_guard<std::mutex> lk(g_gc_lock);
+        v.swap(g_gc);
+    }
+    for (auto& f : v) f();
+}
+
+/* ---------------- EGL-mode target swapchain ----------------
+ * Platform-allocated buffers (gralloc picks the layout) each imported as an
+ * EGLImage texture = the blit's FBO color attachment. Shared between the
+ * layer record and the release contexts SF fires for its buffers; the last
+ * reference may drop on an SF thread, so GL handles go through g_gc. */
+struct sc_egl_pool {
+    /* SF's pipeline holds up to three of these at once — the one on screen,
+     * the one latched for the next present, and the one whose release fence
+     * it only reports one frame after replacement — plus the slot being
+     * rendered into here. Three slots skipped every other frame. */
+    static constexpr int SLOTS = 4;
+    struct slot {
+        AHardwareBuffer* ahb = nullptr;
+        awl_gl_tex tex;
+        bool queued = false;          /* latched on the SC: SF owns it until its release */
+        int release_fd = -1;          /* SF's release fence of the last use (GPU-waited before reuse) */
+    } s[SLOTS];
+    uint32_t w = 0, h = 0;
+    std::mutex m;                     /* slot state: render thread ↔ SF callback threads */
+
+    ~sc_egl_pool() {
+        for (auto& sl : s) {
+            if (sl.release_fd >= 0) close(sl.release_fd);
+            awl_gl_tex t = sl.tex;
+            AHardwareBuffer* a = sl.ahb;
+            if (t.texture || t.image != EGL_NO_IMAGE_KHR || a)
+                gc_push([t, a]() mutable {
+                    awl_gl_tex_release(&t);
+                    if (a) AHardwareBuffer_release(a);
+                });
+        }
+    }
+    /* SF dropped this slot's buffer; fence = when its reads end (-1 = already) */
+    void release(int idx, int fence) {
+        std::lock_guard<std::mutex> lk(m);
+        slot& sl = s[idx];
+        if (sl.release_fd >= 0) close(sl.release_fd);
+        sl.release_fd = fence >= 0 ? fcntl(fence, F_DUPFD_CLOEXEC, 0) : -1;
+        sl.queued = false;
+    }
+    /* a slot SF does not own (-1 = none: SF is two frames behind, skip this
+     * vsync); its pending release fence is handed out for a GPU-side wait */
+    int acquire(int* fence_out) {
+        std::lock_guard<std::mutex> lk(m);
+        for (int i = 0; i < SLOTS; i++) {
+            if (s[i].queued) continue;
+            *fence_out = s[i].release_fd;
+            s[i].release_fd = -1;
+            return i;
+        }
+        *fence_out = -1;
+        return -1;
+    }
+    void mark_queued(int idx) {
+        std::lock_guard<std::mutex> lk(m);
+        s[idx].queued = true;
+    }
+};
+
+/* render thread, context current */
+static std::shared_ptr<sc_egl_pool> pool_create(uint32_t w, uint32_t h) {
+    auto p = std::make_shared<sc_egl_pool>();
+    p->w = w;
+    p->h = h;
+    for (auto& sl : p->s) {
+        AHardwareBuffer_Desc d = {};
+        d.width = w;
+        d.height = h;
+        d.layers = 1;
+        d.format = AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM;   /* GL renders RGBA; SF/HWC scan it out */
+        d.usage = AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT |
+                  AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE |
+                  AHARDWAREBUFFER_USAGE_COMPOSER_OVERLAY;
+        if (AHardwareBuffer_allocate(&d, &sl.ahb) != 0 || !sl.ahb) {
+            LOGE("EGL-mode target %ux%u: AHardwareBuffer_allocate failed", w, h);
+            return nullptr;   /* destructor releases the rest */
+        }
+        if (!awl_gl_tex_import(sl.ahb, &sl.tex)) {
+            LOGE("EGL-mode target %ux%u: EGLImage import failed", w, h);
+            return nullptr;
+        }
+    }
+    return p;
+}
+
+/* 36+: OnRelease of a swapchain slot (SF thread). Context owns a pool ref. */
+struct sc_egl_ctx {
+    std::shared_ptr<sc_egl_pool> pool;
+    int slot;
+};
+static void sc_on_egl_release(void* context, int release_fence_fd) {
+    sc_egl_ctx* c = (sc_egl_ctx*)context;
+    c->pool->release(c->slot, release_fence_fd);
+    if (release_fence_fd >= 0) close(release_fence_fd);
+    delete c;
+}
+
 /* ---------------- transaction context (self-contained) ---------------- */
 
-struct sc_rel {                        /* stats mode: one retiring buffer */
+struct sc_rel {                        /* stats mode: one retiring buffer of an SC */
     ASurfaceControl* sc;               /* acquired (outlives window teardown) */
-    struct awl_bq_buffer* elem;        /* referenced element awaiting SF's fence */
+    struct awl_bq_buffer* elem;        /* SCANOUT: referenced element awaiting SF's fence */
+    std::shared_ptr<sc_egl_pool> pool; /* EGL*: swapchain slot */
+    int slot;
 };
 
 struct sc_txn {
     std::vector<sc_rel> retiring;      /* previous buffers of this txn's setBuffers */
-    std::vector<uint64_t> presented;   /* frame_done at real presentation */
 };
 
-/* OnComplete (SF thread): previous-buffer release fences + frame_done. The
- * context owns nothing but its vectors; elements are queue-referenced, SCs
- * acquired. */
+/* OnComplete (SF thread): previous-buffer release fences (29..35 stats
+ * mode). frame_done is NOT sent from here: SF's completion runs one vsync
+ * after our apply, and a client paced by wl_surface.frame (Mesa FIFO) would
+ * only manage one frame per two vsyncs (measured 29 fps at 60 Hz). The
+ * render thread sends frame_done at its vsync tick instead (kwin: frame
+ * callbacks go out at the compositor's repaint, not at scan-out). */
 static void sc_on_complete(void* context, ASurfaceTransactionStats* stats) {
     sc_txn* t = (sc_txn*)context;
     for (const sc_rel& r : t->retiring) {
         int fence = ASurfaceTransactionStats_getPreviousReleaseFenceFd(stats, r.sc);
-        if (fence >= 0) {
-            awl_bufferqueue_put(r.elem, fence);
-            close(fence);              /* put dup/merges, the returned fd is ours */
-        } else {
-            awl_bufferqueue_put(r.elem, -1);
-        }
+        if (r.elem) awl_bufferqueue_put(r.elem, fence);   /* put dup/merges */
+        if (r.pool) r.pool->release(r.slot, fence);
+        if (fence >= 0) close(fence);
         ASurfaceControl_release(r.sc);
     }
-    for (uint64_t sid : t->presented) awl_surface_presented(sid);
     delete t;
 }
 
-/* OnRelease (SF thread, 36+): this exact buffer is reusable — its element
- * goes back with SF's fence. Context = the element itself (the queue keeps
- * it alive until the put). */
+/* OnRelease (SF thread, 36+): this exact client buffer is reusable — its
+ * element goes back with SF's fence. Context = the element itself (the
+ * queue keeps it alive until the put). */
 static void sc_on_buffer_release(void* context, int release_fence_fd) {
     struct awl_bq_buffer* e = (struct awl_bq_buffer*)context;
     awl_bufferqueue_put(e, release_fence_fd);
@@ -188,16 +348,50 @@ static void sc_on_buffer_release(void* context, int release_fence_fd) {
 
 /* ---------------- per-layer record ---------------- */
 
+enum sc_mode { SC_MODE_NONE = 0, SC_MODE_SCANOUT, SC_MODE_EGL, SC_MODE_EGL_SHM };
+static const char* mode_name(sc_mode m) {
+    switch (m) {
+    case SC_MODE_SCANOUT: return "SCANOUT";
+    case SC_MODE_EGL:     return "EGL";
+    case SC_MODE_EGL_SHM: return "EGL_SHM";
+    default:              return "none";
+    }
+}
+
 struct sc_rlayer {
     uint64_t surface_id;
     ASurfaceControl* sc = nullptr;     /* created by the event-path sync */
     int64_t z = -1;                    /* stack index last pushed via setZOrder */
 
     /* buffer state (render thread; guarded by the window's m) */
-    struct awl_bq_buffer* current = nullptr;   /* element latched on the SC */
-    struct awl_ahb_cache* ahb = nullptr;       /* per-layer forge cache */
-    bool has_buffer = false;                   /* a buffer is latched+visible */
+    sc_mode mode = SC_MODE_NONE;       /* what the SC shows right now */
+    bool has_buffer = false;           /* a buffer is latched + visible */
+    struct awl_bq_buffer* current = nullptr;   /* SCANOUT: element latched (referenced) */
+    std::shared_ptr<sc_egl_pool> pool;         /* EGL*: target swapchain */
+    int egl_onscreen = -1;                     /* EGL*: pool slot latched on the SC */
+    uint64_t egl_seq = 0;                      /* EGL*: identity of the source rendered into it
+                                                * (element seq / shm serial) */
+    struct awl_ahb_cache* ahb = nullptr;       /* forge cache: SCANOUT handles / EGL source textures */
+    awl_gl_shm_tex shm;                        /* EGL_SHM: upload texture */
+    uint32_t bw = 0, bh = 0, bfmt = 0;         /* latched content: buffer dims + fourcc (geometry inputs) */
     unsigned stall = 0;                        /* consecutive vsyncs the head was incomplete */
+    unsigned skips = 0;                        /* EGL frames skipped for want of a free slot */
+
+    /* Client pacing (tick-sampled from the queue's superseded counter).
+     * A client that keeps committing faster than the vsync — mailbox /
+     * immediate present modes, benchmarks — cannot be scanned out zero-copy
+     * without starving itself: SF holds three of its buffers (latched, on
+     * screen, release reported one frame late) and the queue's newest head
+     * a fourth, which is every buffer a Mesa mailbox swapchain has; it then
+     * gets one back per vsync (measured: vkmark 123 fps here vs 1300 on the
+     * copying GL path). Such a layer is presented through an EGL-mode copy
+     * instead: SF holds our pool slots, the client's buffer goes back the
+     * moment the GPU read it. Paced clients (frame callbacks / FIFO — every
+     * browser and toolkit) never trip this and stay zero-copy. Hysteresis:
+     * ~¼ s of dropped frames to enter, 2 s of none to leave. */
+    unsigned sup_last = 0;                     /* queue superseded counter at the last tick */
+    unsigned fast_ticks = 0, slow_ticks = 0;   /* consecutive ticks with / without dropped frames */
+    bool overspeed = false;
     /* last applied geometry (skip unchanged) */
     bool geo_valid = false;
     int32_t gx = 0, gy = 0, gw = 0, gh = 0;
@@ -214,19 +408,38 @@ struct sc_window {
     std::mutex m;                      /* layers + teardown */
     std::map<uint64_t, std::unique_ptr<sc_rlayer>> layers;
     std::atomic<bool> dead{false};
-    std::atomic<bool> kick{false};     /* window_dirty: force a txn this frame */
+    std::atomic<bool> kick{false};     /* window_dirty since the last pass */
+    std::atomic<bool> applied_now{false};   /* an off-tick pass ran in this vsync interval */
     uint64_t frame_clock = 0;          /* AHB LRU clock */
 };
 
-/* ---------------- globals / threads ---------------- */
+/* ---------------- globals / threads ----------------
+ * Pacing: the vsync tick is the frame boundary — every attached window gets
+ * a pass, and every visible layer its frame_done, once per tick. A
+ * window_dirty between ticks (a commit) additionally wakes the render
+ * thread for ONE off-tick pass per window per interval, so a paced client's
+ * frame reaches SF at its next composition instead of waiting for our tick
+ * (the GL path renders on commit; without this the SC path added a frame
+ * of latency). Off-tick passes send no frame_done: a frame callback per
+ * vsync is the contract, and a buffer applied off-tick may still be
+ * superseded by the tick's before SF latches either. */
 
 static std::mutex g_map_lock;
 static std::map<uint64_t, std::shared_ptr<sc_window>> g_windows;
 
 static std::atomic<bool> g_running{false};
 static std::thread g_render_th;
-static ALooper* g_lo = nullptr;
+static std::atomic<ALooper*> g_lo{nullptr};
 static AChoreographer* g_ch = nullptr;
+
+/* the render thread's GLES context (EGL-mode layers); created on first need */
+static struct {
+    bool tried = false, ok = false;
+    EGLContext ctx = EGL_NO_CONTEXT;
+    EGLSurface pbuf = EGL_NO_SURFACE;
+    awl_gl_quad quad;
+    GLuint fbo = 0;
+} g_gl;
 
 static std::vector<std::shared_ptr<sc_window>> snapshot_windows(void) {
     std::vector<std::shared_ptr<sc_window>> v;
@@ -241,9 +454,47 @@ static std::shared_ptr<sc_window> find_window(uint64_t id) {
     return it == g_windows.end() ? nullptr : it->second;
 }
 
+/* ---------------- GL context (render thread) ---------------- */
+
+static bool gl_ensure(void) {
+    if (g_gl.tried) return g_gl.ok;
+    g_gl.tried = true;
+    if (!awl_gl_init()) return false;
+    g_gl.ctx = awl_gl_create_context();
+    if (g_gl.ctx == EGL_NO_CONTEXT) return false;
+    if (!awl_gl_make_current_offscreen(g_gl.ctx, &g_gl.pbuf)) {
+        eglDestroyContext(awl_gl_display(), g_gl.ctx);
+        g_gl.ctx = EGL_NO_CONTEXT;
+        return false;
+    }
+    if (!awl_gl_quad_create(&g_gl.quad)) return false;
+    glGenFramebuffers(1, &g_gl.fbo);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_BLEND);
+    glDisable(GL_SCISSOR_TEST);
+    g_gl.ok = true;
+    const char* glv = (const char*)glGetString(GL_VERSION);
+    LOGI("SC EGL-mode context up (%s)", glv ? glv : "?");
+    return true;
+}
+
+static void gl_teardown(void) {   /* render thread exit */
+    gc_run();
+    if (g_gl.ok) {
+        awl_gl_quad_destroy(&g_gl.quad);
+        glDeleteFramebuffers(1, &g_gl.fbo);
+    }
+    if (g_gl.ctx != EGL_NO_CONTEXT) {
+        eglMakeCurrent(awl_gl_display(), EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        if (g_gl.pbuf != EGL_NO_SURFACE) eglDestroySurface(awl_gl_display(), g_gl.pbuf);
+        eglDestroyContext(awl_gl_display(), g_gl.ctx);
+    }
+    g_gl = {};
+}
+
 /* ---------------- layer SC lifecycle (event path) ----------------
  * Everything below runs with the window lock held and batches into one
- * transaction: retire + create + z. */
+ * transaction: retire + create + z. Never touches GL. */
 
 struct sc_sync_txn {
     ASurfaceTransaction* txn = nullptr;
@@ -275,32 +526,54 @@ struct sc_sync_txn {
     }
 };
 
+/* The SC's buffer is about to be replaced or hidden: park what it shows for
+ * the release SF reports with THIS transaction's stats (29..35; ctx = the
+ * transaction's context). In 36-mode every latched buffer already carries
+ * its own OnRelease context — just forget it. */
+static void latched_forget_locked(sc_txn* ctx, sc_rlayer* L) {
+    if (ctx && L->sc && !g_api.set_buffer_with_release) {
+        if (L->current) {
+            ASurfaceControl_acquire(L->sc);
+            ctx->retiring.push_back({ L->sc, L->current, nullptr, -1 });
+        }
+        if (L->egl_onscreen >= 0 && L->pool) {
+            ASurfaceControl_acquire(L->sc);
+            ctx->retiring.push_back({ L->sc, nullptr, L->pool, L->egl_onscreen });
+        }
+    } else if (!L->sc && L->current && !g_api.set_buffer_with_release) {
+        awl_bufferqueue_put(L->current, -1);   /* never latched anywhere */
+    }
+    L->current = nullptr;
+    L->egl_onscreen = -1;
+}
+
 /* The layer left the window's tree: hide + reparent(NULL) through the
  * transaction (see the file header for why release alone is not removal),
- * hand back / park the latched element, drop the forge cache. Stats mode:
- * the element retires with THIS transaction's stats; 36-mode: its reference
- * belongs to its OnRelease context — SF fires it when the destroyed layer
- * drops the buffer. */
+ * park the latched buffer, hand GL-owned state to the render thread. */
 static void layer_retire_locked(sc_sync_txn& st, sc_rlayer* L) {
     if (L->sc) {
         ASurfaceTransaction* txn = st.get();
         ASurfaceTransaction_setVisibility(txn, L->sc, ASURFACE_TRANSACTION_VISIBILITY_HIDE);
         ASurfaceTransaction_reparent(txn, L->sc, nullptr);
-        if (L->current && !g_api.set_buffer_with_release) {
-            ASurfaceControl_acquire(L->sc);
-            st.ctx->retiring.push_back({ L->sc, L->current });
-        }
+        latched_forget_locked(st.ctx, L);
         st.dropped.push_back(L->sc);
         L->sc = nullptr;
-    } else if (L->current && !g_api.set_buffer_with_release) {
-        awl_bufferqueue_put(L->current, -1);   /* never latched anywhere */
+    } else {
+        latched_forget_locked(nullptr, L);
     }
-    L->current = nullptr;
-    if (L->ahb) {
-        awl_ahb_cache_destroy(L->ahb);
+    if (L->ahb || L->shm.texture) {
+        struct awl_ahb_cache* c = L->ahb;
+        awl_gl_shm_tex shm = L->shm;
+        gc_push([c, shm]() mutable {
+            if (c) awl_ahb_cache_destroy(c);
+            awl_gl_shm_release(&shm);
+        });
         L->ahb = nullptr;
+        L->shm = awl_gl_shm_tex();
     }
+    L->pool.reset();   /* GL handles → g_gc from the destructor (SF may still hold slots via their contexts) */
     L->has_buffer = false;
+    L->mode = SC_MODE_NONE;
 }
 
 /* Reconcile the window's SC set with the logic layer's CURRENT stack. The
@@ -371,9 +644,125 @@ static void sc_sync_window(const std::shared_ptr<sc_window>& w) {
     st.finish();
 }
 
-/* ---------------- render frame (buffer state only) ---------------- */
+/* ---------------- latching (render thread, window lock held) ---------------- */
 
-static void sc_render_window(const std::shared_ptr<sc_window>& w, int64_t vsync_id) {
+static void mode_set(sc_window* w, sc_rlayer* L, sc_mode m, const char* why) {
+    if (L->mode != m)
+        LOGI("window %llu layer %llu: %s → %s (%s)", (unsigned long long)w->id,
+             (unsigned long long)L->surface_id, mode_name(L->mode), mode_name(m), why);
+    L->mode = m;
+}
+
+/* Everything a new latch has in common: the previous buffer retires, the
+ * layer shows if it was hidden, geometry re-applies against the new dims. */
+static void latched_common(sc_txn* ctx, ASurfaceTransaction* txn, sc_rlayer* L,
+                           uint32_t bw, uint32_t bh, uint32_t bfmt) {
+    (void)ctx;
+    if (!L->has_buffer)
+        ASurfaceTransaction_setVisibility(txn, L->sc, ASURFACE_TRANSACTION_VISIBILITY_SHOW);
+    L->has_buffer = true;
+    L->bw = bw;
+    L->bh = bh;
+    L->bfmt = bfmt;
+    L->geo_valid = false;
+}
+
+/* SCANOUT: the client element itself, forged. false = forge refused (retry
+ * next vsync; the head reference is put back). */
+static bool latch_scanout(sc_window* w, sc_rlayer* L, ASurfaceTransaction* txn, sc_txn* ctx,
+                          struct awl_bq_buffer* head) {
+    if (!L->ahb) L->ahb = awl_ahb_cache_create(awl_gl_tex_payload_destroy);
+    struct awl_ahb_slot* slot =
+        L->ahb ? awl_ahb_cache_get(L->ahb, head, AWL_SC_USAGE, w->frame_clock) : nullptr;
+    if (!slot) {
+        awl_bufferqueue_put(head, -1);
+        return false;
+    }
+    latched_forget_locked(ctx, L);
+    if (g_api.set_buffer_with_release)
+        g_api.set_buffer_with_release(txn, L->sc, slot->ahb, -1, head, sc_on_buffer_release);
+    else
+        ASurfaceTransaction_setBuffer(txn, L->sc, slot->ahb, -1);   /* acquire fence already signaled */
+    L->current = head;   /* ownership: latched on the SC (identity + stats-mode retire) */
+    latched_common(ctx, txn, L, head->width, head->height, head->format);
+    mode_set(w, L, SC_MODE_SCANOUT, "pitch is a gralloc fixed point");
+    return true;
+}
+
+/* EGL / EGL_SHM: blit `tex` (bw×bh, the source's own pixel grid, 1:1 — the
+ * target IS the source re-laid-out, so crop/transform/scale downstream are
+ * untouched) into a swapchain slot and latch it with the blit's fence. The
+ * fence is also returned dup'd (-1 = none) for the caller's source release.
+ * false = no free slot / no target (nothing latched). */
+static bool latch_egl(sc_window* w, sc_rlayer* L, ASurfaceTransaction* txn, sc_txn* ctx,
+                      GLuint tex, uint32_t bw, uint32_t bh, uint32_t bfmt, sc_mode mode,
+                      const char* why, int* rel_fence) {
+    *rel_fence = -1;
+    std::shared_ptr<sc_egl_pool> pool = L->pool;
+    if (!pool || pool->w != bw || pool->h != bh) {
+        pool = pool_create(bw, bh);   /* the old one lives on in SF's release contexts */
+        if (!pool) return false;
+    }
+    int wait_fd = -1;
+    int idx = pool->acquire(&wait_fd);
+    if (idx < 0) {
+        L->skips++;
+        if (L->skips == 30 || (L->skips % 600) == 0)
+            LOGE("window %llu layer %llu: no free EGL-mode slot (SF holds all %d) — frame skipped (#%u)",
+                 (unsigned long long)w->id, (unsigned long long)L->surface_id,
+                 sc_egl_pool::SLOTS, L->skips);
+        return false;
+    }
+    awl_gl_wait_fence_fd(wait_fd);   /* SF's reads of this slot's previous content */
+
+    glBindFramebuffer(GL_FRAMEBUFFER, g_gl.fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                           pool->s[idx].tex.texture, 0);
+    glViewport(0, 0, (GLsizei)bw, (GLsizei)bh);
+    glDisable(GL_BLEND);
+    awl_gl_quad_begin(&g_gl.quad, (float)bw, (float)bh, -1.0f);
+    const float dst[4] = { 0.f, 0.f, (float)bw, (float)bh };
+    const float uv[4] = { 0.f, 0.f, 1.f, 1.f };
+    awl_gl_quad_draw(&g_gl.quad, tex, dst, uv, 0);
+    int fence = awl_gl_fence_fd();
+    if (fence < 0) glFinish();   /* no native fences: completion by idling */
+    else *rel_fence = fcntl(fence, F_DUPFD_CLOEXEC, 0);
+    GLenum err = glGetError();
+    if (err != GL_NO_ERROR)
+        LOGE("window %llu layer %llu: EGL-mode blit %ux%u gl error 0x%x",
+             (unsigned long long)w->id, (unsigned long long)L->surface_id, bw, bh, err);
+
+    latched_forget_locked(ctx, L);
+    if (g_api.set_buffer_with_release)
+        g_api.set_buffer_with_release(txn, L->sc, pool->s[idx].ahb, fence,
+                                      new sc_egl_ctx{ pool, idx }, sc_on_egl_release);
+    else
+        ASurfaceTransaction_setBuffer(txn, L->sc, pool->s[idx].ahb, fence);
+    /* (setBuffer took ownership of `fence`) */
+    pool->mark_queued(idx);
+    L->pool = pool;
+    L->egl_onscreen = idx;
+    latched_common(ctx, txn, L, bw, bh, bfmt);
+    mode_set(w, L, mode, why);
+    return true;
+}
+
+/* hide: the layer has no content any more */
+static void latch_hide(ASurfaceTransaction* txn, sc_txn* ctx, sc_rlayer* L, bool* any) {
+    if (!L->has_buffer) return;
+    ASurfaceTransaction_setVisibility(txn, L->sc, ASURFACE_TRANSACTION_VISIBILITY_HIDE);
+    latched_forget_locked(ctx, L);
+    L->has_buffer = false;
+    L->mode = SC_MODE_NONE;
+    *any = true;
+}
+
+/* ---------------- render frame (buffer state only) ----------------
+ * tick = the vsync pass (pacing bookkeeping + frame_done collection); an
+ * off-tick pass only latches. done: surfaces owed a frame_done (tick). */
+
+static void sc_render_window(const std::shared_ptr<sc_window>& w, int64_t vsync_id,
+                             bool tick, std::vector<uint64_t>* done) {
     awl_layer_info_t lay[AWL_MAX_LAYERS + 1];
     int n = awl_surface_get_layers(w->id, lay, AWL_MAX_LAYERS);
     if (n <= 0) return;
@@ -385,7 +774,6 @@ static void sc_render_window(const std::shared_ptr<sc_window>& w, int64_t vsync_
     if (w->dead || !w->nw) return;
 
     w->frame_clock++;
-    bool kicked = w->kick.exchange(false);
 
     ASurfaceTransaction* txn = ASurfaceTransaction_create();
     sc_txn* ctx = new sc_txn();
@@ -396,13 +784,14 @@ static void sc_render_window(const std::shared_ptr<sc_window>& w, int64_t vsync_
         if (it == w->layers.end()) continue;   /* entered after the last sync — next dirty creates it */
         sc_rlayer* L = it->second.get();
         if (!L->sc) continue;
+        if (!tick && L->overspeed) continue;   /* runs ahead anyway: one latch per tick is all it gets */
 
-        /* frame source: the layer's queue — drain superseded frames, take a
-         * referenced complete head WITHOUT waiting (an incomplete head keeps
-         * the latched buffer on screen; re-checked next vsync), arm the
-         * waiter for the frame behind the head. */
+        /* dmabuf source: drain superseded frames, take a referenced complete
+         * head WITHOUT waiting (an incomplete head keeps the latched buffer
+         * on screen; re-checked next vsync), arm the waiter behind the head */
         struct awl_bq_buffer* head = nullptr;
         int pending = 0;
+        unsigned sup = L->sup_last;
         struct awl_bufferqueue* q = awl_surface_queue_ref(lay[i].surface_id);
         if (q) {
             awl_bufferqueue_lock(q);
@@ -411,13 +800,26 @@ static void sc_render_window(const std::shared_ptr<sc_window>& w, int64_t vsync_
             pending = awl_bufferqueue_count(q);
             awl_bufferqueue_arm(q);
             awl_bufferqueue_unlock(q);
+            sup = awl_bufferqueue_superseded(q);
             awl_bufferqueue_unref(q);
         }
+        if (tick) {   /* pacing: did the client drop frames since the last tick? */
+            bool dropped = sup != L->sup_last;
+            L->sup_last = sup;
+            if (dropped) { L->fast_ticks++; L->slow_ticks = 0; }
+            else         { L->slow_ticks++; L->fast_ticks = 0; }
+            if (!L->overspeed && L->fast_ticks >= 15) {
+                L->overspeed = true;
+                LOGI("window %llu layer %llu: client runs ahead of vsync — copy mode",
+                     (unsigned long long)w->id, (unsigned long long)L->surface_id);
+            } else if (L->overspeed && L->slow_ticks >= 120) {
+                L->overspeed = false;
+                LOGI("window %llu layer %llu: client paced again — zero-copy allowed",
+                     (unsigned long long)w->id, (unsigned long long)L->surface_id);
+            }
+        }
         if (!head && pending > 0) {
-            /* the head exists but its writer is not done: rate-limited
-             * diagnostic (a fence that never signals would otherwise be a
-             * silent frozen layer — the old blocking wait froze every window) */
-            L->stall++;
+            L->stall++;   /* the head exists but its writer is not done */
             if (L->stall == 60 || (L->stall % 600) == 0)
                 LOGE("window %llu layer %llu: acquire fence pending for %u vsyncs — "
                      "keeping the previous buffer on screen",
@@ -425,85 +827,94 @@ static void sc_render_window(const std::shared_ptr<sc_window>& w, int64_t vsync_
         } else {
             L->stall = 0;
         }
-
-        if (head && head->dmabuf_fd < 0) {
-            /* NULL-marker: the layer unmaps — hide it, retire the latched
-             * element (stats mode; the fence comes with this transaction's
-             * stats — in 36-mode its OnRelease ctx owns the reference) */
+        if (head && head->dmabuf_fd < 0) {   /* NULL marker: no dmabuf frame from here on */
             awl_bufferqueue_put(head, -1);
-            if (L->has_buffer) {
-                ASurfaceTransaction_setVisibility(
-                    txn, L->sc, ASURFACE_TRANSACTION_VISIBILITY_HIDE);
-                if (L->current && !g_api.set_buffer_with_release) {
-                    sc_rel r;
-                    ASurfaceControl_acquire(L->sc);
-                    r.sc = L->sc;
-                    r.elem = L->current;
-                    ctx->retiring.push_back(r);
-                }
-                L->current = nullptr;
-                L->has_buffer = false;
-                any = true;
-            }
-            continue;
+            head = nullptr;
         }
 
-        if (!head) continue;    /* nothing committed yet / head incomplete */
-
-        const struct awl_bq_buffer* sample = head;   /* what the SC shows after this txn */
-        if (head != L->current) {
-            if (!L->ahb) L->ahb = awl_ahb_cache_create(nullptr);
-            struct awl_ahb_slot* slot =
-                L->ahb ? awl_ahb_cache_get(L->ahb, head, AWL_SC_USAGE, w->frame_clock) : nullptr;
-            if (!slot) {
-                awl_bufferqueue_put(head, -1);   /* forge refused — retry next vsync */
+        bool latched = false;   /* a new buffer went into this transaction */
+        if (head) {
+            /* ---- dmabuf frame ---- */
+            if (L->shm.texture) awl_gl_shm_release(&L->shm);   /* the surface left wl_shm */
+            bool scanout = awl_ahb_hwc_scanout_ok(head) && !L->overspeed;
+            if (scanout) {
+                if (L->mode == SC_MODE_SCANOUT && head == L->current) {
+                    awl_bufferqueue_put(head, -1);   /* same element still current */
+                } else {
+                    latched = latch_scanout(w.get(), L, txn, ctx, head);
+                }
+            } else if (L->mode == SC_MODE_EGL && head->seq == L->egl_seq) {
+                awl_bufferqueue_put(head, -1);       /* already blitted this frame */
+            } else if (!gl_ensure()) {
+                awl_bufferqueue_put(head, -1);
+                static bool warned = false;
+                if (!warned) {
+                    warned = true;
+                    LOGE("SC EGL-mode context unavailable — layers HWC cannot scan out stay blank");
+                }
+            } else {
+                if (!L->ahb) L->ahb = awl_ahb_cache_create(awl_gl_tex_payload_destroy);
+                struct awl_ahb_slot* slot =
+                    L->ahb ? awl_ahb_cache_get(L->ahb, head, AWL_SC_USAGE, w->frame_clock) : nullptr;
+                GLuint tex = slot ? awl_gl_slot_texture(slot) : 0;
+                int rel = -1;
+                if (tex && latch_egl(w.get(), L, txn, ctx, tex, head->width, head->height,
+                                     head->format, SC_MODE_EGL,
+                                     L->overspeed ? "client runs ahead of vsync"
+                                                  : "pitch is not a gralloc fixed point", &rel)) {
+                    L->egl_seq = head->seq;
+                    latched = true;
+                }
+                awl_bufferqueue_put(head, rel);   /* the GPU read is the release fence */
+                if (rel >= 0) close(rel);
+            }
+        } else {
+            /* ---- no dmabuf frame: wl_shm content? ---- */
+            awl_shm_frame_t f;
+            int r = awl_surface_shm_begin(lay[i].surface_id, L->shm.serial, &f);
+            if (r == 1) {
+                bool ok = gl_ensure() && awl_gl_shm_update(&L->shm, &f);
+                awl_surface_shm_end(&f, ok);   /* consumed → the client gets wl_buffer.release */
+                if (!ok) {
+                    static bool warned = false;
+                    if (!warned) {
+                        warned = true;
+                        LOGE("SC EGL_SHM upload failed — wl_shm layers cannot be shown");
+                    }
+                }
+            } else if (r == 0) {
+                if (L->shm.texture) awl_gl_shm_release(&L->shm);
+                latch_hide(txn, ctx, L, &any);   /* unmapped */
                 continue;
             }
-            /* the replaced element retires through THIS transaction's
-             * stats (29..35); in 36-mode each latched element's reference
-             * was handed to its own OnRelease context at set time — nothing
-             * to do for the old one here */
-            if (L->current && !g_api.set_buffer_with_release) {
-                sc_rel r;
-                ASurfaceControl_acquire(L->sc);
-                r.sc = L->sc;
-                r.elem = L->current;
-                ctx->retiring.push_back(r);
+            if (L->shm.texture &&
+                (L->mode != SC_MODE_EGL_SHM || L->egl_seq != L->shm.serial)) {
+                int rel = -1;
+                if (latch_egl(w.get(), L, txn, ctx, L->shm.texture, L->shm.w, L->shm.h,
+                              L->shm.format, SC_MODE_EGL_SHM, "wl_shm source", &rel)) {
+                    L->egl_seq = L->shm.serial;
+                    latched = true;
+                }
+                if (rel >= 0) close(rel);   /* shm was released at upload; the GPU owns the copy */
             }
-            if (g_api.set_buffer_with_release)
-                g_api.set_buffer_with_release(txn, L->sc, slot->ahb, -1, head,
-                                              sc_on_buffer_release);
-            else
-                ASurfaceTransaction_setBuffer(txn, L->sc, slot->ahb, -1);
-            if (!L->has_buffer)
-                ASurfaceTransaction_setVisibility(
-                    txn, L->sc, ASURFACE_TRANSACTION_VISIBILITY_SHOW);
-            L->current = head;          /* ownership: latched on the SC */
-            L->has_buffer = true;
-            L->geo_valid = false;       /* buffer change re-applies geometry */
-            any = true;
-            ctx->presented.push_back(lay[i].surface_id);
-        } else {
-            /* same element still current: keep it displayed, our extra
-             * reference goes back; geometry (cursor moves, resize, zoom)
-             * still applies against the latched buffer */
-            sample = L->current;
-            awl_bufferqueue_put(head, -1);
-            ctx->presented.push_back(lay[i].surface_id);
         }
+        if (latched) any = true;
+        if (!L->has_buffer) continue;
+        if (tick && done) done->push_back(lay[i].surface_id);   /* visible this vsync → frame_done */
 
         /* ---- geometry (the GL renderer's math, via awl_geom.h) ----
          * Atomic with the buffer above: one commit = one SF transaction. */
         double rsw, rsh;
-        awl_layer_sampled(&lay[i], sample->width, sample->height, &rsw, &rsh);
+        awl_layer_sampled(&lay[i], L->bw, L->bh, &rsw, &rsh);
         int32_t Wd = awl_snap_extent(lay[i].w, xf.sx, rsw);
         int32_t Hd = awl_snap_extent(lay[i].h, xf.sy, rsh);
+        if (Wd <= 0 || Hd <= 0) continue;   /* logical size unknown (buffer resource gone): keep the last geometry */
         double scx = rsw > 0.0 ? (double)Wd / rsw : 1.0;
         double scy = rsh > 0.0 ? (double)Hd / rsh : 1.0;
         double X = ((double)lay[i].x - (double)xf.gox) * xf.sx + xf.ox;
         double Y = ((double)lay[i].y - (double)xf.goy) * xf.sy + xf.oy;
         int32_t atr = k_wl_to_android_xform[lay[i].transform & 7];
-        bool opaque = sample->format == AWL_FOURCC_XRGB8888;
+        bool opaque = L->bfmt == AWL_FOURCC_XRGB8888;
         bool has_crop = !(lay[i].u0 <= 0.0 && lay[i].v0 <= 0.0 &&
                           lay[i].su >= 1.0 && lay[i].sv >= 1.0);
         int32_t cl = 0, ct = 0, cr = 0, cb = 0;
@@ -512,8 +923,8 @@ static void sc_render_window(const std::shared_ptr<sc_window>& w, int64_t vsync_
             sample_crop_rect(lay[i].transform & 7, lay[i].u0, lay[i].v0,
                              lay[i].su, lay[i].sv, &x0, &y0, &x1, &y1);
             /* layer-space axes: odd transforms carry the swapped buffer axes */
-            double ax = (lay[i].transform & 1) ? (double)sample->height : (double)sample->width;
-            double ay = (lay[i].transform & 1) ? (double)sample->width : (double)sample->height;
+            double ax = (lay[i].transform & 1) ? (double)L->bh : (double)L->bw;
+            double ay = (lay[i].transform & 1) ? (double)L->bw : (double)L->bh;
             cl = (int32_t)lround(x0 * ax);
             ct = (int32_t)lround(y0 * ay);
             cr = (int32_t)lround(x1 * ax);
@@ -554,28 +965,11 @@ static void sc_render_window(const std::shared_ptr<sc_window>& w, int64_t vsync_
         }
     }
 
-    /* kicked but nothing changed: emit a no-op state transaction so its
-     * OnComplete delivers the pending frame callbacks (GL parity — a dirty
-     * window always presents). Target: the first buffered layer's SC. */
-    if (!any && kicked) {
-        ASurfaceControl* hit = nullptr;
-        for (auto& kv : w->layers) {
-            if (kv.second->has_buffer && kv.second->sc) {
-                hit = kv.second->sc;
-                ctx->presented.push_back(kv.first);
-            } else if (kv.second->has_buffer) {
-                ctx->presented.push_back(kv.first);
-            }
-        }
-        if (hit) {
-            ASurfaceTransaction_setVisibility(
-                txn, hit, ASURFACE_TRANSACTION_VISIBILITY_SHOW);
-            any = true;
-        }
-    }
-
     if (any) {
-        ASurfaceTransaction_setOnComplete(txn, ctx, sc_on_complete);
+        if (!ctx->retiring.empty())
+            ASurfaceTransaction_setOnComplete(txn, ctx, sc_on_complete);
+        else
+            delete ctx;
         if (vsync_id && g_api.sdk >= 33)
             ASurfaceTransaction_setFrameTimeline(txn, vsync_id);
         ASurfaceTransaction_apply(txn);
@@ -585,10 +979,33 @@ static void sc_render_window(const std::shared_ptr<sc_window>& w, int64_t vsync_
     ASurfaceTransaction_delete(txn);
 }
 
+/* frame_done outside the window lock (takes rwl.rd + ev_lock, sends) */
+static void send_frame_done(const std::vector<uint64_t>& done) {
+    for (uint64_t sid : done) awl_surface_presented(sid);
+}
+
+/* vsync tick: every window, every visible layer's frame_done */
 static void sc_render_all(int64_t vsync_id) {
+    gc_run();   /* GL objects orphaned since the last frame (context current here) */
+    std::vector<uint64_t> done;
     for (auto& w : snapshot_windows()) {
         if (w->dead.load()) continue;
-        sc_render_window(w, vsync_id);
+        w->applied_now.store(false, std::memory_order_relaxed);   /* new interval */
+        w->kick.store(false, std::memory_order_relaxed);
+        done.clear();
+        sc_render_window(w, vsync_id, true, &done);
+        send_frame_done(done);
+    }
+}
+
+/* off-tick (looper wake by awl_sc_kick): kicked windows that have not had
+ * their one off-tick pass this interval */
+static void sc_render_kicked(void) {
+    for (auto& w : snapshot_windows()) {
+        if (w->dead.load()) continue;
+        if (!w->kick.exchange(false)) continue;
+        if (w->applied_now.exchange(true)) continue;
+        sc_render_window(w, 0, false, nullptr);
     }
 }
 
@@ -597,8 +1014,10 @@ static void sc_render_all(int64_t vsync_id) {
 static void sc_vsync_cb(const AChoreographerFrameCallbackData* data, void*) {
     if (!g_running.load(std::memory_order_relaxed)) return;
     int64_t id = 0;
-    if (g_api.sdk >= 33)
-        id = AChoreographerFrameCallbackData_getFrameTimelineVsyncId(data, 0);
+    if (g_api.sdk >= 33) {
+        size_t pref = AChoreographerFrameCallbackData_getPreferredFrameTimelineIndex(data);
+        id = AChoreographerFrameCallbackData_getFrameTimelineVsyncId(data, pref);
+    }
     sc_render_all(id);
     if (g_running.load(std::memory_order_relaxed))
         AChoreographer_postVsyncCallback(g_ch, sc_vsync_cb, nullptr);
@@ -612,7 +1031,7 @@ static void sc_frame64_cb(int64_t, void*) {
 }
 
 static void sc_render_thread(void) {
-    g_lo = ALooper_prepare(ALOOPER_PREPARE_ALLOW_NON_CALLBACKS);
+    g_lo.store(ALooper_prepare(ALOOPER_PREPARE_ALLOW_NON_CALLBACKS));
     g_ch = AChoreographer_getInstance();
     if (!g_ch) {
         /* infra failure (e.g. the SF event connection refused — the sepolicy
@@ -633,8 +1052,14 @@ static void sc_render_thread(void) {
         AChoreographer_postVsyncCallback(g_ch, sc_vsync_cb, nullptr);
     else
         AChoreographer_postFrameCallback64(g_ch, sc_frame64_cb, nullptr);
-    while (g_running.load(std::memory_order_relaxed))
-        ALooper_pollOnce(-1, nullptr, nullptr, nullptr);
+    while (g_running.load(std::memory_order_relaxed)) {
+        /* the choreographer's fd callback runs inside pollOnce (the tick);
+         * ALooper_wake from awl_sc_kick returns POLL_WAKE (off-tick pass) */
+        int r = ALooper_pollOnce(-1, nullptr, nullptr, nullptr);
+        if (r == ALOOPER_POLL_WAKE && g_running.load(std::memory_order_relaxed))
+            sc_render_kicked();
+    }
+    gl_teardown();
     LOGI("SC render thread exiting");
 }
 
@@ -703,7 +1128,14 @@ int awl_sc_attach(uint64_t id, ANativeWindow* nw) {
 }
 
 void awl_sc_kick(uint64_t id) {
-    if (auto w = find_window(id)) w->kick.store(true);
+    auto w = find_window(id);
+    if (!w) return;
+    w->kick.store(true);
+    /* one off-tick pass per interval: a second commit in the same interval
+     * waits for the tick (nothing to wake for) */
+    if (!w->applied_now.load(std::memory_order_relaxed)) {
+        if (ALooper* lo = g_lo.load()) ALooper_wake(lo);
+    }
 }
 
 void awl_sc_sync(uint64_t id) {
@@ -718,9 +1150,9 @@ void awl_sc_shutdown(void) {
     }
     for (uint64_t id : ids) sc_detach_internal(id);
     if (g_running.exchange(false)) {
-        if (g_lo) ALooper_wake(g_lo);
+        if (ALooper* lo = g_lo.load()) ALooper_wake(lo);
         if (g_render_th.joinable()) g_render_th.join();
-        g_lo = nullptr;
+        g_lo.store(nullptr);
         g_ch = nullptr;
     }
 }
