@@ -203,7 +203,7 @@ public class AwlWindowActivity extends Activity {
             if (code == C_CLOSE) {
                 Log.i(TAG, "win " + id + ": CLOSE via ctrl channel");
                 finishingByGone = true;
-                runOnUiThread(() -> { if (!isFinishing()) finish(); });
+                runOnUiThread(() -> finishAndDropTask());
                 return true;
             }
             if (code == C_TITLE) {
@@ -283,16 +283,64 @@ public class AwlWindowActivity extends Activity {
              * re-pushes the current clipboard */
             sLastClipPushed = null;
             sLastClipWritten = null;
-            runOnUiThread(() -> { if (!isFinishing()) finish(); });
+            runOnUiThread(() -> finishAndDropTask());
         }
     };
+
+    /** Leave for good, Recents card included. Every finish of this host
+     *  means its window cannot be shown again (client quit, daemon dead,
+     *  SURFACE rejected at onCreate/onResume re-attach, no id): a card left
+     *  behind would relaunch onto a dead window id and exit at once. The
+     *  removal is explicit rather than left to the manifest's
+     *  autoRemoveFromRecents — that flag is evaluated at Task.setIntent
+     *  time, so a task created before it existed, or re-entered without a
+     *  setIntent re-evaluation, still carries autoRemoveRecents=false and
+     *  a plain finish() would retain it. finishAndRemoveTask on the task's
+     *  root activity removes the task (ActivityClientController:
+     *  FINISH_TASK_WITH_ROOT_ACTIVITY → removeTask(REMOVE_FROM_RECENTS)). */
+    private void finishAndDropTask() {
+        if (!isFinishing()) finishAndRemoveTask();
+    }
 
     public static void finishById(long id) {
         AwlWindowActivity a = LIVE.get(id);
         if (a != null) {
             a.finishingByGone = true;
-            a.finish();
+            a.finishAndDropTask();
             Log.i(TAG, "win " + id + " finished (client gone)");
+        }
+    }
+
+    /** Same, plus a Recents sweep for a host whose PROCESS is already gone
+     *  (LMK / force-stop while the window lived on in the daemon): there is
+     *  no instance to finish, yet the task — root ActivityRecord, no process
+     *  — still sits in Recents and would relaunch onto a dead window id.
+     *  The manifest's autoRemoveFromRecents only fires on finish(), so the
+     *  task whose base intent carries this window's URI is removed by hand.
+     *  For the host APK's WINDOW_GONE receiver: a component broadcast, so
+     *  it has a Context and is delivered even with the app process dead. */
+    public static void finishById(android.content.Context ctx, long id) {
+        finishById(id);
+        removeTaskById(ctx, id);
+    }
+
+    private static void removeTaskById(android.content.Context ctx, long id) {
+        if (ctx == null || id < 0) return;
+        android.app.ActivityManager am =
+                ctx.getSystemService(android.app.ActivityManager.class);
+        if (am == null) return;
+        final String uri = "anland://win/" + id;   /* Awl.attachWindow / daemon am start -d */
+        try {
+            for (android.app.ActivityManager.AppTask t : am.getAppTasks()) {
+                android.app.ActivityManager.RecentTaskInfo ti = t.getTaskInfo();
+                android.content.Intent base = ti != null ? ti.baseIntent : null;
+                if (base == null || base.getData() == null) continue;
+                if (!uri.equals(base.getData().toString())) continue;
+                t.finishAndRemoveTask();
+                Log.i(TAG, "win " + id + " task removed from recents (no live host)");
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "win " + id + ": recents sweep failed", e);
         }
     }
 
@@ -356,7 +404,7 @@ public class AwlWindowActivity extends Activity {
             deathLinked = AwlClient.monitorDeath(daemonDeath);
             if (!deathLinked && !AwlClient.available()) {
                 Log.e(TAG, "win " + id + ": daemon unreachable -> finish");
-                finish();
+                finishAndDropTask();
                 return;
             }
         } else {
@@ -421,12 +469,12 @@ public class AwlWindowActivity extends Activity {
              * but with the daemon GONE there is nothing to wait for */
             if (!AwlClient.available()) {
                 Log.e(TAG, "await: daemon unreachable -> finish");
-                finish();
+                finishAndDropTask();
                 return;
             }
             Log.i(TAG, "awaiting a wayland window (unbound)");
         } else {
-            finish();
+            finishAndDropTask();   /* started without a window id: nothing to host, nothing to resume */
             return;
         }
 
@@ -533,15 +581,18 @@ public class AwlWindowActivity extends Activity {
 
     /** Report the Surface to the daemon (shared by first attach / resume re-attach).
      *  rc != 0 (service gone / window missing / attach failed / uid rejected)
-     *  → exit, no placeholder instance left behind */
+     *  → exit AND drop the Recents card: a rejected attach is exactly the
+     *  "window id no longer exists" case (client quit while this host was
+     *  paused or its process dead, daemon restarted, stale card tapped) —
+     *  no placeholder instance and no dead card left behind */
     private void sendSurface(SurfaceHolder holder, int w, int h) {
         int rc = AwlClient.surface(id, w, h, holder.getSurface(), ctrl, host);
         attached = rc == 0;
         lastW = w;
         lastH = h;
         if (!attached) {
-            Log.e(TAG, "win " + id + " surface binder rc=" + rc + " -> finish");
-            finish();
+            Log.e(TAG, "win " + id + " surface binder rc=" + rc + " -> finish + remove task");
+            finishAndDropTask();
             return;
         }
         applyTaskIconAsync();   /* the daemon may already hold an icon (re-attach / set before map) */

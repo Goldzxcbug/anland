@@ -5,12 +5,26 @@
          window renders inside the third-party app's own task/process (Recents
          identity, uid and binder credentials = that app — never the anland
          host APK). One instance per window id (documentLaunchMode + unique
-         data URI); theme/configChanges mimic the host APK's activity. -->
+         data URI); theme/configChanges mimic the host APK's activity.
+
+         Recents card lifetime = the Activity's, not the document's: the task
+         is only ever re-enterable while its wayland window exists in the
+         daemon, and a finished host means the window is gone (client quit /
+         daemon restart / SURFACE rejected) — a retained card would relaunch
+         with a dead window id and exit at once. autoRemoveFromRecents drops
+         the card when the last activity finishes (AOSP Task.setIntent: the
+         NEW_DOCUMENT default would RETAIN it for a documentLaunchMode
+         activity); persistNever keeps the task out of the on-disk recents
+         store, so no card outlives a reboot (the daemon and every window die
+         with it). A live window whose process was merely killed still
+         re-attaches from its card (the ActivityRecord stays, nothing finished). -->
     <application>
         <activity android:name="com.anlandnext.awl.AwlWindowActivity"
             android:exported="false"
             android:launchMode="standard"
             android:documentLaunchMode="intoExisting"
+            android:autoRemoveFromRecents="true"
+            android:persistableMode="persistNever"
             android:excludeFromRecents="false"
             android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden">

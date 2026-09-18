@@ -7,7 +7,9 @@ import android.util.Log;
 
 import com.anlandnext.awl.AwlWindowActivity;
 
-/** wayland client closed its own window → daemon broadcast → finish the matching Activity */
+/** wayland client closed its own window → daemon broadcast → finish the matching
+ *  Activity; with no live instance (process already dead) drop its Recents card
+ *  instead — a card for a gone window id can never be resumed */
 public class WindowGoneReceiver extends BroadcastReceiver {
     private static final String TAG = "anland-recv";
 
@@ -16,6 +18,6 @@ public class WindowGoneReceiver extends BroadcastReceiver {
         if (!"anland.WINDOW_GONE".equals(intent.getAction())) return;
         long id = intent.getLongExtra("id", -1);
         Log.i(TAG, "window gone broadcast id=" + id);
-        AwlWindowActivity.finishById(id);
+        AwlWindowActivity.finishById(context, id);
     }
 }
