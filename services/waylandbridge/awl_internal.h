@@ -70,7 +70,6 @@ enum awl_role {
  * g_bufref_lock; wl_buffer.release is only ever sent under that lock. */
 struct awl_buffer {
     struct wl_resource* resource;    /* wl_buffer (created by us); NULL = destroyed (g_bufref_lock) */
-    struct wl_list link;             /* server.buffers */
     atomic_int refs;
     int dmabuf_fd;                   /* owned after dup */
     uint64_t ino;                    /* dma-buf inode at creation — render-side
@@ -79,7 +78,6 @@ struct awl_buffer {
                                       * fall back to their own) */
     uint32_t width, height, stride;  /* stride: bytes */
     uint32_t drm_format;
-    uint64_t modifier;
 };
 
 struct awl_frame_cb {
@@ -90,22 +88,24 @@ struct awl_frame_cb {
 };
 
 /* Field order = alignment groups: 8-byte members (serials/pointers/lists/
- * ev_lock) first, then 4-byte state, then the bools last — zero internal
- * padding (pahole-verified arm64/bionic: 688B; the original declaration was
- * 976B with 45B of holes + a 256B inline title array). Add new fields to
- * the group matching their size. */
+ * ev_lock/role union) first, then 4-byte state, then the flags, the plain
+ * int fds/atomic, and the 1-bit tail word — zero internal padding
+ * (pahole-verified arm64/bionic: 560B; history: 976B original → 688B after
+ * the alignment-group pass → 560B after dead-field removal, the role union
+ * and the two flag words). Rules for new fields:
+ *   - role-exclusive state → the union below (init at role assignment);
+ *   - a 1-bit flag → the W1/W2 word matching its writer threads;
+ *   - everything else → the group matching its size. */
 struct awl_surface {
     uint64_t id;                     /* window id (globally unique; same id on the Java side) */
     struct wl_resource* resource;
     struct wl_list link;             /* server.surfaces */
     pthread_mutex_t ev_lock;         /* per-window event send lock (recursive): fields + send order for that client */
 
-    struct wl_resource* xdg_surface_res;    /* associated xdg_surface */
-    struct wl_resource* xdg_role_res;       /* xdg_toplevel / xdg_popup */
-    struct wl_resource* xwayland_res;       /* xwayland_surface_v1 (#32) */
-    uint64_t xwayland_serial;               /* association serial from set_serial (= the X-side
-                                              * WL_SURFACE_SERIAL ClientMessage;
-                                              * mini-wm pairs the X window by this; 0=not associated) */
+    struct wl_resource* xdg_surface_res;    /* associated xdg_surface. Deliberately NOT in the
+                                              * role union below: it stays set while role == NONE
+                                              * (toplevel destroyed, xdg_surface object alive) and
+                                              * the surface-destroy strip reads it in that window. */
     char* title;                     /* heap: toplevel/Xwayland title (awl_surface_set_title; NULL = none —
                                       * client dispatch thread only, the render thread never reads it) */
 
@@ -136,7 +136,6 @@ struct awl_surface {
      * These flags/slots are read/written only on the client's dispatch thread
      * (a subtree always belongs to one client) — no lock; latched_buffer_res
      * and current are read concurrently (render thread) under ev_lock. */
-    struct wl_resource* subsurface_res;   /* wl_subsurface object (drop the reference if the surface dies first) */
     struct awl_surface* sub_parent;
     struct wl_list sub_children;          /* all direct children, ownership only */
     struct wl_list sub_below, sub_above;  /* current stack around this surface */
@@ -144,7 +143,6 @@ struct awl_surface {
     struct wl_list sub_child_link;        /* linked into sub_parent->sub_children */
     struct wl_list sub_link;              /* linked into current below/above */
     struct wl_list sub_pend_link;         /* linked into pending below/above */
-    struct wl_resource* latched_buffer_res;   /* latched buffer (never sampled) */
 
     /* Double-buffered state. Protocol semantics (2026-09-09 black-screen
      * deadlock, verified): pending state persists across commits — a commit
@@ -183,17 +181,45 @@ struct awl_surface {
      * latched_*). Ownership of an acquire fd moves into the queue element. */
     struct wl_resource* sync_res;            /* zwp_linux_surface_synchronization_v1 (≤ 1) */
     struct wl_resource* pend_release_res;    /* zwp_linux_buffer_release_v1 for this cycle */
-    struct wl_resource* latched_release_res;
     struct wl_list esync_all;                /* every live release object of this surface
                                               * (awl_esync_release::all_link; dispatch thread) */
     struct wl_list esync_gc;                 /* delivered ones awaiting wl_resource_destroy on
                                               * the dispatch thread (gc_link; g_bufref_lock) */
 
+    /* ---- role-exclusive state (discriminated by `role` below) ----
+     * Exactly one branch is meaningful. A branch is (re-)initialized at the
+     * moment its role is assigned (xdg get_toplevel/get_popup,
+     * get_xwayland_surface, get_subsurface); between a role-object destroy
+     * (role → NONE) and the next role assignment the words may still hold
+     * the previous branch, so cross-object cleanup paths MUST gate on
+     * role == <branch's role> before reading or writing a branch (see
+     * awl_esync.c release/destroy, awl_surface_buffer_gone,
+     * surface_destroy_impl). The role-object destroy handlers clear their
+     * branch's pointers before role → NONE. */
+    union {
+        struct {                            /* TOPLEVEL | POPUP */
+            struct wl_resource* role_res;   /* xdg_toplevel / xdg_popup */
+            int32_t conf_w, conf_h;         /* most recent configure contents */
+            int32_t pend_w, pend_h;         /* cached when resize precedes map (Android owns sizing entirely) */
+        } xdg;
+        struct {                            /* XWAYLAND */
+            struct wl_resource* res;        /* xwayland_surface_v1 (#32) */
+            uint64_t serial;                /* association serial from set_serial (= the X-side
+                                              * WL_SURFACE_SERIAL ClientMessage; mini-wm pairs
+                                              * the X window by this; 0=not associated) */
+        } xway;
+        struct {                            /* SUBSURFACE */
+            struct wl_resource* subsurface_res;    /* wl_subsurface object (drop the reference
+                                                    * if the surface dies first) */
+            struct wl_resource* latched_buffer_res;   /* latched buffer (never sampled) */
+            struct wl_resource* latched_release_res;  /* esync release object latched with it */
+            int32_t latched_acquire_fd;     /* -1 = none */
+            int32_t pend_x, pend_y;         /* set_position double-buffered value (applied on parent commit) */
+        } sub;
+    } u;
+
     /* ---- 4-byte state: xdg configure / geometry / zoom sizes / uv / damage ---- */
     enum awl_role role;
-    uint32_t configure_serial;       /* serial of the most recent configure */
-    int32_t conf_w, conf_h;          /* most recent configure contents */
-    int32_t pend_w, pend_h;          /* cached when resize precedes map (Android owns sizing entirely) */
     /* xdg window geometry (buffer coords, double-buffered, applied on commit)
      * = the window's visible content region (the chrome buffer carries
      * 16/10px shadow margins; geometry states where the content sits). The
@@ -202,7 +228,6 @@ struct awl_surface {
      * offsets input coords (2026-09-09 restore-bubble unclickable, verified). */
     int32_t geom_x, geom_y, geom_w, geom_h;
     int32_t pend_gx, pend_gy, pend_gw, pend_gh;
-    int32_t popup_x, popup_y;        /* popup anchoring result */
     int32_t phys_w, phys_h;          /* Android window size (recorded by awl_window_resize; 0=unknown) */
     int32_t buf_scale;               /* wl_surface.set_buffer_scale (default 1; bookkeeping only) */
     int32_t buf_transform;           /* wl_surface.set_buffer_transform, current (wl_output.transform
@@ -214,7 +239,6 @@ struct awl_surface {
     float vp_sx, vp_sy, vp_sw, vp_sh;      /* source rectangle (buffer×buf_scale coords) */
     float pend_vps_x, pend_vps_y, pend_vps_w, pend_vps_h;
     int32_t sub_x, sub_y;                 /* applied position (buffer pixels, Y down) */
-    int32_t pend_sub_x, pend_sub_y;       /* set_position double-buffered value (applied on parent commit) */
     int32_t pending_offset_x, pending_offset_y;
     /* damage (wl_surface.damage/damage_buffer accumulated in pending —
      * surface-local px, bbox merge; moved to cur on the commit/latch-apply).
@@ -229,45 +253,58 @@ struct awl_surface {
     int32_t pd_x, pd_y, pd_w, pd_h;
     int32_t cur_damage_x, cur_damage_y, cur_damage_w, cur_damage_h;
 
-    /* ---- 4-byte flags ---- */
-    int geom_valid;
-    int pend_geom;
-    int sub_above_parent;                 /* current link belongs to parent's above stack */
-    int sub_pend_above;                   /* pending link belongs to parent's above stack */
-    int sub_stack_pending;                /* this parent has a pending z order */
-    int sub_sync;                         /* 1=sync mode (protocol default) */
-    int sub_latched;                      /* latched (sync) pending state exists */
-    int latched_attach;                   /* latched cycle contains an attach (without one, applying leaves current alone) */
-    int sub_pos_pending;
-    int pending_attached;
-    int pending_damage_empty;
-    int cd_state;               /* AWL_DMG_* (NONE = 0, calloc-init) */
-    int q_last_dmabuf;               /* the newest push was a dmabuf frame (ev_lock) */
-    int shm_live;                    /* the committed content is a shm buffer (cleared by attach(NULL) / a dmabuf attach) */
-    int shm_release_pending;         /* wl_buffer.release for shm_res not sent yet */
-    int vp_has_dst, pend_vpd;
-    int vp_has_src, pend_vps;
-    int pend_acquire_fd;                     /* -1 = none */
-    int latched_acquire_fd;
-    atomic_int attached;             /* root only: an Android window is attached (renderer
-                                      * alive). Commit-time drain is skipped while 0 so a
-                                      * minimized window's client parks on buffer starvation
-                                      * instead of spinning. Adapter writes (awl_window_attached). */
-
-    /* ---- bools (1 byte) + the align-1 tail array ---- */
-    bool configured;                 /* a configure has been sent */
-    bool acked;                      /* client has acked (set after the first configure) */
-    bool mapped;                     /* first frame buffer committed */
-    bool window_live;                /* window_created went out for this id and
-                                      * window_destroyed is still owed. Decoupled
-                                      * from `role`: a client closes a window by
-                                      * destroying the xdg_toplevel (role → NONE)
-                                      * before the wl_surface — a role test at
-                                      * surface death never fires and the window
-                                      * table keeps a zombie (2026-09-17). */
-    bool has_pending;
-    bool activated;                  /* xdg ACTIVATED state (Android foreground focus) */
-    bool dirty;                      /* awaiting render after commit */
+    /* ---- flags: two bit-field words, split BY WRITER THREAD ----
+     * A bit-field write is a word-wide read-modify-write, so all writers of
+     * one word must be serialized with each other (readers may be loose:
+     * they see the whole word atomically). The two groups MUST stay separated
+     * by the plain (non-bit-field) members below: compilers DO merge adjacent
+     * bit-fields of different base types into one allocation unit (verified:
+     * aarch64 gcc and clang both fold unsigned:1+bool:1 neighbors into one
+     * 32-bit word), and only a non-bit-field member between them ends the
+     * unit. W2 (unsigned): writers on several threads — binder render/resize
+     * callbacks and the client dispatch thread — but EVERY access under
+     * ev_lock. */
+    unsigned configured : 1;            /* a configure has been sent */
+    unsigned has_pending : 1;           /* resize cached before map */
+    unsigned activated : 1;             /* xdg ACTIVATED (Android foreground focus) */
+    unsigned shm_live : 1;              /* committed content is a shm buffer (cleared by
+                                          * attach(NULL) / a dmabuf attach) */
+    unsigned shm_release_pending : 1;   /* wl_buffer.release for shm_res not sent yet */
+    unsigned q_last_dmabuf : 1;         /* the newest push was a dmabuf frame */
+    unsigned cd_state : 2;              /* AWL_DMG_* (NONE = 0, calloc-init) */
+    /* plain ints (real values / addressable — never bit-fields). These also
+     * physically separate the two flag words — do not move them. */
+    int pend_acquire_fd;                /* -1 = none */
+    atomic_int attached;                /* root only: an Android window is attached (renderer
+                                          * alive). Commit-time drain is skipped while 0 so a
+                                          * minimized window's client parks on buffer starvation
+                                          * instead of spinning. Adapter writes (awl_window_attached). */
+    /* W1 (bool): written ONLY by the client's own dispatch thread (its
+     * request handlers/commit), with or without ev_lock — one writer thread
+     * ⇒ serialized. */
+    bool geom_valid : 1;
+    bool pend_geom : 1;
+    bool sub_pend_above : 1;            /* pending link belongs to parent's above stack */
+    bool sub_stack_pending : 1;         /* this parent has a pending z order */
+    bool sub_sync : 1;                  /* 1=sync mode (protocol default) */
+    bool sub_latched : 1;               /* latched (sync) pending state exists */
+    bool latched_attach : 1;            /* latched cycle contains an attach (without one,
+                                          * applying leaves current alone) */
+    bool sub_pos_pending : 1;
+    bool pending_attached : 1;          /* this commit cycle attached */
+    bool pending_damage_empty : 1;      /* damage accumulator empty */
+    bool pend_vpd : 1;
+    bool vp_has_src : 1;
+    bool pend_vps : 1;
+    bool acked : 1;                     /* client has acked (set after the first configure) */
+    bool mapped : 1;                    /* first frame buffer committed */
+    bool window_live : 1;               /* window_created went out for this id and
+                                          * window_destroyed is still owed. Decoupled
+                                          * from `role`: a client closes a window by
+                                          * destroying the xdg_toplevel (role → NONE)
+                                          * before the wl_surface — a role test at
+                                          * surface death never fires and the window
+                                          * table keeps a zombie (2026-09-17). */
 };
 
 /* Buffer / release-object liveness lock (awl_surface.c): guards
@@ -342,7 +379,6 @@ struct awl_data_source {
     struct wl_list mimes;
     uint32_t dnd_actions;
     int is_dnd_actions;             /* set_actions was called (set_selection refused) */
-    uint32_t selected_action;
     int accepted;                   /* target has accepted some mime */
     int drop_performed;             /* drop happened (precondition for finish) */
     struct wl_list link;            /* server.data_sources */
@@ -378,7 +414,7 @@ struct awl_data_device {
  * Lock hierarchy (libwayland carries the awl patch: connection mutex + atomic
  * serial — cross-thread direct send is safe):
  *   g_srv.rwl (rwlock)  guards only list topology (surfaces / input object
- *                       tables / buffers / clients migration table). Writers =
+ *                       tables / clients migration table). Writers =
  *                       the protocol dispatch threads (create/destroy, wrlock).
  *                       Readers = the sending threads (binder/render), rdlock
  *                       held across the whole resolve→send — acquiring wrlock
@@ -397,16 +433,6 @@ struct awl_server {
     struct wl_display* display;
     struct wl_event_loop* loop;
     pthread_rwlock_t rwl;            /* list-topology rwlock (see above) */
-
-    struct wl_shm* shm;
-    struct wl_global* g_compositor;
-    struct wl_global* g_seat;
-    struct wl_global* g_output;
-    struct wl_global* g_dmabuf;
-    struct wl_global* g_xdg_wm_base;
-    struct wl_global* g_subcompositor;
-    struct wl_global* g_data_device_manager;
-    struct wl_global* g_esync;       /* zwp_linux_explicit_synchronization_v1 */
 
     struct wl_list data_devices;   /* struct awl_data_device::link */
     struct wl_list data_sources;   /* struct awl_data_source::link */
@@ -434,12 +460,9 @@ struct awl_server {
      * thread, read on client dispatch threads — atomics, no lock. Applies to
      * NEW windows only; mapped windows are resized by awl_window_resize. */
     atomic_int init_conf_w, init_conf_h;
-    struct wl_global* g_viewporter;
-    struct wl_global* g_frac_scale_mgr;
     struct wl_list frac_scales;      /* struct awl_frac_scale::link (awl_viewport.c) */
 
     struct wl_list surfaces;   /* struct awl_surface::link */
-    struct wl_list buffers;    /* struct awl_buffer::link (dmabuf) */
     struct wl_list clients;    /* struct awl_client_ctx::link (awl_server.c) */
     uint64_t next_surface_id;
 };

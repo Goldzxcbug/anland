@@ -37,7 +37,6 @@ pthread_mutex_t g_bufref_lock = PTHREAD_MUTEX_INITIALIZER;
  * under rwl, mutually exclusive with topology writes). Any thread (the shm
  * converter calls it too) with no logic-layer lock held. */
 void awl_surface_schedule_render(struct awl_surface* s) {
-    s->dirty = 1;
     pthread_rwlock_rdlock(&g_srv.rwl);
     uint64_t root_id;
     if (s->role == AWL_ROLE_CURSOR) {
@@ -205,7 +204,6 @@ void awl_surface_apply_buffer(struct awl_surface* s, struct wl_resource* res,
     e.height = b->height;
     e.stride = b->stride;
     e.format = b->drm_format;
-    e.modifier = b->modifier;
     r->b = awl_buffer_ref(b);
     r->release_res = release_res;
     if (release_res) awl_esync_bind_ref(release_res, r);
@@ -330,16 +328,18 @@ void awl_surface_buffer_gone(struct wl_resource* res) {
     struct awl_surface* s;
     wl_list_for_each(s, &g_srv.surfaces, link) {
         if (s->pending_buffer_res != res && s->current_buffer_res != res &&
-            s->latched_buffer_res != res && s->shm_res != res)
+            !(s->role == AWL_ROLE_SUBSURFACE && s->u.sub.latched_buffer_res == res) &&
+            s->shm_res != res)
             continue;   /* unrelated window: skip taking ev_lock (commit unaffected) */
         pthread_mutex_lock(&s->ev_lock);
         if (s->pending_buffer_res == res) s->pending_buffer_res = NULL;
         if (s->current_buffer_res == res) s->current_buffer_res = NULL;
-        if (s->latched_buffer_res == res) {
-            s->latched_buffer_res = NULL;
+        /* union branch gate: latched_* only exists while role == SUBSURFACE */
+        if (s->role == AWL_ROLE_SUBSURFACE && s->u.sub.latched_buffer_res == res) {
+            s->u.sub.latched_buffer_res = NULL;
             s->latched_attach = 0;
             s->sub_latched = 0;
-            if (s->latched_acquire_fd >= 0) { close(s->latched_acquire_fd); s->latched_acquire_fd = -1; }
+            if (s->u.sub.latched_acquire_fd >= 0) { close(s->u.sub.latched_acquire_fd); s->u.sub.latched_acquire_fd = -1; }
             /* the latched release object stays: it is delivered (immediate) when the latch resolves */
         }
         if (s->shm_res == res) {
@@ -500,21 +500,30 @@ static void surface_destroy_impl(struct wl_resource* res) {
     }
     /* On disconnect wl_map destroys in id order: wl_surface before
      * xdg_surface/toplevel/popup — strip their back-references, otherwise
-     * the later destroy handlers lock the already-freed ev_lock */
+     * the later destroy handlers lock the already-freed ev_lock.
+     * The role-object pointers live in the union: each is non-NULL only
+     * while role == its branch (the role-object destroy handlers clear
+     * them before role → NONE), so gate each read on role. xdg_surface_res
+     * is a plain field precisely because it stays set through the
+     * role == NONE window (toplevel dead, xdg_surface object alive). */
     if (s->xdg_surface_res)
         wl_resource_set_user_data(s->xdg_surface_res, NULL);
-    if (s->xdg_role_res)
-        wl_resource_set_user_data(s->xdg_role_res, NULL);
-    if (s->subsurface_res)
-        wl_resource_set_user_data(s->subsurface_res, NULL);
+    if (s->role == AWL_ROLE_TOPLEVEL || s->role == AWL_ROLE_POPUP) {
+        if (s->u.xdg.role_res)
+            wl_resource_set_user_data(s->u.xdg.role_res, NULL);
+    } else if (s->role == AWL_ROLE_SUBSURFACE) {
+        if (s->u.sub.subsurface_res)
+            wl_resource_set_user_data(s->u.sub.subsurface_res, NULL);
+    } else if (s->role == AWL_ROLE_XWAYLAND) {
+        if (s->u.xway.res) {
+            wl_resource_set_user_data(s->u.xway.res, NULL);
+            s->u.xway.res = NULL;
+        }
+    }
     if (s->viewport_res)   /* #31: viewport handler holds a surface pointer — break the link */
         wl_resource_set_user_data(s->viewport_res, NULL);
     if (s->frac_res)       /* fractional_scale handler does not touch surface, just clear the flag */
         s->frac_res = NULL;
-    if (s->xwayland_res) { /* #32: xwayland_surface_v1 destroy handler holds a pointer */
-        wl_resource_set_user_data(s->xwayland_res, NULL);
-        s->xwayland_res = NULL;
-    }
 
     /* subsurface topology teardown: this is a child layer → unlink +
      * root window redraws without the layer; this is a parent → orphan
@@ -530,8 +539,8 @@ static void surface_destroy_impl(struct wl_resource* res) {
         awl_subsurface_unlink_locked(s);
     }
     if (s->sub_latched && s->latched_attach) {   /* latched buffer never presented — release directly */
-        latched_drop = s->latched_buffer_res;
-        s->latched_buffer_res = NULL;
+        latched_drop = s->u.sub.latched_buffer_res;
+        s->u.sub.latched_buffer_res = NULL;
     }
     s->sub_latched = 0;
     s->latched_attach = 0;
@@ -755,7 +764,6 @@ static void surface_commit(struct wl_client* client, struct wl_resource* res) {
     if (s->pend_vpd) {           /* #31 viewport dst double-buffered (same as kwin) */
         s->vp_dst_w = s->pend_vpd_w;
         s->vp_dst_h = s->pend_vpd_h;
-        s->vp_has_dst = s->vp_dst_w > 0;
         s->pend_vpd = 0;
     }
     if (s->pend_vps) {           /* viewport source (0 size = reset) */
@@ -914,7 +922,7 @@ static void compositor_create_surface(struct wl_client* client,
     s->pend_buf_transform = -1;   /* -1 = nothing pending */
     s->pending_damage_empty = 1;   /* damage accumulator starts empty (calloc 0 = "has rect") */
     s->pend_acquire_fd = -1;
-    s->latched_acquire_fd = -1;
+    /* u.sub.latched_acquire_fd: initialized at role assignment (get_subsurface) */
     wl_list_init(&s->esync_all);
     wl_list_init(&s->esync_gc);
     /* frame stream: created up front so the pointer is immutable for the
@@ -968,9 +976,10 @@ static void compositor_bind(struct wl_client* client, void* data,
 }
 
 void awl_surface_setup(void) {
-    g_srv.g_compositor = wl_global_create(g_srv.display,
-                                          &wl_compositor_interface, 4,
-                                          NULL, compositor_bind);
+    if (!wl_global_create(g_srv.display,
+                          &wl_compositor_interface, 4,
+                          NULL, compositor_bind))
+        LOGE("wl_compositor global create failed");
 }
 
 /* ---- adapter render-pull interfaces (called on the render thread) ----

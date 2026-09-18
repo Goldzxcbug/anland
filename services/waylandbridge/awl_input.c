@@ -303,9 +303,9 @@ void awl_input_setup(void) {
     g_mods_depressed = g_mods_locked = 0;
     memset(g_keys_down, 0, sizeof(g_keys_down));
     cursor_reset_state();
-    g_srv.g_seat = wl_global_create(g_srv.display, &wl_seat_interface, 5,
-                                    NULL, seat_bind);
-    if (!g_srv.g_seat) LOGE("wl_seat global create failed");
+    if (!wl_global_create(g_srv.display, &wl_seat_interface, 5,
+                          NULL, seat_bind))
+        LOGE("wl_seat global create failed");
     if (!wl_global_create(g_srv.display,
                           &zwp_relative_pointer_manager_v1_interface,
                           1, NULL, relmgr_bind))

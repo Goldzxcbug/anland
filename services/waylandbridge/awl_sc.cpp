@@ -365,7 +365,9 @@ struct sc_rlayer {
 
     /* buffer state (render thread; guarded by the window's m) */
     sc_mode mode = SC_MODE_NONE;       /* what the SC shows right now */
-    bool has_buffer = false;           /* a buffer is latched + visible */
+    /* NOTE: current (SCANOUT) and egl_onscreen (EGL*) are provably exclusive —
+     * latched_forget_locked clears both before every latch — but pooling them
+     * into a union saves ~4B and obscures the mode switch; not done. */
     struct awl_bq_buffer* current = nullptr;   /* SCANOUT: element latched (referenced) */
     std::shared_ptr<sc_egl_pool> pool;         /* EGL*: target swapchain */
     int egl_onscreen = -1;                     /* EGL*: pool slot latched on the SC */
@@ -391,13 +393,16 @@ struct sc_rlayer {
      * ~¼ s of dropped frames to enter, 2 s of none to leave. */
     unsigned sup_last = 0;                     /* queue superseded counter at the last tick */
     unsigned fast_ticks = 0, slow_ticks = 0;   /* consecutive ticks with / without dropped frames */
-    bool overspeed = false;
+    /* 1-bit group — every access on the render path under sc_window::m
+     * (bit-field writes are word-wide read-modify-write: one word, one lock) */
+    bool overspeed : 1;                        /* client commits faster than vsync → EGL copy mode */
+    bool has_buffer : 1;                       /* a buffer is latched + visible */
+    bool geo_valid : 1;                        /* last applied geometry below is meaningful */
+    bool gopaque : 1;
+    bool gcrop : 1;
     /* last applied geometry (skip unchanged) */
-    bool geo_valid = false;
     int32_t gx = 0, gy = 0, gw = 0, gh = 0;
     int32_t gxform = -1;
-    bool gopaque = false;
-    bool gcrop = false;
     int32_t gcrop_l = 0, gcrop_t = 0, gcrop_r = 0, gcrop_b = 0;
 };
 

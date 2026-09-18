@@ -372,7 +372,6 @@ int awl_server_start(int listen_fd, const awl_display_info_t* info,
     memset(&g_srv, 0, sizeof(g_srv));
     pthread_rwlock_init(&g_srv.rwl, NULL);
     wl_list_init(&g_srv.surfaces);
-    wl_list_init(&g_srv.buffers);
     wl_list_init(&g_srv.clients);
     wl_list_init(&g_outputs);
     g_srv.next_surface_id = 1;
@@ -399,8 +398,9 @@ int awl_server_start(int listen_fd, const awl_display_info_t* info,
     awl_icon_setup();         /* xdg_toplevel_icon_manager_v1 (per-window icons, C_ICON) */
     awl_esync_setup();        /* zwp_linux_explicit_synchronization_v1 (acquire/release fences) */
 
-    g_srv.g_output = wl_global_create(g_srv.display, &wl_output_interface, 3,
-                                      NULL, output_bind);
+    if (!wl_global_create(g_srv.display, &wl_output_interface, 3,
+                          NULL, output_bind))
+        LOGE("wl_output global create failed");
 
     if (listen_fd >= 0)
         wl_event_loop_add_fd(g_srv.loop, listen_fd, WL_EVENT_READABLE,

@@ -26,15 +26,15 @@ static void send_configure_locked(struct awl_surface* s,
         uint32_t* p = wl_array_add(&arr, nstates * sizeof(uint32_t));
         if (p) memcpy(p, states, nstates * sizeof(uint32_t));
     }
-    s->configure_serial = wl_display_get_serial(g_srv.display);
-    s->conf_w = w;
-    s->conf_h = h;
+    uint32_t serial = wl_display_get_serial(g_srv.display);
+    s->u.xdg.conf_w = w;
+    s->u.xdg.conf_h = h;
     s->configured = 1;
-    xdg_toplevel_send_configure(s->xdg_role_res, w, h, &arr);
+    xdg_toplevel_send_configure(s->u.xdg.role_res, w, h, &arr);
     wl_array_release(&arr);
-    xdg_surface_send_configure(s->xdg_surface_res, s->configure_serial);
+    xdg_surface_send_configure(s->xdg_surface_res, serial);
     LOGD("surface %llu configure %dx%d serial=%u",
-            (unsigned long long)s->id, w, h, s->configure_serial);
+            (unsigned long long)s->id, w, h, serial);
 }
 
 /* Event-thread convenience entry (takes the lock itself) */
@@ -129,7 +129,7 @@ static void toplevel_res_destroy(struct wl_resource* res) {
     struct awl_surface* s = wl_resource_get_user_data(res);
     if (!s) return;
     pthread_mutex_lock(&s->ev_lock);   /* binder thread reads fields concurrently */
-    s->xdg_role_res = NULL;
+    s->u.xdg.role_res = NULL;
     s->role = AWL_ROLE_NONE;
     bool gone = s->window_live;
     s->window_live = 0;
@@ -192,7 +192,7 @@ static void popup_res_destroy(struct wl_resource* res) {
         awl_subsurface_unlink_locked(s);
     }
     pthread_mutex_lock(&s->ev_lock);
-    s->xdg_role_res = NULL;
+    s->u.xdg.role_res = NULL;
     s->role = AWL_ROLE_NONE;
     pthread_mutex_unlock(&s->ev_lock);
     pthread_rwlock_unlock(&g_srv.rwl);
@@ -211,7 +211,7 @@ static const struct xdg_popup_interface popup_iface = {
 struct awl_positioner {
     int32_t size_w, size_h;
     int32_t anchor_x, anchor_y, anchor_w, anchor_h;
-    uint32_t anchor, gravity, constraint;
+    uint32_t anchor, gravity;
     int32_t off_x, off_y;
 };
 
@@ -238,8 +238,8 @@ static void pos_set_gravity(struct wl_client* c, struct wl_resource* res, uint32
 }
 static void pos_set_constraint_adjustment(struct wl_client* c, struct wl_resource* res,
                                           uint32_t adjustment) {
-    struct awl_positioner* p = wl_resource_get_user_data(res);
-    if (p) p->constraint = adjustment;
+    /* constraint-adjustment (flip/slide/resize) is not implemented — the
+     * popup is placed by anchor math + screen clamp only. Recorded nowhere. */
 }
 static void pos_set_offset(struct wl_client* c, struct wl_resource* res,
                            int32_t x, int32_t y) {
@@ -407,12 +407,9 @@ static void popup_reposition(struct wl_client* c, struct wl_resource* res,
     pthread_mutex_lock(&s->ev_lock);
     s->sub_x = x + pgx;
     s->sub_y = y + pgy;
-    s->popup_x = x;
-    s->popup_y = y;
     xdg_popup_send_repositioned(res, token);
     xdg_popup_send_configure(res, x, y, p->size_w, p->size_h);
-    s->configure_serial = wl_display_next_serial(g_srv.display);
-    xdg_surface_send_configure(s->xdg_surface_res, s->configure_serial);
+    xdg_surface_send_configure(s->xdg_surface_res, wl_display_next_serial(g_srv.display));
     pthread_mutex_unlock(&s->ev_lock);
     if (root_mapped && g_srv.cbs.window_dirty)
         g_srv.cbs.window_dirty(g_srv.cbs.user, root_id);
@@ -440,8 +437,14 @@ static void xdg_surface_get_toplevel(struct wl_client* c,
     wl_resource_set_implementation(t, &toplevel_iface, s, toplevel_res_destroy);
 
     pthread_mutex_lock(&s->ev_lock);
+    /* fresh xdg branch (role union): a role re-assignment after a
+     * role-object destroy must not see the previous branch's — or a
+     * previous xdg life's — words; a re-rolled toplevel is a NEW window
+     * (see toplevel_res_destroy). */
+    s->u.xdg.conf_w = s->u.xdg.conf_h = 0;
+    s->u.xdg.pend_w = s->u.xdg.pend_h = 0;
     s->role = AWL_ROLE_TOPLEVEL;
-    s->xdg_role_res = t;
+    s->u.xdg.role_res = t;
     s->xdg_surface_res = res;
     awl_surface_set_title(s, NULL);
 
@@ -492,8 +495,11 @@ static void xdg_surface_get_popup(struct wl_client* c, struct wl_resource* res,
      * configure echo keeps the protocol-space values. After
      * set_window_geometry the layer snapshot derives the buffer position. */
     pthread_rwlock_wrlock(&g_srv.rwl);
+    /* fresh xdg branch (role union) — see get_toplevel */
+    s->u.xdg.conf_w = s->u.xdg.conf_h = 0;
+    s->u.xdg.pend_w = s->u.xdg.pend_h = 0;
     s->role = AWL_ROLE_POPUP;
-    s->xdg_role_res = pr;
+    s->u.xdg.role_res = pr;
     s->xdg_surface_res = res;
     awl_subsurface_link_immediate_above_locked(s, parent);
     pthread_rwlock_unlock(&g_srv.rwl);
@@ -506,12 +512,9 @@ static void xdg_surface_get_popup(struct wl_client* c, struct wl_resource* res,
     pthread_mutex_lock(&s->ev_lock);
     s->sub_x = x + pgx;
     s->sub_y = y + pgy;
-    s->popup_x = x;
-    s->popup_y = y;
-    s->configure_serial = wl_display_get_serial(g_srv.display);
     s->configured = 1;
     xdg_popup_send_configure(pr, x, y, sw, sh);
-    xdg_surface_send_configure(res, s->configure_serial);
+    xdg_surface_send_configure(res, wl_display_get_serial(g_srv.display));
     pthread_mutex_unlock(&s->ev_lock);
     LOGI("popup %llu of %llu at %d,%d %dx%d",
             (unsigned long long)s->id, (unsigned long long)parent->id,
@@ -629,9 +632,10 @@ static void wm_base_bind(struct wl_client* client, void* data,
 void awl_xdg_setup(void) {
     g_srv.init_conf_w = 800;   /* #33 defaults; cfg_load_and_apply overrides at startup */
     g_srv.init_conf_h = 600;
-    g_srv.g_xdg_wm_base = wl_global_create(g_srv.display,
-                                           &xdg_wm_base_interface,
-                                           AWL_XDG_VERSION, NULL, wm_base_bind);
+    if (!wl_global_create(g_srv.display,
+                          &xdg_wm_base_interface,
+                          AWL_XDG_VERSION, NULL, wm_base_bind))
+        LOGE("xdg_wm_base global create failed");
 }
 
 /* ---------------- initial-configure placeholder size (#33, daemon config) ----------------
@@ -677,13 +681,18 @@ void awl_window_resize(uint64_t id, int32_t w, int32_t h) {
     if (s && (s->role == AWL_ROLE_TOPLEVEL || s->role == AWL_ROLE_XWAYLAND)) {
         hit = 1;
         pthread_mutex_lock(&s->ev_lock);
+        /* re-read role under the lock: the check above took it under rwl.rd
+         * only, and a re-rolled role (toplevel → NONE → subsurface) puts
+         * another branch's words where conf_w/role_res live */
+        enum awl_role r = s->role;
         changed = s->phys_w != w || s->phys_h != h;
         LOGD("window %llu resize %dx%d (was %dx%d conf=%dx%d mapped=%d changed=%d)",
              (unsigned long long)s->id, w, h, s->phys_w, s->phys_h,
-             s->conf_w, s->conf_h, s->mapped, changed);
+             r == AWL_ROLE_TOPLEVEL ? s->u.xdg.conf_w : 0,
+             r == AWL_ROLE_TOPLEVEL ? s->u.xdg.conf_h : 0, s->mapped, changed);
         s->phys_w = w;   /* Android window size (for view→logical conversion / render ratio) */
         s->phys_h = h;
-        if (s->role == AWL_ROLE_XWAYLAND) {
+        if (r == AWL_ROLE_XWAYLAND) {
             /* X window size is decided on the X side (no configure channel;
              * HMCL etc. cannot resize): does not follow the Android window —
              * rendering stretches the buffer over the whole window, input
@@ -691,22 +700,25 @@ void awl_window_resize(uint64_t id, int32_t w, int32_t h) {
              * record the size. */
             LOGD("xwayland window %llu phys=%dx%d", (unsigned long long)s->id,
                     w, h);
-        } else {
+        } else if (r == AWL_ROLE_TOPLEVEL) {
             int32_t lw = phys_to_logical(w);
             int32_t lh = phys_to_logical(h);
-            if (!s->xdg_role_res || !s->mapped) {
+            if (!s->u.xdg.role_res || !s->mapped) {
                 /* Window not ready (first buffer not committed / role not built):
                  * cache it; awl_xdg_flush_pending forces the send after map — the
                  * initial size signal is not lost */
-                s->pend_w = w;
-                s->pend_h = h;
+                s->u.xdg.pend_w = w;
+                s->u.xdg.pend_h = h;
                 s->has_pending = 1;
-            } else if (lw != s->conf_w || lh != s->conf_h) {
+            } else if (lw != s->u.xdg.conf_w || lh != s->u.xdg.conf_h) {
                 s->has_pending = 0;   /* exact value arrived, invalidate the cache */
                 send_configure_locked(s, lw, lh, NULL, 0);
-                wl_client_flush(wl_resource_get_client(s->xdg_role_res));
+                wl_client_flush(wl_resource_get_client(s->u.xdg.role_res));
             }   /* same size: prevent loops, no resend */
         }
+        /* role re-assigned while we waited for the lock (window closed and
+         * the surface re-rolled): the configure state belongs to the union's
+         * xdg branch — nothing to do */
         pthread_mutex_unlock(&s->ev_lock);
     }
     pthread_rwlock_unlock(&g_srv.rwl);
@@ -732,12 +744,14 @@ void awl_window_set_activated(uint64_t id, int activated) {
     struct awl_surface* s = awl_surface_by_id(id);
     if (s && s->role == AWL_ROLE_TOPLEVEL) {
         pthread_mutex_lock(&s->ev_lock);
-        if (s->xdg_role_res && s->mapped && (int)s->activated != !!activated) {
+        /* re-check role under the lock (union words — see awl_window_resize) */
+        if (s->role == AWL_ROLE_TOPLEVEL &&
+            s->u.xdg.role_res && s->mapped && (int)s->activated != !!activated) {
             s->activated = !!activated;
             uint32_t states[] = { XDG_TOPLEVEL_STATE_ACTIVATED };
-            send_configure_locked(s, s->conf_w, s->conf_h, states,
+            send_configure_locked(s, s->u.xdg.conf_w, s->u.xdg.conf_h, states,
                                   s->activated ? 1u : 0u);
-            wl_client_flush(wl_resource_get_client(s->xdg_role_res));
+            wl_client_flush(wl_resource_get_client(s->u.xdg.role_res));
         }
         pthread_mutex_unlock(&s->ev_lock);
     }
@@ -750,14 +764,16 @@ void awl_xdg_flush_pending(uint64_t id) {
     struct awl_surface* s = awl_surface_by_id(id);
     if (s && s->role == AWL_ROLE_TOPLEVEL) {
         pthread_mutex_lock(&s->ev_lock);
-        if (s->has_pending && s->xdg_role_res && s->mapped) {
+        /* re-check role under the lock (union words — see awl_window_resize) */
+        if (s->role == AWL_ROLE_TOPLEVEL &&
+            s->has_pending && s->u.xdg.role_res && s->mapped) {
             s->has_pending = 0;
             LOGI("surface %llu flush pending configure %dx%d (logical %dx%d)",
-                    (unsigned long long)s->id, s->pend_w, s->pend_h,
-                    phys_to_logical(s->pend_w), phys_to_logical(s->pend_h));
-            send_configure_locked(s, phys_to_logical(s->pend_w),
-                                  phys_to_logical(s->pend_h), NULL, 0);
-            wl_client_flush(wl_resource_get_client(s->xdg_role_res));
+                    (unsigned long long)s->id, s->u.xdg.pend_w, s->u.xdg.pend_h,
+                    phys_to_logical(s->u.xdg.pend_w), phys_to_logical(s->u.xdg.pend_h));
+            send_configure_locked(s, phys_to_logical(s->u.xdg.pend_w),
+                                  phys_to_logical(s->u.xdg.pend_h), NULL, 0);
+            wl_client_flush(wl_resource_get_client(s->u.xdg.role_res));
         }
         pthread_mutex_unlock(&s->ev_lock);
     }
@@ -768,11 +784,13 @@ void awl_xdg_flush_pending(uint64_t id) {
 void awl_window_close(uint64_t id) {
     pthread_rwlock_rdlock(&g_srv.rwl);
     struct awl_surface* s = awl_surface_by_id(id);
-    if (s && s->role == AWL_ROLE_TOPLEVEL && s->xdg_role_res) {
+    if (s && s->role == AWL_ROLE_TOPLEVEL && s->u.xdg.role_res) {
         pthread_mutex_lock(&s->ev_lock);
-        if (s->xdg_role_res) {   /* re-check under lock (destroy handler clears it) */
-            xdg_toplevel_send_close(s->xdg_role_res);
-            wl_client_flush(wl_resource_get_client(s->xdg_role_res));
+        /* re-check role AND role_res under the lock — role union word (see
+         * the popup_done re-check above) */
+        if (s->role == AWL_ROLE_TOPLEVEL && s->u.xdg.role_res) {
+            xdg_toplevel_send_close(s->u.xdg.role_res);
+            wl_client_flush(wl_resource_get_client(s->u.xdg.role_res));
             LOGI("surface %llu close requested", (unsigned long long)id);
         }
         pthread_mutex_unlock(&s->ev_lock);
@@ -800,9 +818,12 @@ int awl_popup_input_grab(struct awl_surface* hit) {
     }
     if (!top) return 0;
     pthread_mutex_lock(&top->ev_lock);
-    if (top->xdg_role_res) {   /* re-check under lock (destroy handler clears it) */
-        xdg_popup_send_popup_done(top->xdg_role_res);
-        wl_client_flush(wl_resource_get_client(top->xdg_role_res));
+    /* re-check role AND role_res under the lock: role_res lives in the role
+     * union, and a re-rolled role (popup → NONE → subsurface) would have
+     * another branch's object in that word */
+    if (top->role == AWL_ROLE_POPUP && top->u.xdg.role_res) {
+        xdg_popup_send_popup_done(top->u.xdg.role_res);
+        wl_client_flush(wl_resource_get_client(top->u.xdg.role_res));
         LOGI("popup %llu dismissed (input grab)", (unsigned long long)top->id);
     }
     pthread_mutex_unlock(&top->ev_lock);

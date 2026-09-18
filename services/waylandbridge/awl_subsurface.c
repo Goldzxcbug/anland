@@ -92,7 +92,6 @@ void awl_subsurface_link_immediate_above_locked(struct awl_surface* child,
     child->sub_parent = parent;
     wl_list_insert(parent->sub_children.prev, &child->sub_child_link);
     wl_list_insert(parent->sub_above.prev, &child->sub_link);
-    child->sub_above_parent = 1;
     /* KWin addChild appends to both current and pending stacks. This preserves
      * any ordered place_* requests already waiting on the parent. */
     wl_list_insert(parent->pend_sub_above.prev, &child->sub_pend_link);
@@ -105,7 +104,6 @@ void awl_subsurface_unlink_locked(struct awl_surface* child) {
     list_remove_init(&child->sub_pend_link);
     list_remove_init(&child->sub_child_link);
     child->sub_parent = NULL;
-    child->sub_above_parent = 0;
     child->sub_pend_above = 0;
 }
 
@@ -124,12 +122,10 @@ static int sub_apply_stack(struct awl_surface* parent) {
     wl_list_for_each_safe(ch, tmp, &parent->pend_sub_below, sub_pend_link) {
         list_remove_init(&ch->sub_pend_link);
         wl_list_insert(parent->sub_below.prev, &ch->sub_link);
-        ch->sub_above_parent = 0;
     }
     wl_list_for_each_safe(ch, tmp, &parent->pend_sub_above, sub_pend_link) {
         list_remove_init(&ch->sub_pend_link);
         wl_list_insert(parent->sub_above.prev, &ch->sub_link);
-        ch->sub_above_parent = 1;
     }
     parent->sub_stack_pending = 0;
     sub_pending_rebuild_locked(parent);
@@ -161,18 +157,18 @@ int awl_subsurface_maybe_latch(struct awl_surface* s) {
             /* superseded by a newer latch, never presented: the buffer
              * (unless it is also the displayed one) and its explicit-sync
              * pair go straight back */
-            if (s->latched_buffer_res && s->latched_buffer_res != s->pending_buffer_res)
-                drop = s->latched_buffer_res;
-            drop_fd = s->latched_acquire_fd;
-            drop_rel = s->latched_release_res;
+            if (s->u.sub.latched_buffer_res && s->u.sub.latched_buffer_res != s->pending_buffer_res)
+                drop = s->u.sub.latched_buffer_res;
+            drop_fd = s->u.sub.latched_acquire_fd;
+            drop_rel = s->u.sub.latched_release_res;
         }
-        s->latched_buffer_res = s->pending_buffer_res;
+        s->u.sub.latched_buffer_res = s->pending_buffer_res;
         s->pending_buffer_res = NULL;
         s->pending_attached = 0;
         s->latched_attach = 1;
-        s->latched_acquire_fd = s->pend_acquire_fd;   /* explicit-sync state latches with the buffer */
+        s->u.sub.latched_acquire_fd = s->pend_acquire_fd;   /* explicit-sync state latches with the buffer */
         s->pend_acquire_fd = -1;
-        s->latched_release_res = s->pend_release_res;
+        s->u.sub.latched_release_res = s->pend_release_res;
         s->pend_release_res = NULL;
     }
     s->sub_latched = 1;
@@ -188,14 +184,14 @@ int awl_subsurface_maybe_latch(struct awl_surface* s) {
 static void sub_apply_state(struct awl_surface* ch) {
     pthread_mutex_lock(&ch->ev_lock);
     int had_attach = ch->latched_attach;
-    int acquire_fd = ch->latched_acquire_fd;
-    struct wl_resource* release_res = ch->latched_release_res;
+    int acquire_fd = ch->u.sub.latched_acquire_fd;
+    struct wl_resource* release_res = ch->u.sub.latched_release_res;
     if (ch->latched_attach)
-        ch->current_buffer_res = ch->latched_buffer_res;
-    ch->latched_buffer_res = NULL;
+        ch->current_buffer_res = ch->u.sub.latched_buffer_res;
+    ch->u.sub.latched_buffer_res = NULL;
     ch->latched_attach = 0;
-    ch->latched_acquire_fd = -1;
-    ch->latched_release_res = NULL;
+    ch->u.sub.latched_acquire_fd = -1;
+    ch->u.sub.latched_release_res = NULL;
     ch->sub_latched = 0;
     /* latched state applies now — its damage with it (also covers a latched
      * damage-only commit: no attach, pd accumulated, function's empty-check
@@ -225,8 +221,8 @@ static int sub_parent_apply_list(struct wl_list* list) {
         pthread_mutex_lock(&ch->ev_lock);
         int apply = ch->sub_latched;
         if (ch->sub_pos_pending) {          /* KWin parentApplyState */
-            ch->sub_x = ch->pend_sub_x;
-            ch->sub_y = ch->pend_sub_y;
+            ch->sub_x = ch->u.sub.pend_x;
+            ch->sub_y = ch->u.sub.pend_y;
             ch->sub_pos_pending = 0;
             applied = 1;   /* layer position change also needs redraw */
         }
@@ -271,7 +267,7 @@ static void sub_res_destroy(struct wl_resource* res) {
     uint64_t root_id = 0;
     int dirty = 0;
     pthread_rwlock_wrlock(&g_srv.rwl);
-    s->subsurface_res = NULL;
+    s->u.sub.subsurface_res = NULL;
     if (s->sub_parent) {
         struct awl_surface* root = awl_subsurface_root(s);
         root_id = root->id;
@@ -286,13 +282,13 @@ static void sub_res_destroy(struct wl_resource* res) {
     struct wl_resource* drop_rel = NULL;
     pthread_mutex_lock(&s->ev_lock);
     if (s->sub_latched && s->latched_attach) {
-        latched_drop = s->latched_buffer_res;
-        drop_fd = s->latched_acquire_fd;
-        drop_rel = s->latched_release_res;
-        s->latched_acquire_fd = -1;
-        s->latched_release_res = NULL;
+        latched_drop = s->u.sub.latched_buffer_res;
+        drop_fd = s->u.sub.latched_acquire_fd;
+        drop_rel = s->u.sub.latched_release_res;
+        s->u.sub.latched_acquire_fd = -1;
+        s->u.sub.latched_release_res = NULL;
     }
-    s->latched_buffer_res = NULL;
+    s->u.sub.latched_buffer_res = NULL;
     s->sub_latched = 0;
     s->latched_attach = 0;
     s->sub_pos_pending = 0;
@@ -314,8 +310,8 @@ static void sub_set_position(struct wl_client* client, struct wl_resource* res,
     struct awl_surface* s = wl_resource_get_user_data(res);
     if (!s || !s->sub_parent) return;
     pthread_mutex_lock(&s->ev_lock);
-    s->pend_sub_x = x;
-    s->pend_sub_y = y;
+    s->u.sub.pend_x = x;
+    s->u.sub.pend_y = y;
     s->sub_pos_pending = 1;
     pthread_mutex_unlock(&s->ev_lock);
 }
@@ -430,7 +426,7 @@ static void subcompositor_get_subsurface(struct wl_client* client,
                                "invalid surface argument");
         return;
     }
-    if (s->role != AWL_ROLE_NONE || s->subsurface_res) {
+    if (s->role != AWL_ROLE_NONE || s->u.sub.subsurface_res) {
         wl_resource_post_error(res, WL_SUBCOMPOSITOR_ERROR_BAD_SURFACE,
                                "surface already has a role");
         return;
@@ -459,14 +455,17 @@ static void subcompositor_get_subsurface(struct wl_client* client,
 
     pthread_rwlock_wrlock(&g_srv.rwl);
     s->role = AWL_ROLE_SUBSURFACE;
-    s->subsurface_res = ss;
+    s->u.sub.subsurface_res = ss;
     awl_subsurface_link_immediate_above_locked(s, parent);
     s->sub_sync = 1;   /* protocol default: sync */
     s->sub_latched = 0;
-    s->latched_buffer_res = NULL;
+    s->u.sub.latched_buffer_res = NULL;
+    s->u.sub.latched_release_res = NULL;
+    s->u.sub.latched_acquire_fd = -1;   /* fresh sub branch (role union) */
     s->latched_attach = 0;
     s->sub_x = 0;
     s->sub_y = 0;
+    s->u.sub.pend_x = s->u.sub.pend_y = 0;
     s->sub_pos_pending = 0;
     pthread_rwlock_unlock(&g_srv.rwl);
     LOGI("surface %llu -> subsurface of %llu (stack top)",
@@ -488,9 +487,10 @@ static void subcompositor_bind(struct wl_client* client, void* data,
 }
 
 void awl_subsurface_setup(void) {
-    g_srv.g_subcompositor = wl_global_create(
-            g_srv.display, &wl_subcompositor_interface, 1,
-            NULL, subcompositor_bind);
+    if (!wl_global_create(g_srv.display,
+                          &wl_subcompositor_interface, 1,
+                          NULL, subcompositor_bind))
+        LOGE("wl_subcompositor global create failed");
 }
 
 /* ---- Render layer snapshot (awl.h public API, called by render/input threads) ----

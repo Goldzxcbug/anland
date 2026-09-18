@@ -239,17 +239,21 @@ enum {
 /* ---------------- window state table ---------------- */
 
 struct awl_win_state {
-    char title[256];
-    bool attached;        /* Activity holds a surface (render target exists) */
+    /* 1-bit group: every access is under g_state_lock (bit-field writes are
+     * word-wide read-modify-write — one shared word needs one common lock) */
+    bool attached : 1;    /* Activity holds a surface (render target exists) */
+    bool kbd_focus : 1;   /* window holds keyboard focus (mirror of T_FOCUS; used to synthesize leave on detach) */
+    bool ime_active : 1;
+    bool keep_on : 1;     /* idle inhibitor mirror (C_KEEPON) */
+    char* title = nullptr;   /* heap strdup — NULL == empty (keeps the map node
+                              * small; only the AWL_T_LIST dump reads it) */
     int64_t host = 0;     /* current holder Activity instance id (SURFACE-reported; 0=unknown) */
-    bool kbd_focus = false;   /* window holds keyboard focus (mirror of T_FOCUS; used to synthesize leave on detach) */
     AIBinder* ctrl;       /* control channel binder (proxy of the Activity's CtrlBinder) */
 
     /* IME lifecycle (mirror of the client text_input state; kept alive
      * across detach):
      * on re-attach the input state is still there → re-send
      * C_IME_SHOW(+state snapshot) to reopen the input method. */
-    bool ime_active;
     uint32_t ime_hint, ime_purpose;
     char* ime_text = nullptr;  /* UTF-8 surrounding (client set_surrounding_text);
                                  * heap strdup — NULL == empty (keeps the map node small;
@@ -263,11 +267,6 @@ struct awl_win_state {
      * C_CAPTURE so the new Activity instance captures again. */
     int capture_mode = 0;   /* AWL_CAPTURE_* (0 = none) */
     int32_t cap_rect[4] = {0, 0, 0, 0};   /* confine region, view pixels */
-
-    /* Idle inhibitor (mirror of the logic-layer zwp_idle_inhibit aggregate;
-     * kept alive across detach like the capture mirror): on re-attach the
-     * new Activity instance has no window flag yet → re-send C_KEEPON. */
-    bool keep_on = false;
 };
 
 static std::mutex g_state_lock;
@@ -773,7 +772,8 @@ static void cb_window_created(void* user, uint64_t id, int32_t pref_w, int32_t p
     {
         std::lock_guard<std::mutex> lk(g_state_lock);
         awl_win_state& ws = g_wins[id];
-        snprintf(ws.title, sizeof(ws.title), "%s", title ? title : "");
+        free(ws.title);
+        ws.title = title && title[0] ? strdup(title) : nullptr;
         ws.attached = false;
     }
     /* lifecycle event: subscribers learn the window immediately (own-uid
@@ -813,6 +813,7 @@ static void cb_window_destroyed(void* user, uint64_t id) {
             it->second.ctrl = nullptr;    /* ownership transferred to this send */
             sched_drop = it->second.attached;
             free(it->second.ime_text);
+            free(it->second.title);
         }
         g_wins.erase(id);
         sched_none_left = sched_drop && !any_attached_locked();
@@ -855,7 +856,8 @@ static void cb_window_title(void* user, uint64_t id, const char* title) {
         std::lock_guard<std::mutex> lk(g_state_lock);
         auto it = g_wins.find(id);
         if (it == g_wins.end() || !title || !title[0]) return;
-        snprintf(it->second.title, sizeof(it->second.title), "%s", title);
+        free(it->second.title);
+        it->second.title = strdup(title);
         if (it->second.ctrl) {
             ctrl = it->second.ctrl;
             AIBinder_incStrong(ctrl);   /* keep alive for the out-of-lock transact */
@@ -1839,7 +1841,7 @@ static binder_status_t host_on_transact(AIBinder* binder, transaction_code_t cod
             std::lock_guard<std::mutex> lk(g_state_lock);
             rows.reserve(g_wins.size());
             for (auto& [id, ws] : g_wins)
-                rows.push_back({id, ws.attached, ws.title});
+                rows.push_back({id, ws.attached, ws.title ? ws.title : ""});
         }
         /* normal (non-allowlisted) app: only its own windows — the same uid
          * ownership rule as the SURFACE auth pass (the window's wayland

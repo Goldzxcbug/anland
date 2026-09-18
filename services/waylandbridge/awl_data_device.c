@@ -157,7 +157,6 @@ static void offer_set_action(struct awl_data_offer* off, uint32_t action) {
 }
 
 static void source_send_action(struct awl_data_source* src, uint32_t action) {
-    src->selected_action = action;
     if (!src->res) return;
     if (wl_resource_get_version(src->res) < WL_DATA_SOURCE_ACTION_SINCE_VERSION)
         return;
@@ -1082,9 +1081,8 @@ void awl_datadev_setup(void) {
     wl_list_init(&g_srv.data_sources);
     wl_list_init(&g_srv.data_offers);
     pthread_mutex_init(&g_srv.dd_lock, NULL);
-    g_srv.g_data_device_manager = wl_global_create(
-            g_srv.display, &wl_data_device_manager_interface,
-            AWL_DDM_VERSION, NULL, ddm_bind);
-    if (!g_srv.g_data_device_manager)
+    if (!wl_global_create(g_srv.display,
+                          &wl_data_device_manager_interface,
+                          AWL_DDM_VERSION, NULL, ddm_bind))
         LOGE("wl_data_device_manager global create failed");
 }

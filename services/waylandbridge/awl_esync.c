@@ -52,7 +52,10 @@ static void release_res_destroy(struct wl_resource* res) {
     if (s) {
         wl_list_remove(&er->all_link);
         if (s->pend_release_res == res) s->pend_release_res = NULL;
-        if (s->latched_release_res == res) s->latched_release_res = NULL;
+        /* union branch: only meaningful while role == SUBSURFACE (after a
+         * role re-assignment these words may belong to another branch) */
+        if (s->role == AWL_ROLE_SUBSURFACE && s->u.sub.latched_release_res == res)
+            s->u.sub.latched_release_res = NULL;
         /* a shm commit keeps it as the release object of its source buffer
          * until a backend has read the pixels (ev_lock-owned word) */
         awl_surface_shm_release_gone(s, res);
@@ -203,7 +206,14 @@ void awl_esync_surface_gone(struct awl_surface* s) {
         s->sync_res = NULL;
     }
     if (s->pend_acquire_fd >= 0) { close(s->pend_acquire_fd); s->pend_acquire_fd = -1; }
-    if (s->latched_acquire_fd >= 0) { close(s->latched_acquire_fd); s->latched_acquire_fd = -1; }
+    /* latched_* is the sync-SUBSURFACE latch slot: the wl_subsurface destroy
+     * path closes + resets it before role → NONE, so a non-SUBSURFACE role
+     * here means nothing is latched (do NOT touch the union word — it may
+     * belong to the xdg/xwayland branch) */
+    if (s->role == AWL_ROLE_SUBSURFACE && s->u.sub.latched_acquire_fd >= 0) {
+        close(s->u.sub.latched_acquire_fd);
+        s->u.sub.latched_acquire_fd = -1;
+    }
     /* every release object of this surface: never-delivered ones get an
      * immediate_release (we are done with everything), then all are
      * destroyed here on the dispatch thread */
@@ -220,7 +230,7 @@ void awl_esync_surface_gone(struct awl_surface* s) {
     wl_list_init(&s->esync_all);
     wl_list_init(&s->esync_gc);
     s->pend_release_res = NULL;
-    s->latched_release_res = NULL;
+    if (s->role == AWL_ROLE_SUBSURFACE) s->u.sub.latched_release_res = NULL;
 }
 
 /* ---------------- factory ---------------- */
@@ -259,7 +269,8 @@ static void esync_bind(struct wl_client* client, void* data, uint32_t version, u
 }
 
 void awl_esync_setup(void) {
-    g_srv.g_esync = wl_global_create(g_srv.display,
-                                     &zwp_linux_explicit_synchronization_v1_interface, 2,
-                                     NULL, esync_bind);
+    if (!wl_global_create(g_srv.display,
+                          &zwp_linux_explicit_synchronization_v1_interface, 2,
+                          NULL, esync_bind))
+        LOGE("zwp_linux_explicit_synchronization_v1 global create failed");
 }

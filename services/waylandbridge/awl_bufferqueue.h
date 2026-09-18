@@ -70,7 +70,6 @@ struct awl_bq_buffer {
     uint64_t ino;          /* dma-buf inode: render-side identity (0 = unknown) */
     uint32_t width, height, stride;   /* stride in bytes */
     uint32_t format;       /* DRM fourcc */
-    uint64_t modifier;
     uint64_t seq;          /* process-wide frame sequence, stamped by push:
                             * identity of a frame that survives the consumer's
                             * put (an element pointer may be recycled) */

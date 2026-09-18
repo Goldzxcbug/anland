@@ -196,9 +196,9 @@ void awl_surface_view_map(struct awl_surface* root,
                           double* sx, double* sy, double* ox, double* oy) {
     float cw = 0, ch = 0;
     awl_surface_content_size(root, &cw, &ch);
-    if (root->role == AWL_ROLE_TOPLEVEL && root->conf_w > 0 && root->conf_h > 0 &&
-        (int32_t)lroundf(cw) == root->conf_w &&
-        (int32_t)lroundf(ch) == root->conf_h) {
+    if (root->role == AWL_ROLE_TOPLEVEL && root->u.xdg.conf_w > 0 && root->u.xdg.conf_h > 0 &&
+        (int32_t)lroundf(cw) == root->u.xdg.conf_w &&
+        (int32_t)lroundf(ch) == root->u.xdg.conf_h) {
         *sx = *sy = awl_zoom_scale();
         *ox = *oy = 0.0;
         return;
@@ -447,12 +447,14 @@ void awl_viewport_setup(void) {
     wl_list_init(&g_srv.frac_scales);
     g_srv.zoom_pct = 100;
     g_srv.scale_mode = AWL_SCALE_STRETCH;   /* #34 default: legacy fill */
-    g_srv.g_viewporter = wl_global_create(
+    /* create both unconditionally (no || short-circuit): one failing must
+     * not take the other protocol down with it */
+    struct wl_global* vp = wl_global_create(
             g_srv.display, &wp_viewporter_interface, 1, NULL, viewporter_bind);
-    g_srv.g_frac_scale_mgr = wl_global_create(
+    struct wl_global* fsm = wl_global_create(
             g_srv.display, &wp_fractional_scale_manager_v1_interface,
             1, NULL, fsm_bind);
-    if (!g_srv.g_viewporter || !g_srv.g_frac_scale_mgr)
+    if (!vp || !fsm)
         LOGE("viewporter/fractional-scale global create failed");
 }
 

@@ -39,10 +39,10 @@ static void xsurf_set_serial(struct wl_client* client, struct wl_resource* res,
     struct awl_surface* s = wl_resource_get_user_data(res);
     if (!s) return;
     pthread_mutex_lock(&s->ev_lock);
-    s->xwayland_serial = ((uint64_t)hi << 32) | lo;
+    s->u.xway.serial = ((uint64_t)hi << 32) | lo;
     pthread_mutex_unlock(&s->ev_lock);
     LOGI("xwayland surface %llu associated (serial=%llu)",
-            (unsigned long long)s->id, (unsigned long long)s->xwayland_serial);
+            (unsigned long long)s->id, (unsigned long long)s->u.xway.serial);
     awl_surface_set_title(s, "Xwayland");
 }
 
@@ -56,8 +56,8 @@ static const struct xwayland_surface_v1_interface xsurf_iface = {
  * association (the role stays until the surface dies). */
 static void xsurf_res_destroy(struct wl_resource* res) {
     struct awl_surface* s = wl_resource_get_user_data(res);
-    if (s && s->xwayland_res == res)
-        s->xwayland_res = NULL;
+    if (s && s->u.xway.res == res)
+        s->u.xway.res = NULL;
 }
 
 /* ---------------- xwayland_shell_v1 ---------------- */
@@ -80,8 +80,15 @@ static void shell_get_xwayland_surface(struct wl_client* client,
     struct wl_resource* xs = wl_resource_create(
             client, &xwayland_surface_v1_interface, 1, id);
     if (!xs) { wl_resource_post_no_memory(res); return; }
+    /* branch init under ev_lock (union words alias previous-branch state;
+     * readers — binder threads via awl_xwayland_window_serial — pair the
+     * role check with the serial read under this lock, so the three stores
+     * must not be visible out of order) */
+    pthread_mutex_lock(&s->ev_lock);
+    s->u.xway.serial = 0;   /* fresh branch (role union): 0 = not associated */
     s->role = AWL_ROLE_XWAYLAND;
-    s->xwayland_res = xs;
+    s->u.xway.res = xs;
+    pthread_mutex_unlock(&s->ev_lock);
     wl_resource_set_implementation(xs, &xsurf_iface, s, xsurf_res_destroy);
 }
 
@@ -111,8 +118,8 @@ int awl_xwayland_window_serial(uint64_t id, uint64_t* serial) {
     int ok = 0;
     if (s && s->role == AWL_ROLE_XWAYLAND) {
         pthread_mutex_lock(&s->ev_lock);
-        if (s->xwayland_serial) {
-            *serial = s->xwayland_serial;
+        if (s->u.xway.serial) {
+            *serial = s->u.xway.serial;
             ok = 1;
         }
         pthread_mutex_unlock(&s->ev_lock);

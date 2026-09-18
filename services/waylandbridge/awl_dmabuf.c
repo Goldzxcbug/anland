@@ -39,9 +39,6 @@ static void dmabuf_buffer_destroy_handler(struct wl_resource* res) {
      * being sent from another thread finishes first) and is freed by the
      * last frame that leaves a queue. */
     awl_surface_buffer_gone(res);
-    pthread_rwlock_wrlock(&g_srv.rwl);
-    wl_list_remove(&b->link);
-    pthread_rwlock_unlock(&g_srv.rwl);
     pthread_mutex_lock(&g_bufref_lock);
     b->resource = NULL;
     pthread_mutex_unlock(&g_bufref_lock);
@@ -70,17 +67,10 @@ static struct awl_buffer* dmabuf_buffer_create(struct wl_client* client,
     b->height = h;
     b->stride = stride;
     b->drm_format = format;
-    b->modifier = modifier;
-    pthread_rwlock_wrlock(&g_srv.rwl);
-    wl_list_insert(g_srv.buffers.prev, &b->link);
-    pthread_rwlock_unlock(&g_srv.rwl);
 
     b->resource = wl_resource_create(client, &wl_buffer_interface,
                                      version, id);
     if (!b->resource) {
-        pthread_rwlock_wrlock(&g_srv.rwl);
-        wl_list_remove(&b->link);
-        pthread_rwlock_unlock(&g_srv.rwl);
         close(fd);
         free(b);
         return NULL;
@@ -241,7 +231,8 @@ static void dmabuf_bind(struct wl_client* client, void* data,
 }
 
 void awl_dmabuf_setup(void) {
-    g_srv.g_dmabuf = wl_global_create(g_srv.display,
-                                      &zwp_linux_dmabuf_v1_interface, 3,
-                                      NULL, dmabuf_bind);
+    if (!wl_global_create(g_srv.display,
+                          &zwp_linux_dmabuf_v1_interface, 3,
+                          NULL, dmabuf_bind))
+        LOGE("zwp_linux_dmabuf_v1 global create failed");
 }
