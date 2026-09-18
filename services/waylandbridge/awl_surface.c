@@ -509,12 +509,18 @@ static void surface_destroy_impl(struct wl_resource* res) {
     if (s->xdg_surface_res)
         wl_resource_set_user_data(s->xdg_surface_res, NULL);
     if (s->role == AWL_ROLE_TOPLEVEL || s->role == AWL_ROLE_POPUP) {
-        if (s->u.xdg.role_res)
-            wl_resource_set_user_data(s->u.xdg.role_res, NULL);
+        /* role == xdg ⇒ role_res is live: the role-object destroy handlers
+         * clear it BEFORE role → NONE (and role flips run on this same
+         * dispatch thread) — the old NULL guard was unreachable */
+        AWL_ASSERT(s->u.xdg.role_res);
+        wl_resource_set_user_data(s->u.xdg.role_res, NULL);
     } else if (s->role == AWL_ROLE_SUBSURFACE) {
-        if (s->u.sub.subsurface_res)
-            wl_resource_set_user_data(s->u.sub.subsurface_res, NULL);
+        AWL_ASSERT(s->u.sub.subsurface_res);   /* same invariant */
+        wl_resource_set_user_data(s->u.sub.subsurface_res, NULL);
     } else if (s->role == AWL_ROLE_XWAYLAND) {
+        /* NOT an over-guard, unlike the two above: xsurf_res_destroy clears
+         * u.xway.res but the XWAYLAND role is permanent (never → NONE), so
+         * role == XWAYLAND with res == NULL is a normal long-lived state */
         if (s->u.xway.res) {
             wl_resource_set_user_data(s->u.xway.res, NULL);
             s->u.xway.res = NULL;

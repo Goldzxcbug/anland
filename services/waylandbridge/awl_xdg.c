@@ -440,7 +440,10 @@ static void xdg_surface_get_toplevel(struct wl_client* c,
     /* fresh xdg branch (role union): a role re-assignment after a
      * role-object destroy must not see the previous branch's — or a
      * previous xdg life's — words; a re-rolled toplevel is a NEW window
-     * (see toplevel_res_destroy). */
+     * (see toplevel_res_destroy). has_pending is already 0 here — the
+     * toplevel destroy clears it, and no other role ever sets it — so the
+     * pend_w/pend_h zeroing below is belt-and-braces, not state repair. */
+    AWL_ASSERT(!s->has_pending);
     s->u.xdg.conf_w = s->u.xdg.conf_h = 0;
     s->u.xdg.pend_w = s->u.xdg.pend_h = 0;
     s->role = AWL_ROLE_TOPLEVEL;

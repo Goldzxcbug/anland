@@ -59,18 +59,52 @@ struct awl_bq_slot {
     atomic_int ready;
 };
 
+/* Cache-line layout (64B): this queue is the hottest cross-core object of
+ * the frame path — the client's dispatch thread pushes (LOCK-FREE tail CAS
+ * + per-push refs bump + slot publish) while the render thread drains/
+ * getheads (mutex + head advance + slot retire). Fields are grouped by
+ * writer so the lock-free producer words never share a line with anything
+ * the consumer writes (and vice versa) — otherwise every push invalidates
+ * the consumer's control line and every drain invalidates the producer's
+ * (cache ping-pong per frame, independent of the mutex).
+ *   line 0   refs/timeouts/armed/release/ctx — refs is the only hot word
+ *            (true refcount traffic: +1 per push, -1 per retire), isolated
+ *            with read-only-after-init words so it stays OFF the mutex line
+ *   line 1   lock + head + superseded — the drain path under the mutex
+ *            (head is written only under the lock)
+ *   line 2   tail — producer-only: push never takes the mutex, so its CAS
+ *            must not touch a line the consumer dirties
+ *   line 3-4 slots[8] — the handoff data itself (producer publishes,
+ *            consumer retires: inherent, wanted sharing)
+ * Layout is pinned by the _Static_asserts below; allocation must be
+ * 64-byte aligned (posix_memalign in awl_bufferqueue_create — alignas on
+ * the type does not reach plain malloc/calloc). */
 struct awl_bufferqueue {
-    atomic_int refs;
-    atomic_int timeouts;           /* gethead fence timeouts (rate-limited log) */
+    /* --- line 0: refcount + cold/read-only words (pointers first: no
+     * hidden alignment padding inside the line) --- */
     awl_bq_release_fn release;
     void* ctx;
+    atomic_int refs;
+    atomic_int timeouts;           /* gethead fence timeouts (rate-limited log, consumer) */
+    atomic_int armed;              /* a fence watch is registered (awl_bufferqueue_arm) */
+    char _pad_line0[64 - 2 * sizeof(void*) - 3 * sizeof(atomic_int)];
+    /* --- line 1: consumer controls (head only written under lock) --- */
     pthread_mutex_t lock;          /* head lock */
     atomic_uint head;              /* consumer-owned (advanced under lock) */
+    atomic_int superseded;         /* frames drain popped unshown, monotonic (consumer pacing hint) */
+    char _pad_line1[64 - sizeof(pthread_mutex_t) - sizeof(atomic_uint) - sizeof(atomic_int)];
+    /* --- line 2: producer controls --- */
     atomic_uint tail;              /* producer CAS */
+    char _pad_line2[64 - sizeof(atomic_uint)];
+    /* --- line 3+: ring slots --- */
     struct awl_bq_slot slots[AWL_BQ_CAP];
-    atomic_int armed;              /* a fence watch is registered (awl_bufferqueue_arm) */
-    atomic_uint superseded;        /* frames drain popped unshown, monotonic (consumer pacing hint) */
 };
+
+_Static_assert(sizeof(struct awl_bq_slot) * AWL_BQ_CAP % 64 == 0,
+               "slots must fill whole cachelines");
+_Static_assert(offsetof(struct awl_bufferqueue, lock) == 64, "cacheline layout");
+_Static_assert(offsetof(struct awl_bufferqueue, tail) == 128, "cacheline layout");
+_Static_assert(offsetof(struct awl_bufferqueue, slots) == 192, "cacheline layout");
 
 /* ---------------- sync helpers ---------------- */
 
@@ -270,8 +304,11 @@ static void pop_head(struct awl_bufferqueue* q) {
 }
 
 struct awl_bufferqueue* awl_bufferqueue_create(awl_bq_release_fn fn, void* ctx) {
-    struct awl_bufferqueue* q = calloc(1, sizeof(*q));
-    if (!q) return NULL;
+    /* 64B-aligned: the cacheline layout above is only real if the base is
+     * aligned (plain calloc is 16B at best) */
+    struct awl_bufferqueue* q;
+    if (posix_memalign((void**)&q, 64, sizeof(*q)) != 0) return NULL;
+    memset(q, 0, sizeof(*q));
     atomic_init(&q->refs, 1);
     q->release = fn;
     q->ctx = ctx;

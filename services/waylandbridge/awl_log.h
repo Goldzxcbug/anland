@@ -31,4 +31,21 @@
 #define LOGD(...) do {} while (0)
 #endif
 
+/* AWL_ASSERT(cond) — invariant tripwire, not error handling: LOGE a warning
+ * in debug builds (CMAKE_BUILD_TYPE=Debug, or any build with AWL_LOG_DEBUG
+ * tracing), compile to nothing in release. Never aborts — execution
+ * continues as if the guard were still there, so converting a defensive
+ * check to AWL_ASSERT is only sound when the condition is provably
+ * unreachable (documented invariant); conditions a peer thread or client
+ * input can legitimately make false must stay real guards. Like LOGD, the
+ * argument is not evaluated when compiled out — keep it side-effect free. */
+#if !defined(NDEBUG) || defined(AWL_LOG_DEBUG)
+#define AWL_ASSERT(cond) do { \
+    if (!(cond)) \
+        LOGE("ASSERT %s:%d: invariant broken: %s", __FILE__, __LINE__, #cond); \
+} while (0)
+#else
+#define AWL_ASSERT(cond) do {} while (0)
+#endif
+
 #endif /* AWL_LOG_H */

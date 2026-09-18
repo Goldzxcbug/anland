@@ -210,6 +210,8 @@ void awl_esync_surface_gone(struct awl_surface* s) {
      * path closes + resets it before role → NONE, so a non-SUBSURFACE role
      * here means nothing is latched (do NOT touch the union word — it may
      * belong to the xdg/xwayland branch) */
+    if (s->role != AWL_ROLE_SUBSURFACE)
+        AWL_ASSERT(!s->sub_latched);   /* a live latch implies the sub role — the fd gate below relies on this */
     if (s->role == AWL_ROLE_SUBSURFACE && s->u.sub.latched_acquire_fd >= 0) {
         close(s->u.sub.latched_acquire_fd);
         s->u.sub.latched_acquire_fd = -1;

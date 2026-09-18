@@ -182,6 +182,10 @@ int awl_subsurface_maybe_latch(struct awl_surface* s) {
 
 /* Apply s's latched state (caller = client dispatch thread). */
 static void sub_apply_state(struct awl_surface* ch) {
+    /* reads the union's sub branch ungated — sound because a live latch
+     * implies the subsurface role (maybe_latch only latches SUBSURFACE and
+     * every role-exit path drops the latch first) */
+    AWL_ASSERT(ch->role == AWL_ROLE_SUBSURFACE);
     pthread_mutex_lock(&ch->ev_lock);
     int had_attach = ch->latched_attach;
     int acquire_fd = ch->u.sub.latched_acquire_fd;
@@ -426,11 +430,15 @@ static void subcompositor_get_subsurface(struct wl_client* client,
                                "invalid surface argument");
         return;
     }
-    if (s->role != AWL_ROLE_NONE || s->u.sub.subsurface_res) {
+    if (s->role != AWL_ROLE_NONE) {
         wl_resource_post_error(res, WL_SUBCOMPOSITOR_ERROR_BAD_SURFACE,
                                "surface already has a role");
         return;
     }
+    /* role == NONE ⇒ the union's word 0 is NULL (every role-object destroy
+     * handler clears its pointer before role → NONE): the extra
+     * `|| s->u.sub.subsurface_res` clause this replaces was unreachable */
+    AWL_ASSERT(!s->u.sub.subsurface_res);
     if (s == parent) {
         wl_resource_post_error(res, WL_SUBCOMPOSITOR_ERROR_BAD_PARENT,
                                "parent is the surface itself");

@@ -263,7 +263,19 @@ struct awl_surface {
      * 32-bit word), and only a non-bit-field member between them ends the
      * unit. W2 (unsigned): writers on several threads — binder render/resize
      * callbacks and the client dispatch thread — but EVERY access under
-     * ev_lock. */
+     * ev_lock.
+     *
+     * Cacheline note (false-sharing audit): this tail region (damage rect +
+     * flag words, ~[512,576)) is written cross-core on the shm frame path —
+     * the dispatch thread merges damage here under ev_lock and the render
+     * thread resets cd_state/cur_damage at upload (also under ev_lock), plus
+     * the lock-free W1 bits ride the same line. That is TRUE sharing of the
+     * damage-retire state (a per-frame producer→consumer handoff), not false
+     * sharing: separating the words into different lines would not remove
+     * the bounce, it would only add bytes. The dmabuf frame path never
+     * touches this region from the render side (all render traffic goes
+     * through awl_bufferqueue, whose OWN lines are writer-grouped — see
+     * awl_bufferqueue.c). */
     unsigned configured : 1;            /* a configure has been sent */
     unsigned has_pending : 1;           /* resize cached before map */
     unsigned activated : 1;             /* xdg ACTIVATED (Android foreground focus) */
