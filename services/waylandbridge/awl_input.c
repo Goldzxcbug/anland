@@ -443,6 +443,8 @@ static void ptr_enter_focus(struct wl_resource* ptr, struct awl_surface* hit,
 }
 
 static void tr_ptr_enter(uint64_t win, float x, float y) {
+    LOGD("ptr_enter win=%llu %.0f,%.0f drag=%d",
+         (unsigned long long)win, x, y, awl_datadev_drag_active());
     if (awl_datadev_drag_active()) return;   /* drag-phase hover belongs to the drag machine */
     uint64_t restore = 0;
     pthread_rwlock_rdlock(&g_srv.rwl);
@@ -460,6 +462,8 @@ static void tr_ptr_enter(uint64_t win, float x, float y) {
 }
 
 static void tr_ptr_leave(uint64_t win) {
+    LOGD("ptr_leave win=%llu drag=%d",
+         (unsigned long long)win, awl_datadev_drag_active());
     if (awl_datadev_drag_active()) return;
     pthread_rwlock_rdlock(&g_srv.rwl);
     ptr_leave_focus();
@@ -541,11 +545,39 @@ static void tr_ptr_rel(uint64_t win, double dx, double dy) {
 }
 
 static void tr_ptr_button(uint64_t win, uint32_t btn, uint32_t state) {
+    LOGD("ptr_button win=%llu btn=%u(%s) drag=%d",
+         (unsigned long long)win, btn, state ? "press" : "release",
+         awl_datadev_drag_active());
     if (awl_datadev_drag_active()) {
         uint32_t bit = 1u << (btn & 31);
         if (!state) {
+            int tracked = (g_ptr_buttons & bit) != 0;
             g_ptr_buttons &= ~bit;
             g_ptr_grabbed &= ~bit;
+            if (tracked) {
+                /* kwin seat.cpp pointer-release-during-drag: the drag button's
+                 * release is forwarded to the pointer-focused surface before
+                 * endDrag — the client ends its own drag session on it
+                 * (chromium never finished the DnD handshake without it:
+                 * no offer.finish, drag icon surface leaked, 2026-09-18
+                 * "mouse drag stuck"). Untracked releases (no matching press
+                 * went through the normal path) can't be paired → consumed. */
+                pthread_rwlock_rdlock(&g_srv.rwl);
+                struct awl_surface* s;
+                struct wl_resource* ptr = resolve(&g_ptrs, win, &s);
+                struct awl_surface* hit = (ptr && s && g_ptr_focus)
+                        ? awl_surface_by_id(g_ptr_focus) : NULL;
+                if (hit && hit->resource) {
+                    pthread_mutex_lock(&hit->ev_lock);
+                    wl_pointer_send_button(ptr, wl_display_next_serial(g_srv.display),
+                                           awl_now_ms(), btn,
+                                           WL_POINTER_BUTTON_STATE_RELEASED);
+                    ptr_frame(ptr);
+                    wl_client_flush(wl_resource_get_client(ptr));
+                    pthread_mutex_unlock(&hit->ev_lock);
+                }
+                pthread_rwlock_unlock(&g_srv.rwl);
+            }
             awl_datadev_drag_end();   /* release = drop (KWin endDrag) */
         }
         return;   /* presses during a drag are all consumed (implicit grab) */

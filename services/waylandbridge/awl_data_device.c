@@ -864,17 +864,30 @@ static void drag_end_common_locked(void) {
 static void drag_drop_locked(void) {
     struct awl_data_source* src = g_drag.src;
     struct awl_data_device* dev = g_drag.target_dev;
+    LOGD("drop: src=%s accepted=%d target_dev=%s",
+         src ? (src->res ? "client" : "internal") : "none",
+         src ? src->accepted : -1, dev ? "yes" : "no");
     if (src) {
         src->drop_performed = 1;
-        if (src->res &&
-            wl_resource_get_version(src->res) >= WL_DATA_SOURCE_DND_DROP_PERFORMED_SINCE_VERSION)
-            wl_data_source_send_dnd_drop_performed(src->res);
         if (dev && dev->res && src->accepted) {
+            /* kwin endDrag order: drop → target first, then dnd_drop_performed
+             * → source (source and target are often the same client — the
+             * reversed order made chromium's drag controller tear down the
+             * source side before its own drop handling ran, leaving the DnD
+             * session stuck: no offer.finish, drag icon surface never
+             * destroyed, 2026-09-18 "mouse drag stuck") */
             wl_data_device_send_drop(dev->res);
             wl_client_flush(dev->client);
-        } else if (src->res &&
-                   wl_resource_get_version(src->res) >= WL_DATA_SOURCE_ACTION_SINCE_VERSION) {
-            wl_data_source_send_cancelled(src->res);
+            if (src->res &&
+                wl_resource_get_version(src->res) >= WL_DATA_SOURCE_DND_DROP_PERFORMED_SINCE_VERSION)
+                wl_data_source_send_dnd_drop_performed(src->res);
+        } else {
+            if (src->res &&
+                wl_resource_get_version(src->res) >= WL_DATA_SOURCE_DND_DROP_PERFORMED_SINCE_VERSION)
+                wl_data_source_send_dnd_drop_performed(src->res);
+            if (src->res &&
+                wl_resource_get_version(src->res) >= WL_DATA_SOURCE_ACTION_SINCE_VERSION)
+                wl_data_source_send_cancelled(src->res);
         }
         if (src->res) wl_client_flush(client_of(src->res));
     }
