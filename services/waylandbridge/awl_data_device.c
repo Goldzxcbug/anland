@@ -73,7 +73,7 @@ enum {
 /* ---------------- state ---------------- */
 
 static struct {
-    int active;
+    _Atomic int active;          /* lockless read on the binder input thread (awl_datadev_drag_active); the rest of the struct is dd_lock-only */
     struct awl_data_source* src;      /* NULL = sourceless drag (chrome window drag) */
     struct awl_surface* origin;       /* origin surface of start_drag */
     uint64_t origin_win;              /* id of the root window holding origin (Android routing domain) */
@@ -906,7 +906,7 @@ static void drag_cancel_locked(void) {
 /* ---- input hooks (called from awl_input.c; neither party holds rwl — wr taken inside) ---- */
 
 int awl_datadev_drag_active(void) {
-    return g_drag.active;   /* single read; a race only sends one event down the normal path, harmless */
+    return g_drag.active;   /* atomic read (written on the client dispatch thread, read on the binder input thread) */
 }
 
 /* icon layer id (for hit-test exclusion; 0 = none) */
