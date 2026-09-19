@@ -42,34 +42,93 @@ start_daemon() {
 # Log: /data/local/tmp/awl_pulse.log (root-owned fd, inherited by the child).
 # Every skip path writes its reason there — a silent skip is what made "no
 # sound" undiagnosable after a reflash.
-start_pulse() {
-  PA="$MODDIR/pulse"
-  LOG=/data/local/tmp/awl_pulse.log
-  if [ ! -f "$PA/bin/pulseaudio" ]; then
-    echo "anland: pulse skipped ($PA/bin/pulseaudio missing — module built without pulse/)" > "$LOG"
-    return
+# Keep boot bounded: 2 attempts × (4 probes × 2s + 3 intervals) + 1s backoff
+# is at most about 23s when the audio service is unavailable.
+PULSE_PROBE_TIMEOUT=2
+PULSE_PROBE_POLLS=4
+PULSE_START_RETRIES=2
+
+stop_pulse() {
+  # The runtime copy is disposable, but the process must be stopped before it
+  # is replaced.  Otherwise an old instance can keep the old UID/audio state
+  # alive across a module update or an APK reinstall.
+  if pkill -f "$PAR/bin/pulseaudio" 2>/dev/null; then
+    sleep 1
+    # A stuck instance must not survive into the next attempt and race the
+    # new server for the socket or AudioFlinger track.
+    pkill -KILL -f "$PAR/bin/pulseaudio" 2>/dev/null || true
   fi
-  chmod 755 "$PA/bin"/* 2>/dev/null
-  PAUID=$(awk '$1=="com.anlandnext"{print $2; exit}' /data/system/packages.list 2>/dev/null)
-  if [ -z "$PAUID" ]; then
-    echo "anland: pulse skipped (com.anlandnext not installed)" > "$LOG"
-    return
-  fi
-  PAR="$RT/pulse"
-  # a previous instance (repair path, or an app reinstall that changed the
-  # uid) still holds the old tree and socket — replace it whole
-  pkill -f "$PAR/bin/pulseaudio" 2>/dev/null && sleep 1
-  rm -rf "$PAR"
-  cp -r "$PA" "$PAR"
-  chmod -R 755 "$PAR"
-  chcon u:object_r:awl_daemon_exec:s0 "$PAR/bin/pulseaudio" 2>/dev/null
-  # module lookup: daemon.conf is read from PULSE_CONFIG_PATH (this copy)
-  echo "dl-search-path = $PAR/lib/pulseaudio/modules" >> "$PAR/etc/pulse/daemon.conf"
-  PH="$RT/pulse-home"
-  rm -rf "$PH"; mkdir -p "$PH/run" "$PH/state"
-  chown -R "$PAUID:$PAUID" "$PH"; chmod 700 "$PH" "$PH/run" "$PH/state"
   rm -f "$RT/pulse.sock"
-  echo "anland: pulse starting as uid $PAUID (tree $PAR, socket $RT/pulse.sock)" > "$LOG"
+}
+
+pulse_query() {
+  # pactl in the staged tree is dynamically linked against the staged libpulse;
+  # use the same runtime environment as the server.  The binary is relabelled
+  # as awl_daemon_exec below, so timeout's child transitions out of ksu into
+  # the same domain as pulseaudio before it opens the restricted socket.
+  # timeout is provided by Android toybox and prevents a half-created socket
+  # from blocking boot.
+  PULSE_SERVER="unix:$RT/pulse.sock" \
+  HOME="$PH" TMPDIR="$PH" \
+  LD_LIBRARY_PATH="$PAR/lib:$PAR/lib/pulseaudio:$PAR/lib/pulseaudio/modules" \
+  timeout "$PULSE_PROBE_TIMEOUT" "$PAR/bin/pactl" "$@"
+}
+
+pulse_is_ready() {
+  [ -S "$RT/pulse.sock" ] || return 1
+  [ -x "$PAR/bin/pactl" ] || {
+    echo "anland: pulse probe unavailable ($PAR/bin/pactl missing)" >> "$LOG"
+    return 1
+  }
+
+  SINKS=$(pulse_query list short sinks 2>>"$LOG")
+  status=$?
+  if [ "$status" -ne 0 ]; then
+    echo "anland: pulse probe failed (pactl status $status)" >> "$LOG"
+    return 1
+  fi
+
+  {
+    echo "anland: pulse sinks:"
+    printf '%s\n' "$SINKS"
+  } >> "$LOG"
+
+  # A native socket and a successful pactl connection are insufficient: the
+  # daemon can otherwise fall back to module-always-sink/auto_null after
+  # both Android output modules reject the stream.  SUSPENDED is valid here
+  # when idle.  Accept either backend because default.pa documents both.
+  printf '%s\n' "$SINKS" | awk \
+    '$3 == "module-sles-sink.c" || $3 == "module-aaudio-sink.c" { found = 1 }
+     END { exit(found ? 0 : 1) }'
+}
+
+wait_for_pulse() {
+  probe=1
+  while [ "$probe" -le "$PULSE_PROBE_POLLS" ]; do
+    if pulse_is_ready; then
+      return 0
+    fi
+    if [ "$probe" -lt "$PULSE_PROBE_POLLS" ]; then
+      sleep 1
+    fi
+    probe=$((probe + 1))
+  done
+  return 1
+}
+
+launch_pulse() {
+  attempt="$1"
+  if ! rm -rf "$PH" || ! mkdir -p "$PH/run" "$PH/state"; then
+    echo "anland: pulse attempt $attempt failed (cannot create $PH)" >> "$LOG"
+    return 1
+  fi
+  if ! chown -R "$PAUID:$PAUID" "$PH" ||
+     ! chmod 700 "$PH" "$PH/run" "$PH/state"; then
+    echo "anland: pulse attempt $attempt failed (cannot prepare $PH)" >> "$LOG"
+    return 1
+  fi
+  rm -f "$RT/pulse.sock"
+  echo "anland: pulse starting as uid $PAUID (attempt $attempt/$PULSE_START_RETRIES; tree $PAR, socket $RT/pulse.sock)" >> "$LOG"
   nohup su "$PAUID" -c "export HOME='$PH' TMPDIR='$PH' PULSE_RUNTIME_PATH='$PH/run' \
 PULSE_STATE_PATH='$PH/state' PULSE_CONFIG_PATH='$PAR/etc/pulse' \
 LD_LIBRARY_PATH='$PAR/lib:$PAR/lib/pulseaudio:$PAR/lib/pulseaudio/modules'; \
@@ -77,6 +136,69 @@ exec '$PAR/bin/pulseaudio' --daemonize=no --exit-idle-time=-1 --disallow-exit \
 --log-target=stderr -n -F '$PAR/etc/pulse/default.pa' \
 -L 'module-native-protocol-unix auth-anonymous=1 socket=$RT/pulse.sock'" \
     >> "$LOG" 2>&1 &
+}
+
+start_pulse() {
+  PA="$MODDIR/pulse"
+  LOG=/data/local/tmp/awl_pulse.log
+  PAR="$RT/pulse"
+  PH="$RT/pulse-home"
+  : > "$LOG"
+  if [ ! -f "$PA/bin/pulseaudio" ]; then
+    stop_pulse
+    echo "anland: pulse skipped ($PA/bin/pulseaudio missing — module built without pulse/)" >> "$LOG"
+    return
+  fi
+  chmod 755 "$PA/bin"/* 2>/dev/null
+  PAUID=$(awk '$1=="com.anlandnext"{print $2; exit}' /data/system/packages.list 2>/dev/null)
+  if [ -z "$PAUID" ]; then
+    stop_pulse
+    echo "anland: pulse skipped (com.anlandnext not installed)" >> "$LOG"
+    return
+  fi
+  # a previous instance (repair path, or an app reinstall that changed the
+  # uid) still holds the old tree and socket — replace it whole
+  stop_pulse
+  rm -rf "$PAR"
+  if ! cp -r "$PA" "$PAR"; then
+    echo "anland: pulse failed (cannot copy $PA to $PAR)" >> "$LOG"
+    return 1
+  fi
+  chmod -R 755 "$PAR"
+  if ! chcon u:object_r:awl_daemon_exec:s0 "$PAR/bin/pulseaudio" 2>/dev/null; then
+    echo "anland: pulse failed (cannot label $PAR/bin/pulseaudio)" >> "$LOG"
+    return 1
+  fi
+  # service.sh itself runs in ksu, but sepolicy deliberately denies ksu access
+  # to awl_runtime_sock.  Relabelling pactl makes the child of timeout follow
+  # the existing ksu → awl_daemon transition before connecting to pulse.sock.
+  if [ -x "$PAR/bin/pactl" ] &&
+     ! chcon u:object_r:awl_daemon_exec:s0 "$PAR/bin/pactl" 2>/dev/null; then
+    echo "anland: pulse failed (cannot label $PAR/bin/pactl)" >> "$LOG"
+    return 1
+  fi
+  # module lookup: daemon.conf is read from PULSE_CONFIG_PATH (this copy)
+  echo "dl-search-path = $PAR/lib/pulseaudio/modules" >> "$PAR/etc/pulse/daemon.conf"
+
+  attempt=1
+  while [ "$attempt" -le "$PULSE_START_RETRIES" ]; do
+    stop_pulse
+    if launch_pulse "$attempt" && wait_for_pulse; then
+      echo "anland: pulse ready (Android sink)" >> "$LOG"
+      return 0
+    fi
+
+    echo "anland: pulse attempt $attempt/$PULSE_START_RETRIES did not produce an Android sink" >> "$LOG"
+    stop_pulse
+    if [ "$attempt" -lt "$PULSE_START_RETRIES" ]; then
+      sleep 1
+    fi
+    attempt=$((attempt + 1))
+  done
+
+  rm -f "$RT/pulse.sock"
+  echo "anland: pulse failed after $PULSE_START_RETRIES attempts (no Android sink)" >> "$LOG"
+  return 1
 }
 
 case "${1:-}" in
