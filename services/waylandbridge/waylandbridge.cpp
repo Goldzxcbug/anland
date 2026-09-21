@@ -72,6 +72,10 @@
  * surface tree — awl_sc_sync) and then kicks the vsync loop (which runs
  * continuously; the kick only forces a transaction for frame_done parity). */
 static std::atomic<bool> g_cfg_sc{true};
+/* xwayland_scale (daemon config, default on): XWayland does not consume
+ * fractional-scale-v1, so its X window is resized to the zoom-adjusted
+ * physical size and the existing stretch path scales it back to Android. */
+static std::atomic<bool> g_cfg_xwayland_scale{true};
 /* Both backends are keyed by window id and mutually exclusive per id: an
  * attach first clears the id from BOTH (unknown id = no-op — a config flip
  * between detach and re-attach must not leave the window in the old
@@ -131,6 +135,7 @@ static bool binder_plat_init(void) {
 
 #include <algorithm>
 #include <atomic>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <string>
@@ -717,15 +722,32 @@ static void xwm_send_cmd(const char* cmd, size_t len) {
     if (write(fd, cmd, len) < 0) LOGE("xwm cmd write: %s", strerror(errno));
     close(fd);
 }
-/* Xwayland window: Android window size change → resize its X window to
- * the same size (passive model: a client that doesn't comply keeps its old
- * buffer; the renderer just stretches as usual) */
+/* Xwayland window: Android window size change → resize its X window. X11
+ * clients do not consume fractional-scale-v1, so when enabled they receive
+ * the zoom-adjusted physical size; the existing renderer/SC stretch path then
+ * scales that buffer over the Android window. */
+static int32_t xwm_scaled_dimension(int32_t v) {
+    if (v <= 0 || !g_cfg_xwayland_scale.load(std::memory_order_relaxed))
+        return v;
+    const double z = awl_zoom_scale();
+    if (z <= 0.0) return v;
+    const double scaled = (double)v / z;
+    if (scaled >= (double)std::numeric_limits<int32_t>::max())
+        return std::numeric_limits<int32_t>::max();
+    int32_t out = (int32_t)(scaled + 0.5);
+    return out > 0 ? out : 1;
+}
+
 static void xwm_resize_window(uint64_t id, int32_t w, int32_t h) {
     uint64_t serial = 0;
     if (!awl_xwayland_window_serial(id, &serial)) return;
+    int32_t xw = xwm_scaled_dimension(w);
+    int32_t xh = xwm_scaled_dimension(h);
+    if (xw != w || xh != h)
+        awl_output_grow((uint32_t)xw, (uint32_t)xh);
     char cmd[96];
     int n = snprintf(cmd, sizeof(cmd), "S %llu %d %d\n",
-                     (unsigned long long)serial, w, h);
+                     (unsigned long long)serial, xw, xh);
     xwm_send_cmd(cmd, (size_t)n);
 }
 static void xwm_close_window(uint64_t id) {
@@ -1161,7 +1183,9 @@ static awl_window_callbacks_t k_cbs = {
  * "auto_attach" (default false): launch the host Activity automatically when
  * a wayland window is created. false = the window waits for a binder SURFACE
  * from the wayland client app itself (SURFACE uid pass); toggled over
- * CFG_GET/SET as 0/1 or by hand in config.json (new windows only). */
+ * CFG_GET/SET as 0/1 or by hand in config.json (new windows only).
+ * "xwayland_scale" (default true): apply the daemon zoom to XWayland resize
+ * commands; toggled over CFG_GET/SET or by hand in config.json. */
 
 #define AWL_CFG_PATH "/data/adb/modules/anland-awl/config.json"
 
@@ -1182,6 +1206,7 @@ static bool cfg_domain(const std::string& key, int* lo, int* hi) {
     if (key == "init_w") { *lo = 100; *hi = 7680; return true; }
     if (key == "init_h") { *lo = 100; *hi = 4320; return true; }
     if (key == "scale_mode") { *lo = 0; *hi = 2; return true; }
+    if (key == "xwayland_scale") { *lo = 0; *hi = 1; return true; }
     if (key == "auto_attach") { *lo = 0; *hi = 1; return true; }
     if (key == "sc_enabled") { *lo = 0; *hi = 1; return true; }
     return false;
@@ -1243,9 +1268,11 @@ static void cfg_save_locked(void) {
     FILE* f = fopen(tmp, "w");
     if (!f) { LOGE("config save open %s: %s", tmp, strerror(errno)); return; }
     fprintf(f, "{\n  \"zoom\": %d,\n  \"init_w\": %d,\n  \"init_h\": %d,\n"
-               "  \"scale_mode\": %d,\n  \"auto_attach\": %d,\n  \"sc_enabled\": %d,\n"
+               "  \"scale_mode\": %d,\n  \"xwayland_scale\": %d,\n"
+               "  \"auto_attach\": %d,\n  \"sc_enabled\": %d,\n"
                "  \"runtime_dir\": \"%s\",\n  \"socket_listen\": %d\n}\n",
             g_cfg_zoom, g_cfg_init_w, g_cfg_init_h, g_cfg_scale_mode,
+            g_cfg_xwayland_scale.load(std::memory_order_relaxed) ? 1 : 0,
             g_cfg_auto_attach ? 1 : 0, g_cfg_sc.load(std::memory_order_relaxed) ? 1 : 0,
             rt, sl);
     if (fclose(f) != 0)
@@ -1328,6 +1355,13 @@ static void cfg_load_and_apply(void) {
     } else if (sm != -1) {
         LOGE("config: scale_mode=%d out of range (0..2), ignored", sm);
     }
+    int xws = cfg_parse_int(buf, "xwayland_scale");
+    if (xws == 0 || xws == 1) {
+        g_cfg_xwayland_scale.store(xws != 0, std::memory_order_relaxed);
+        LOGI("config: xwayland_scale=%s (applied at startup)", xws ? "true" : "false");
+    } else if (xws != -1) {
+        LOGE("config: xwayland_scale=%d out of range (0..1), ignored", xws);
+    }
     int aa = cfg_parse_int(buf, "auto_attach");
     if (aa == 0 || aa == 1) {
         std::lock_guard<std::mutex> lk(g_cfg_lock);
@@ -1389,6 +1423,13 @@ static int cfg_set(const std::string& key, int32_t val) {
         }
         for (uint64_t id : ids) backend_request_render(id);
         LOGI("config set scale_mode=%d (applied + persisted)", val);
+    } else if (key == "xwayland_scale") {
+        g_cfg_xwayland_scale.store(val != 0, std::memory_order_relaxed);
+        {
+            std::lock_guard<std::mutex> lk(g_cfg_lock);
+            cfg_save_locked();
+        }
+        LOGI("config set xwayland_scale=%d (applied to subsequent XWayland resizes + persisted)", val);
     } else if (key == "auto_attach") {
         /* effective for windows created from now on — nothing live to apply */
         std::lock_guard<std::mutex> lk(g_cfg_lock);
@@ -1989,6 +2030,8 @@ static binder_status_t host_on_transact(AIBinder* binder, transaction_code_t cod
             v = key == "init_w" ? iw : ih;
         }
         else if (key == "scale_mode") v = awl_display_scale_mode();
+        else if (key == "xwayland_scale")
+            v = g_cfg_xwayland_scale.load(std::memory_order_relaxed) ? 1 : 0;
         else if (key == "auto_attach") {
             std::lock_guard<std::mutex> lk(g_cfg_lock);
             v = g_cfg_auto_attach ? 1 : 0;

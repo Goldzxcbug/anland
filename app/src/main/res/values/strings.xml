@@ -27,6 +27,8 @@
     <string name="scale_mode_stretch">Stretch (fill the window, aspect may distort)</string>
     <string name="scale_mode_fit">Fit (uniform scale, centered, black bars)</string>
     <string name="scale_mode_center">Original size (1:1, centered, no scaling)</string>
+    <string name="xwayland_scale_tip">Scale XWayland windows with display zoom :</string>
+    <string name="xwayland_scale">Enable XWayland scaling</string>
     <string name="init_size_tip">Initial window size (first-frame placeholder before Android sizes the window, applies to new windows):</string>
     <string name="init_size_w">Width</string>
     <string name="init_size_h">Height</string>
