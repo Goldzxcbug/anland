@@ -13,6 +13,9 @@ It ships as a SukiSU/KernelSU module (`anland-awl`): a root daemon, a host APK, 
 > the [`legacy`](https://github.com/SuperTurtleDev/anland/tree/legacy) branch
 > (5.x) instead. 5.x stays in maintenance until 6.x catches up with the 5.x
 > feature set (complete desktop, virtual keyboard, accessibility, …).
+> Maintenance is bug fixes only — and only functional bugs that affect usage;
+> intermittent glitches that a restart of the consumer app clears are out of
+> scope.
 
 **Why the rewrite?** 5.x exchanged frames over a private display protocol (the
 "Anland Display Protocol"): every compositor — KWin, Weston, … — needed its own

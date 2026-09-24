@@ -11,6 +11,8 @@ Anland 在 **已 root 的 Android** 设备上运行 Linux 容器里的图形应�
 > 5.x 完整：追求稳定和完整桌面体验请使用
 > [`legacy`](https://github.com/SuperTurtleDev/anland/tree/legacy) 分支（5.x）。
 > 5.x 会持续维护，直到 6.x 补齐 5.x 的功能（完整桌面、虚拟键盘、无障碍等）。
+> 维护仅限 bug 修复——且只接受影响使用的功能性 bug；重启 consumer app 即可解决的
+> 概率性小问题不在维护范围内。
 
 **为什么重构？** 5.x 用一套私有显示协议（"Anland Display Protocol"）交换帧：每个合成器
 ——KWin、Weston……——都要针对该协议单独维护一套适配后端，维护成本高。6.x 的重构把帧
