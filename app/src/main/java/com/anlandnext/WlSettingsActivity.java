@@ -150,6 +150,27 @@ public class WlSettingsActivity extends Activity {
                         checkedId == 7 ? 2 : checkedId == 6 ? 1 : 0));
         root.addView(scaleRg);
 
+        /* ---- XWayland scaling (daemon config xwayland_scale: X11 clients
+         *      receive the zoom-adjusted X size on resize, then the existing
+         *      stretch path scales them over the Android window) ---- */
+        android.widget.Space gap26 = new android.widget.Space(this);
+        gap26.setMinimumHeight(64);
+        root.addView(gap26);
+
+        TextView xwaylandScaleTip = new TextView(this);
+        xwaylandScaleTip.setText(R.string.xwayland_scale_tip);
+        root.addView(xwaylandScaleTip);
+
+        android.widget.Switch xwaylandScaleSw = new android.widget.Switch(this);
+        xwaylandScaleSw.setText(R.string.xwayland_scale);
+        int gotXwaylandScale = WlBinder.configGet("xwayland_scale");
+        xwaylandScaleSw.setChecked(gotXwaylandScale != 0); /* daemon default on */
+        /* listener AFTER the initial state: opening the page must not fire a
+         * write back to the daemon */
+        xwaylandScaleSw.setOnCheckedChangeListener((b, on) ->
+                WlBinder.configSet("xwayland_scale", on ? 1 : 0));
+        root.addView(xwaylandScaleSw);
+
         /* ---- Auto attach (daemon config auto_attach: on = the daemon am-starts
          *      the host window the moment a wayland window is created; off =
          *      the window waits for a binder SURFACE from its app — the

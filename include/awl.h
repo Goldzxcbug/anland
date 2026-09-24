@@ -190,6 +190,7 @@ int awl_window_get_icon(uint64_t id, void** pixels, int32_t* w, int32_t* h);
 void awl_sched_set(pid_t pid, int on);
 void awl_display_set_zoom(int pct);   /* zoom = 100×Z (50..300; dynamic, #31) */
 int awl_display_zoom(void);           /* current zoom pct (daemon config reads) */
+double awl_zoom_scale(void);          /* effective quantized Z used by clients */
 
 /* View mapping mode (#34, daemon config scale_mode): how the content-base
  * rectangle is placed inside the Android window. Presentation-layer only —
