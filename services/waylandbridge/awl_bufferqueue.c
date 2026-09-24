@@ -446,6 +446,18 @@ void awl_bufferqueue_put(struct awl_bq_buffer* pub, int fence_fd) {
     elem_unref(e);
 }
 
+int awl_bufferqueue_incomplete_fd(struct awl_bufferqueue* q) {
+    unsigned n = visible(q);
+    unsigned h = atomic_load_explicit(&q->head, memory_order_relaxed);
+    for (unsigned i = 0; i < n; i++) {   /* FIFO completion: the first incomplete gates the rest */
+        const struct awl_bq_buffer* e = &at(q, h + i)->pub;
+        if (elem_ready(e)) continue;
+        int src = e->acquire_fd >= 0 ? e->acquire_fd : e->dmabuf_fd;
+        return fcntl(src, F_DUPFD_CLOEXEC, 0);
+    }
+    return -1;
+}
+
 void awl_bufferqueue_arm(struct awl_bufferqueue* q) {
     if (visible(q) < 2) return;
     unsigned h = atomic_load_explicit(&q->head, memory_order_relaxed);

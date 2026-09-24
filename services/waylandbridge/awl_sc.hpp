@@ -56,10 +56,12 @@ int  awl_sc_attach(uint64_t id, ANativeWindow* nw);   /* NULL = detach */
  * (takes rwl.rd inside), unknown id = no-op. */
 void awl_sc_sync(uint64_t id);
 
-/* window_dirty arrived for this window: ensures the next vsync emits a
- * transaction even when nothing changed visually, so pending frame callbacks
- * ride its OnComplete (GL parity for empty/geometry-only commits). Any
- * thread, returns fast, unknown id = no-op. */
+/* window_dirty arrived for this window: wakes the render thread for an
+ * off-tick pass so the commit's buffer/geometry reach SF's next composition
+ * instead of waiting for the vsync tick. A frame whose acquire fence is
+ * still pending at that pass is neither latched nor moved; its fence is
+ * watched and the pass re-runs when it signals. Any thread, returns fast,
+ * unknown id = no-op. */
 void awl_sc_kick(uint64_t id);
 
 void awl_sc_shutdown(void);

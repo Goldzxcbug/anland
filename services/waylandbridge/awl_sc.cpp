@@ -46,13 +46,16 @@
  *   render thread (choreographer vsync loop, one for all windows, owner of
  *   the backend's GLES context): owns only BUFFER STATE. Per layer: queue
  *   lock → drain → tryhead (never waits: an unsignaled acquire fence leaves
- *   the previous buffer on screen and the layer is re-checked next vsync —
- *   one client's GPU must not stall every window) → arm → unlock; a NEW
- *   frame is latched in its mode. No dmabuf frame → the shm source is asked.
- *   The layer geometry (position/scale/crop/transform/opacity) is applied in
- *   the SAME transaction as the buffer: it is a function of the latched
- *   buffer's dimensions and wl_surface.commit is atomic — buffer and
- *   geometry of one commit must land in one SF frame.
+ *   the previous buffer AND its geometry on screen; the fence is watched in
+ *   the looper and the layer re-checked the moment it signals, or at the
+ *   next vsync — one client's GPU must not stall every window) → arm →
+ *   unlock; a NEW frame is latched in its mode. No dmabuf frame → the shm
+ *   source is asked. The layer geometry (position/scale/crop/transform/
+ *   opacity) is applied in the SAME transaction as the buffer: it is a
+ *   function of the latched buffer's dimensions and wl_surface.commit is
+ *   atomic — buffer and geometry of one commit must land in one SF frame,
+ *   so a pass that cannot latch the newest frame does not move the layer
+ *   either (the logic layer's geometry already describes that frame).
  *
  * Pacing (measured against the GL path with vkmark, 2026-09-17):
  *   - frame_done goes out at the vsync TICK for every visible layer, from
@@ -61,7 +64,11 @@
  *     apply (a callback per vsync is the contract).
  *   - a commit wakes the render thread for one off-tick pass per window per
  *     interval, so a paced client's frame reaches SF's next composition
- *     instead of waiting for our tick (GL-path latency parity).
+ *     instead of waiting for our tick (GL-path latency parity). A GPU
+ *     client's frame is still on the GPU at that moment; the pass then
+ *     watches its acquire fence (looper fd) and the apply happens when the
+ *     fence signals — the interval's off-tick slot is consumed by the pass
+ *     that applies, not by the one that found nothing latchable.
  *   - a client that keeps running ahead of the vsync (mailbox/immediate) is
  *     copied (EGL mode) instead of scanned out: zero-copy would leave it
  *     with no free buffer (SF holds three, the queue head a fourth) and one
@@ -414,7 +421,8 @@ struct sc_window {
     std::map<uint64_t, std::unique_ptr<sc_rlayer>> layers;
     std::atomic<bool> dead{false};
     std::atomic<bool> kick{false};     /* window_dirty since the last pass */
-    std::atomic<bool> applied_now{false};   /* an off-tick pass ran in this vsync interval */
+    std::atomic<bool> applied_now{false};   /* an off-tick pass APPLIED a transaction in this vsync interval */
+    bool watch_armed = false;          /* render thread only: an acquire-fence watch is registered (watch_arm) */
     uint64_t frame_clock = 0;          /* AHB LRU clock */
 };
 
@@ -425,9 +433,11 @@ struct sc_window {
  * thread for ONE off-tick pass per window per interval, so a paced client's
  * frame reaches SF at its next composition instead of waiting for our tick
  * (the GL path renders on commit; without this the SC path added a frame
- * of latency). Off-tick passes send no frame_done: a frame callback per
- * vsync is the contract, and a buffer applied off-tick may still be
- * superseded by the tick's before SF latches either. */
+ * of latency). When that pass finds the frame's acquire fence pending it
+ * applies nothing and arms a fence watch (watch_arm); the watch's pass is
+ * the one that applies. Off-tick passes send no frame_done: a frame
+ * callback per vsync is the contract, and a buffer applied off-tick may
+ * still be superseded by the tick's before SF latches either. */
 
 static std::mutex g_map_lock;
 static std::map<uint64_t, std::shared_ptr<sc_window>> g_windows;
@@ -457,6 +467,46 @@ static std::shared_ptr<sc_window> find_window(uint64_t id) {
     std::lock_guard<std::mutex> lk(g_map_lock);
     auto it = g_windows.find(id);
     return it == g_windows.end() ? nullptr : it->second;
+}
+
+/* ---------------- acquire-fence watch (render thread looper) ----------------
+ * A frame the pass cannot latch because its acquire fence is still pending
+ * — the normal state right after a GPU client's commit, i.e. at every kick
+ * pass — would otherwise wait for the next tick: one frame of latency the
+ * GL path does not have (it renders on commit, waiting the fence inline).
+ * The pass registers that fence in the render thread's looper instead; when
+ * it signals, the window is kicked and an off-tick pass latches the frame.
+ * One watch per window at a time — the pass re-arms for whatever is still
+ * pending. The fd is a private dup: ALooper_removeFd BEFORE close, the epoll
+ * interest is keyed by the open file description the client shares (same
+ * rule as the bufferqueue's own waiter). */
+struct sc_watch {
+    std::weak_ptr<sc_window> w;
+};
+
+static int sc_watch_cb(int fd, int events, void* data) {
+    (void)events;   /* INPUT = signaled; ERROR/HANGUP = dead fence: the pass treats both as complete */
+    sc_watch* ctx = (sc_watch*)data;
+    if (ALooper* lo = g_lo.load()) ALooper_removeFd(lo, fd);
+    close(fd);
+    if (auto w = ctx->w.lock()) {
+        w->watch_armed = false;
+        w->kick.store(true);   /* pollOnce returns POLL_CALLBACK → sc_render_kicked */
+    }
+    delete ctx;
+    return 0;   /* already removed above */
+}
+
+/* render thread; takes ownership of fd */
+static void watch_arm(const std::shared_ptr<sc_window>& w, int fd) {
+    ALooper* lo = g_lo.load();
+    sc_watch* ctx = (lo && !w->watch_armed) ? new sc_watch{ w } : nullptr;
+    if (!ctx || ALooper_addFd(lo, fd, 0, ALOOPER_EVENT_INPUT, sc_watch_cb, ctx) != 1) {
+        delete ctx;
+        close(fd);
+        return;
+    }
+    w->watch_armed = true;
 }
 
 /* ---------------- GL context (render thread) ---------------- */
@@ -764,19 +814,20 @@ static void latch_hide(ASurfaceTransaction* txn, sc_txn* ctx, sc_rlayer* L, bool
 
 /* ---------------- render frame (buffer state only) ----------------
  * tick = the vsync pass (pacing bookkeeping + frame_done collection); an
- * off-tick pass only latches. done: surfaces owed a frame_done (tick). */
+ * off-tick pass only latches. done: surfaces owed a frame_done (tick).
+ * Returns whether a transaction was applied. */
 
-static void sc_render_window(const std::shared_ptr<sc_window>& w, int64_t vsync_id,
+static bool sc_render_window(const std::shared_ptr<sc_window>& w, int64_t vsync_id,
                              bool tick, std::vector<uint64_t>* done) {
     awl_layer_info_t lay[AWL_MAX_LAYERS + 1];
     int n = awl_surface_get_layers(w->id, lay, AWL_MAX_LAYERS);
-    if (n <= 0) return;
+    if (n <= 0) return false;
     if (awl_pointer_cursor_layer(w->id, &lay[n])) n++;
     awl_view_xform_t xf;
     awl_surface_get_view_xform(w->id, &xf);
 
     std::unique_lock<std::mutex> lk(w->m);
-    if (w->dead || !w->nw) return;
+    if (w->dead || !w->nw) return false;
 
     w->frame_clock++;
 
@@ -793,9 +844,11 @@ static void sc_render_window(const std::shared_ptr<sc_window>& w, int64_t vsync_
 
         /* dmabuf source: drain superseded frames, take a referenced complete
          * head WITHOUT waiting (an incomplete head keeps the latched buffer
-         * on screen; re-checked next vsync), arm the waiter behind the head */
+         * on screen; re-checked when its fence signals — watch_arm — or at
+         * the next vsync), arm the waiter behind the head */
         struct awl_bq_buffer* head = nullptr;
         int pending = 0;
+        int wfd = -1;   /* readiness fd of the frame this pass may fail to latch (watch_arm) */
         unsigned sup = L->sup_last;
         struct awl_bufferqueue* q = awl_surface_queue_ref(lay[i].surface_id);
         if (q) {
@@ -803,11 +856,19 @@ static void sc_render_window(const std::shared_ptr<sc_window>& w, int64_t vsync_
             awl_bufferqueue_drain(q);
             head = awl_bufferqueue_tryhead(q);
             pending = awl_bufferqueue_count(q);
+            if (pending > (head ? 1 : 0) && !w->watch_armed && !L->overspeed)
+                wfd = awl_bufferqueue_incomplete_fd(q);
             awl_bufferqueue_arm(q);
             awl_bufferqueue_unlock(q);
             sup = awl_bufferqueue_superseded(q);
             awl_bufferqueue_unref(q);
         }
+        /* hold: the client's NEWEST frame is not latchable this pass — the
+         * head's own fence is pending (incomplete), or a complete head has
+         * incomplete newer frame(s) behind it (drain stops at the first
+         * unsignaled fence). lay[i] describes that newest commit. */
+        const bool incomplete = !head && pending > 0;
+        const bool hold = pending > (head ? 1 : 0);
         if (tick) {   /* pacing: did the client drop frames since the last tick? */
             bool dropped = sup != L->sup_last;
             L->sup_last = sup;
@@ -823,7 +884,7 @@ static void sc_render_window(const std::shared_ptr<sc_window>& w, int64_t vsync_
                      (unsigned long long)w->id, (unsigned long long)L->surface_id);
             }
         }
-        if (!head && pending > 0) {
+        if (incomplete) {
             L->stall++;   /* the head exists but its writer is not done */
             if (L->stall == 60 || (L->stall % 600) == 0)
                 LOGE("window %llu layer %llu: acquire fence pending for %u vsyncs — "
@@ -873,6 +934,17 @@ static void sc_render_window(const std::shared_ptr<sc_window>& w, int64_t vsync_
                 awl_bufferqueue_put(head, rel);   /* the GPU read is the release fence */
                 if (rel >= 0) close(rel);
             }
+        } else if (incomplete) {
+            /* ---- dmabuf frame whose writer is not done ----
+             * Keep what is on screen — buffer AND geometry (hold below) —
+             * until the fence signals (watch) or the next tick. This is NOT
+             * "no dmabuf frame": the shm branch would find no shm source on
+             * a dmabuf client and hide the layer, i.e. every commit whose
+             * GPU work is still running at the kick pass (all of them, for a
+             * client that commits right after submitting) blanked the layer
+             * for a frame and re-latched it at the tick — chrome scrolling
+             * under explicit sync flickered/juddered while static content
+             * (no commits) looked fine. */
         } else {
             /* ---- no dmabuf frame: wl_shm content? ---- */
             awl_shm_frame_t f;
@@ -903,12 +975,22 @@ static void sc_render_window(const std::shared_ptr<sc_window>& w, int64_t vsync_
                 if (rel >= 0) close(rel);   /* shm was released at upload; the GPU owns the copy */
             }
         }
+        if (wfd >= 0) {
+            if (!latched) watch_arm(w, wfd);   /* wake for the frame we could not take */
+            else close(wfd);
+        }
         if (latched) any = true;
         if (!L->has_buffer) continue;
         if (tick && done) done->push_back(lay[i].surface_id);   /* visible this vsync → frame_done */
 
         /* ---- geometry (the GL renderer's math, via awl_geom.h) ----
-         * Atomic with the buffer above: one commit = one SF transaction. */
+         * Atomic with the buffer above: one commit = one SF transaction.
+         * lay[i] is the logic layer's NEWEST state; when that commit's frame
+         * is still pending (hold) its position/size must wait for it too —
+         * moving the OLD buffer to the NEW position is a one-frame content/
+         * position skew that a scrolling client shows as judder. The latch
+         * re-applies geometry anyway (latched_common clears geo_valid). */
+        if (hold && !latched) continue;
         double rsw, rsh;
         awl_layer_sampled(&lay[i], L->bw, L->bh, &rsw, &rsh);
         int32_t Wd = awl_snap_extent(lay[i].w, xf.sx, rsw);
@@ -982,6 +1064,7 @@ static void sc_render_window(const std::shared_ptr<sc_window>& w, int64_t vsync_
         delete ctx;
     }
     ASurfaceTransaction_delete(txn);
+    return any;
 }
 
 /* frame_done outside the window lock (takes rwl.rd + ev_lock, sends) */
@@ -1003,14 +1086,17 @@ static void sc_render_all(int64_t vsync_id) {
     }
 }
 
-/* off-tick (looper wake by awl_sc_kick): kicked windows that have not had
- * their one off-tick pass this interval */
+/* off-tick (looper wake by awl_sc_kick, or a fence watch firing): kicked
+ * windows that have not had their one off-tick APPLY this interval. A pass
+ * that applied nothing — the commit's frame was still on the GPU — leaves
+ * the slot to the pass the fence watch triggers. */
 static void sc_render_kicked(void) {
     for (auto& w : snapshot_windows()) {
         if (w->dead.load()) continue;
         if (!w->kick.exchange(false)) continue;
-        if (w->applied_now.exchange(true)) continue;
-        sc_render_window(w, 0, false, nullptr);
+        if (w->applied_now.load(std::memory_order_relaxed)) continue;
+        if (sc_render_window(w, 0, false, nullptr))
+            w->applied_now.store(true, std::memory_order_relaxed);
     }
 }
 
@@ -1058,10 +1144,13 @@ static void sc_render_thread(void) {
     else
         AChoreographer_postFrameCallback64(g_ch, sc_frame64_cb, nullptr);
     while (g_running.load(std::memory_order_relaxed)) {
-        /* the choreographer's fd callback runs inside pollOnce (the tick);
-         * ALooper_wake from awl_sc_kick returns POLL_WAKE (off-tick pass) */
+        /* the choreographer's and the fence watches' fd callbacks run inside
+         * pollOnce (the tick / a kick from sc_watch_cb → POLL_CALLBACK);
+         * ALooper_wake from awl_sc_kick returns POLL_WAKE. Either way the
+         * kicked windows get their off-tick pass. */
         int r = ALooper_pollOnce(-1, nullptr, nullptr, nullptr);
-        if (r == ALOOPER_POLL_WAKE && g_running.load(std::memory_order_relaxed))
+        if ((r == ALOOPER_POLL_WAKE || r == ALOOPER_POLL_CALLBACK) &&
+            g_running.load(std::memory_order_relaxed))
             sc_render_kicked();
     }
     gl_teardown();

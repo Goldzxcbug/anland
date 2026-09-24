@@ -114,6 +114,12 @@ struct awl_bq_buffer* awl_bufferqueue_gethead(struct awl_bufferqueue* q, int tim
 struct awl_bq_buffer* awl_bufferqueue_tryhead(struct awl_bufferqueue* q);
 /* Any thread, no lock. fence_fd is dup'd/merged (caller keeps its fd). */
 void awl_bufferqueue_put(struct awl_bq_buffer* e, int fence_fd);
+/* Caller holds the lock, after drain. Readiness fd (own dup, CLOEXEC) of the
+ * oldest incomplete frame — the head tryhead refused, or the frame behind a
+ * complete head — for a consumer that wants to be woken when a frame it
+ * could not latch becomes latchable (poll POLLIN; POLLERR/HUP = dead fence,
+ * treat as signaled). -1 = every published frame is complete. */
+int awl_bufferqueue_incomplete_fd(struct awl_bufferqueue* q);
 /* Caller holds the lock, after drain. No-op when nothing incomplete is
  * pending or a watch is already registered. */
 void awl_bufferqueue_arm(struct awl_bufferqueue* q);
