@@ -377,42 +377,52 @@ static void frame_cb_res_destroy(struct wl_resource* res) {
     }
 }
 
-/* ---------------- wl_region (bounding box, not part of layout) ----------------
- * Consumers today only need a rectangle (pointer-constraints confine region).
- * The region records the union bounding box of the added rectangles;
- * subtract is ignored for the box (holes and true region algebra are out of
- * scope — real confine regions are single rects). Consumers copy the box at
- * request time; the wl_region resource itself is never held. */
-struct awl_region_bb {
+/* ---------------- wl_region (ordered rectangle ops, not part of layout) ----------------
+ * A region is the SEQUENCE of add/subtract rectangles the client issued —
+ * no region algebra: a point test replays the list and the last rectangle
+ * covering the point decides (add = inside, subtract = outside). That is
+ * exact for every wl_region a client can build, costs O(ops) per test, and
+ * the lists are tiny in practice (Firefox: one add, or nothing at all for
+ * the "no input" render child — #85). Consumers never hold the wl_region
+ * resource: pointer constraints read a bounding box at request time
+ * (awl_region_bbox), surface regions take a deep copy (awl_region_snapshot)
+ * that the commit promotes. Empty rectangles are dropped on entry. */
+struct awl_region_op {
     int32_t x, y, w, h;
-    int set;   /* any rectangle added */
+    bool add;   /* 0 = subtract */
+};
+struct awl_region {
+    struct awl_region_op* ops;
+    int n, cap;
 };
 
 static void region_res_destroy(struct wl_resource* res) {
-    free(wl_resource_get_user_data(res));
+    awl_region_free(wl_resource_get_user_data(res));
 }
 static void region_destroy(struct wl_client* client, struct wl_resource* res) {
     wl_resource_destroy(res);
 }
+static void region_op(struct wl_resource* res, int32_t x, int32_t y,
+                      int32_t w, int32_t h, bool add) {
+    struct awl_region* r = wl_resource_get_user_data(res);
+    if (!r || w <= 0 || h <= 0) return;
+    if (!add && r->n == 0) return;   /* subtracting from nothing changes nothing */
+    if (r->n == r->cap) {
+        int cap = r->cap ? r->cap * 2 : 4;
+        struct awl_region_op* ops = realloc(r->ops, (size_t)cap * sizeof(*ops));
+        if (!ops) { wl_resource_post_no_memory(res); return; }
+        r->ops = ops;
+        r->cap = cap;
+    }
+    r->ops[r->n++] = (struct awl_region_op){ x, y, w, h, add };
+}
 static void region_add(struct wl_client* client, struct wl_resource* res,
                        int32_t x, int32_t y, int32_t w, int32_t h) {
-    struct awl_region_bb* bb = wl_resource_get_user_data(res);
-    if (!bb || w <= 0 || h <= 0) return;
-    if (!bb->set) {
-        bb->x = x; bb->y = y; bb->w = w; bb->h = h;
-        bb->set = 1;
-    } else {
-        int32_t x2 = bb->x + bb->w, y2 = bb->y + bb->h;
-        if (x < bb->x) bb->x = x;
-        if (y < bb->y) bb->y = y;
-        if (x + w > x2) x2 = x + w;
-        if (y + h > y2) y2 = y + h;
-        bb->w = x2 - bb->x; bb->h = y2 - bb->y;
-    }
+    region_op(res, x, y, w, h, true);
 }
 static void region_subtract(struct wl_client* client, struct wl_resource* res,
                             int32_t x, int32_t y, int32_t w, int32_t h) {
-    /* bbox ignores holes (see section comment) */
+    region_op(res, x, y, w, h, false);
 }
 
 static const struct wl_region_interface region_iface = {
@@ -421,14 +431,86 @@ static const struct wl_region_interface region_iface = {
     .subtract = region_subtract,
 };
 
-/* Bounding-box snapshot for consumers (pointer-constraints confine region);
- * 0 = no rectangle was ever added */
 int awl_region_bbox(struct wl_resource* region, int32_t* x, int32_t* y,
                     int32_t* w, int32_t* h) {
-    struct awl_region_bb* bb = region ? wl_resource_get_user_data(region) : NULL;
-    if (!bb || !bb->set) return 0;
-    *x = bb->x; *y = bb->y; *w = bb->w; *h = bb->h;
+    struct awl_region* r = region ? wl_resource_get_user_data(region) : NULL;
+    if (!r) return 0;
+    int set = 0;
+    int32_t x1 = 0, y1 = 0, x2 = 0, y2 = 0;
+    for (int i = 0; i < r->n; i++) {
+        const struct awl_region_op* o = &r->ops[i];
+        if (!o->add) continue;
+        if (!set) {
+            x1 = o->x; y1 = o->y; x2 = o->x + o->w; y2 = o->y + o->h;
+            set = 1;
+            continue;
+        }
+        if (o->x < x1) x1 = o->x;
+        if (o->y < y1) y1 = o->y;
+        if (o->x + o->w > x2) x2 = o->x + o->w;
+        if (o->y + o->h > y2) y2 = o->y + o->h;
+    }
+    if (!set) return 0;
+    *x = x1; *y = y1; *w = x2 - x1; *h = y2 - y1;
     return 1;
+}
+
+struct awl_region* awl_region_snapshot(struct wl_resource* region) {
+    struct awl_region* src = region ? wl_resource_get_user_data(region) : NULL;
+    if (!src) return NULL;
+    struct awl_region* r = calloc(1, sizeof(*r));
+    if (!r) return NULL;
+    if (src->n) {
+        r->ops = malloc((size_t)src->n * sizeof(*r->ops));
+        if (!r->ops) { free(r); return NULL; }
+        memcpy(r->ops, src->ops, (size_t)src->n * sizeof(*r->ops));
+        r->n = r->cap = src->n;
+    }
+    return r;
+}
+
+void awl_region_free(struct awl_region* r) {
+    if (!r) return;
+    free(r->ops);
+    free(r);
+}
+
+int awl_region_contains(const struct awl_region* r, int32_t x, int32_t y) {
+    if (!r) return 0;
+    for (int i = r->n - 1; i >= 0; i--) {
+        const struct awl_region_op* o = &r->ops[i];
+        if (x >= o->x && y >= o->y && x < o->x + o->w && y < o->y + o->h)
+            return o->add;
+    }
+    return 0;
+}
+
+int awl_surface_accepts_input(struct awl_surface* s, float x, float y) {
+    pthread_mutex_lock(&s->ev_lock);
+    /* x,y are layer-local and non-negative here (the caller already bounded
+     * them by the layer size), so truncation == floor */
+    int hit = !s->input_region ||
+              awl_region_contains(s->input_region, (int32_t)x, (int32_t)y);
+    pthread_mutex_unlock(&s->ev_lock);
+    return hit;
+}
+
+/* Move a snapshot between slots: the destination's old contents die. */
+static void region_move(struct awl_region** dst, struct awl_region** src) {
+    awl_region_free(*dst);
+    *dst = *src;
+    *src = NULL;
+}
+
+void awl_surface_apply_regions_locked(struct awl_surface* s) {
+    if (s->pend_input) {
+        region_move(&s->input_region, &s->pend_input_region);
+        s->pend_input = 0;
+    }
+    if (s->pend_opaque) {
+        region_move(&s->opaque_region, &s->pend_opaque_region);
+        s->pend_opaque = 0;
+    }
 }
 
 /* ---------------- wl_surface ---------------- */
@@ -565,6 +647,10 @@ static void surface_destroy_impl(struct wl_resource* res) {
     struct awl_bufferqueue* q = s->q;   /* renderer may still hold its own ref: unref after unlink */
     s->q = NULL;
     free(s->title);
+    awl_region_free(s->input_region);
+    awl_region_free(s->pend_input_region);
+    awl_region_free(s->opaque_region);
+    awl_region_free(s->pend_opaque_region);
     pthread_mutex_destroy(&s->ev_lock);
     free(s);
     pthread_rwlock_unlock(&g_srv.rwl);
@@ -667,13 +753,41 @@ void awl_damage_merge_pending(struct awl_surface* s, int has_attach) {
     s->pending_damage_empty = 1;
 }
 
-/* no-op requests (region/transform recording left for later, no protocol error sent to the client) */
+/* set_input_region / set_opaque_region share one shape: snapshot the
+ * wl_region NOW (protocol: the region object may be destroyed right after,
+ * its contents must not change what was requested), park the copy in the
+ * pending slot; NULL region = reset to the protocol default (a NULL
+ * snapshot). Returns 0 = allocation failed (no_memory posted, request
+ * dropped). The pending flag itself is set by the caller — W1 word, dispatch
+ * thread only. */
+static int region_pend(struct awl_surface* s, struct wl_resource* surface_res,
+                       struct wl_resource* region, struct awl_region** slot) {
+    struct awl_region* snap = awl_region_snapshot(region);
+    if (region && !snap) {
+        wl_resource_post_no_memory(surface_res);
+        return 0;
+    }
+    pthread_mutex_lock(&s->ev_lock);
+    region_move(slot, &snap);
+    pthread_mutex_unlock(&s->ev_lock);
+    return 1;
+}
+/* Opaque region: recorded as protocol state (double-buffered, applied on
+ * commit); no backend consumes it yet — both renderers blend every layer. */
 static void surface_set_opaque_region(struct wl_client* c, struct wl_resource* r,
                                       struct wl_resource* region) {
-    LOGD("set_opaque_region %p", (void*)region);
+    struct awl_surface* s = wl_resource_get_user_data(r);
+    if (s && region_pend(s, r, region, &s->pend_opaque_region))
+        s->pend_opaque = 1;
 }
+/* Input region (#85): consumed by awl_subsurface_hit through
+ * awl_surface_accepts_input once the commit promoted it. */
 static void surface_set_input_region(struct wl_client* c, struct wl_resource* r,
-                                     struct wl_resource* region) {}
+                                     struct wl_resource* region) {
+    struct awl_surface* s = wl_resource_get_user_data(r);
+    if (s && region_pend(s, r, region, &s->pend_input_region))
+        s->pend_input = 1;
+}
 static void surface_set_buffer_transform(struct wl_client* c, struct wl_resource* r,
                                          int32_t transform) {
     /* Wayland: buffer transform, one of wl_output.transform (0..7), applied on
@@ -782,6 +896,7 @@ static void surface_commit(struct wl_client* client, struct wl_resource* res) {
         s->buf_transform = s->pend_buf_transform;
         s->pend_buf_transform = -1;
     }
+    awl_surface_apply_regions_locked(s);   /* set_input_region / set_opaque_region (#85) */
     int attached = s->pending_attached;
     int32_t off_x = 0, off_y = 0;   /* attach dx,dy of this cycle (cursor role: moves the hotspot) */
     int acquire_fd = -1;
@@ -963,9 +1078,9 @@ static void compositor_create_region(struct wl_client* client,
     struct wl_resource* rres = wl_resource_create(
             client, &wl_region_interface, wl_resource_get_version(res), id);
     if (!rres) { wl_resource_post_no_memory(res); return; }
-    struct awl_region_bb* bb = calloc(1, sizeof(*bb));
-    if (!bb) { wl_resource_destroy(rres); wl_resource_post_no_memory(res); return; }
-    wl_resource_set_implementation(rres, &region_iface, bb, region_res_destroy);
+    struct awl_region* r = calloc(1, sizeof(*r));
+    if (!r) { wl_resource_destroy(rres); wl_resource_post_no_memory(res); return; }
+    wl_resource_set_implementation(rres, &region_iface, r, region_res_destroy);
 }
 
 static const struct wl_compositor_interface compositor_iface = {

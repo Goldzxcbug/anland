@@ -71,20 +71,53 @@ static void toplevel_set_app_id(struct wl_client* c, struct wl_resource* res,
     LOGI("app_id=%s", app_id ? app_id : "");
 }
 
+/* Interactive move / resize / window menu: the Activity IS the frame — Android
+ * owns placement and sizing, there is no compositor-driven drag to start and
+ * the protocol defines no reply. Honoring these requests = accepting them.
+ * Only the argument validation xdg-shell mandates is enforced (resize edges;
+ * kwin posts the same error). */
 static void toplevel_show_window_menu(struct wl_client* c, struct wl_resource* res,
                                       struct wl_resource* seat, uint32_t serial,
                                       int32_t x, int32_t y) {
-    /* Input deferred */
+    LOGD("show_window_menu at %d,%d ignored (Android owns the window frame)", x, y);
 }
 static void toplevel_move(struct wl_client* c, struct wl_resource* res,
-                          struct wl_resource* seat, uint32_t serial) {}
+                          struct wl_resource* seat, uint32_t serial) {
+    LOGD("toplevel move serial=%u ignored (Android owns placement)", serial);
+}
 static void toplevel_resize(struct wl_client* c, struct wl_resource* res,
-                            struct wl_resource* seat, uint32_t serial, uint32_t edges) {}
+                            struct wl_resource* seat, uint32_t serial, uint32_t edges) {
+    /* xdg_toplevel.resize_edge: none/top/bottom/left/top_left/bottom_left/
+     * right/top_right/bottom_right = {0,1,2,4,5,6,8,9,10}; anything else is
+     * a protocol error (invalid_resize_edge). Bit i of the mask = value i valid. */
+    if (edges > 10 || !((0x777u >> edges) & 1u)) {
+        wl_resource_post_error(res, XDG_TOPLEVEL_ERROR_INVALID_RESIZE_EDGE,
+                               "invalid resize edge %u", edges);
+        return;
+    }
+    LOGD("toplevel resize edges=%u ignored (Android owns sizing)", edges);
+}
 
+/* set_min_size / set_max_size: xdg-shell mandates invalid_size for negative
+ * values; the bounds themselves have no consumer — the configure size is
+ * whatever the Activity surface measures (awl_window_resize), the client
+ * clamps on its side like under any compositor that ignores hints. */
+static int size_bound_ok(struct wl_resource* res, int32_t w, int32_t h) {
+    if (w < 0 || h < 0) {
+        wl_resource_post_error(res, XDG_TOPLEVEL_ERROR_INVALID_SIZE,
+                               "width and height must be positive or zero");
+        return 0;
+    }
+    return 1;
+}
 static void toplevel_set_max_size(struct wl_client* c, struct wl_resource* res,
-                                  int32_t w, int32_t h) {}
+                                  int32_t w, int32_t h) {
+    if (size_bound_ok(res, w, h)) LOGD("set_max_size %dx%d (0 = unbounded)", w, h);
+}
 static void toplevel_set_min_size(struct wl_client* c, struct wl_resource* res,
-                                  int32_t w, int32_t h) { LOGD("set_min_size"); }
+                                  int32_t w, int32_t h) {
+    if (size_bound_ok(res, w, h)) LOGD("set_min_size %dx%d", w, h);
+}
 
 static void toplevel_set_maximized(struct wl_client* c, struct wl_resource* res) {
     struct awl_surface* s = wl_resource_get_user_data(res);

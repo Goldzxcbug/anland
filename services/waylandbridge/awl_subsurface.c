@@ -201,6 +201,11 @@ static void sub_apply_state(struct awl_surface* ch) {
      * damage-only commit: no attach, pd accumulated, function's empty-check
      * handles the "nothing changed" case) */
     awl_damage_merge_pending(ch, had_attach);
+    /* set_input_region / set_opaque_region ride the same latch: their
+     * pending slot stayed put at maybe_latch time (like damage) and is
+     * promoted here — Firefox sets the render child's empty input region and
+     * commits it in sync mode, the GTK parent's commit makes it live (#85) */
+    awl_surface_apply_regions_locked(ch);
     /* the presented frame enters the child's queue exactly like a direct
      * commit (the old current is released when its element is drained) */
     if (had_attach)
@@ -577,11 +582,16 @@ int awl_surface_get_layers(uint64_t root_id, awl_layer_info_t* out, int max) {
 
 /* Input hit-testing: scan backward from the last entry of the render draw order
  * (get_layers: bottom → top) — the visually topmost layer wins, so hit-testing
- * matches the screen exactly. prefer>0: force that layer while the touch/pointer
- * grab is held (protocol: focus fixed after down/press); if the layer is no
- * longer in the tree, fall back to normal hit-testing.
+ * matches the screen exactly. A layer whose committed input region excludes
+ * the point is transparent to input and the scan continues underneath it
+ * (wl_surface.set_input_region, #85: a GPU render subsurface with an empty
+ * region must not steal the toolkit toplevel's clicks). prefer>0: force that
+ * layer while the touch/pointer grab is held (protocol: focus fixed after
+ * down/press, the region is not re-tested); if the layer is no longer in the
+ * tree, fall back to normal hit-testing.
  * exclude>0: skip that layer when hit-testing (drag icon). Never NULL: on no hit
- * (shadow margin / layer without buffer) fall back to the root. */
+ * (shadow margin / layer without buffer / input-transparent everywhere) fall
+ * back to the root — Android already routed the event to this window. */
 struct awl_surface* awl_subsurface_hit(struct awl_surface* root, float bx, float by,
                                        uint64_t prefer, uint64_t exclude,
                                        float* lx, float* ly) {
@@ -605,6 +615,7 @@ struct awl_surface* awl_subsurface_hit(struct awl_surface* root, float bx, float
             rx >= (float)lay[i].w || ry >= (float)lay[i].h) continue;
         struct awl_surface* s = awl_surface_by_id(lay[i].surface_id);
         if (!s) continue;
+        if (!awl_surface_accepts_input(s, rx, ry)) continue;   /* outside its input region: look through */
         *lx = rx;
         *ly = ry;
         return s;

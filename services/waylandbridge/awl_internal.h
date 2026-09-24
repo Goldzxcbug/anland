@@ -92,7 +92,8 @@ struct awl_frame_cb {
  * int fds/atomic, and the 1-bit tail word — zero internal padding
  * (pahole-verified arm64/bionic: 560B; history: 976B original → 688B after
  * the alignment-group pass → 560B after dead-field removal, the role union
- * and the two flag words). Rules for new fields:
+ * and the two flag words; +32B since for the four wl_region slots, #85).
+ * Rules for new fields:
  *   - role-exclusive state → the union below (init at role assignment);
  *   - a 1-bit flag → the W1/W2 word matching its writer threads;
  *   - everything else → the group matching its size. */
@@ -153,6 +154,23 @@ struct awl_surface {
     struct wl_resource* current_buffer_res;
 
     struct wl_list frame_callbacks;
+
+    /* ---- wl_surface.set_input_region / set_opaque_region (#85) ----
+     * Double-buffered: pend_* is the wl_region snapshot taken at request time
+     * (the client may destroy the wl_region right after), promoted to the
+     * current slot on commit (direct commit: surface_commit; sync subsurface:
+     * the parent-commit apply in awl_subsurface.c — the pending slot keeps
+     * accumulating until then, same shape as damage). NULL current = protocol
+     * default (input: infinite → the whole layer hits; opaque: nothing). A
+     * non-NULL snapshot with zero rectangles = EXPLICITLY EMPTY: an input
+     * region like that makes the layer transparent to hit-testing — the case
+     * Firefox/LibreWolf's WebRender subsurface relies on (2026-09-19 #85: the
+     * clicks landed on the render child instead of the GTK toplevel).
+     * Slots owned by ev_lock (hit-test reads on the input thread). */
+    struct awl_region* input_region;
+    struct awl_region* pend_input_region;
+    struct awl_region* opaque_region;
+    struct awl_region* pend_opaque_region;
 
     /* ---- frame stream (awl_bufferqueue.h) ----
      * Every presented dmabuf state change of this surface becomes one queue
@@ -308,6 +326,8 @@ struct awl_surface {
     bool pend_vpd : 1;
     bool vp_has_src : 1;
     bool pend_vps : 1;
+    bool pend_input : 1;                /* set_input_region this cycle (pend_input_region valid, NULL = reset to default) */
+    bool pend_opaque : 1;               /* set_opaque_region this cycle (same shape) */
     bool acked : 1;                     /* client has acked (set after the first configure) */
     bool mapped : 1;                    /* first frame buffer committed */
     bool window_live : 1;               /* window_created went out for this id and
@@ -489,10 +509,32 @@ struct awl_surface* awl_surface_from_res(struct wl_resource* res);
  * only; the adapter copies synchronously inside window_created/
  * window_title, so the pointer never outlives the callback. */
 void awl_surface_set_title(struct awl_surface* s, const char* title);
-/* wl_region bounding box snapshot (returns 1 = at least one rectangle was
- * added; 0 = empty region — callers treat it as "unconstrained/whole") */
+/* wl_region contents: the ordered add/subtract rectangle list the client
+ * built on the object (awl_surface.c). Consumers never hold the wl_region
+ * resource — they either read a bounding box at request time (pointer
+ * constraints) or take a snapshot (surface regions, applied on commit). */
+struct awl_region;
+/* Bounding box of the ADDED rectangles (subtract ignored — holes do not
+ * grow a confine box; returns 1 = at least one rectangle was added; 0 =
+ * empty/NULL region — callers treat it as "unconstrained/whole") */
 int awl_region_bbox(struct wl_resource* region, int32_t* x, int32_t* y,
                     int32_t* w, int32_t* h);
+/* Deep copy of a wl_region's rectangle list (NULL region → NULL; a region
+ * with no rectangles → a valid, empty snapshot — the two are distinct: see
+ * awl_surface.input_region). Returns NULL on allocation failure too, so a
+ * caller with a non-NULL region must treat NULL as no_memory. */
+struct awl_region* awl_region_snapshot(struct wl_resource* region);
+void awl_region_free(struct awl_region* r);
+/* Point test with full add/subtract semantics: the LAST rectangle covering
+ * (x,y) decides. NULL region = empty. */
+int awl_region_contains(const struct awl_region* r, int32_t x, int32_t y);
+/* Input hit filter (#85): does surface-local logical point (x,y) fall inside
+ * s's committed input region? No region set = the whole surface. Takes
+ * s->ev_lock; caller holds rwl (rd). */
+int awl_surface_accepts_input(struct awl_surface* s, float x, float y);
+/* Pending → current promotion of both region slots (caller holds s->ev_lock;
+ * surface_commit direct path + sync-subsurface apply in awl_subsurface.c). */
+void awl_surface_apply_regions_locked(struct awl_surface* s);
 /* Pending → current damage merge at every commit / sync-subsurface latch
  * apply (caller holds s->ev_lock; awl_surface.c + awl_subsurface.c).
  * has_attach = this commit presented a new buffer — attach without damage
@@ -629,11 +671,13 @@ void awl_subsurface_link_immediate_above_locked(struct awl_surface* child,
                                                 struct awl_surface* parent);
 void awl_subsurface_unlink_locked(struct awl_surface* child);
 /* Input hit test (caller holds rwl.rd): root buffer coords → first layer
- * containing the point, top-down in render stack order, coords translated to
- * layer-local; prefer>0 = touch/pointer grab forces that layer (translation
- * only); exclude>0 = skip that layer (the drag icon never hit-tests, its
- * events belong to the drag machine). Never NULL — out-of-bounds falls back
- * to the root (Android already routed the event to that window). */
+ * containing the point AND accepting input there (wl_surface.set_input_region,
+ * #85), top-down in render stack order, coords translated to layer-local;
+ * prefer>0 = touch/pointer grab forces that layer (translation only, the
+ * region is not re-tested — protocol focus is pinned after down/press);
+ * exclude>0 = skip that layer (the drag icon never hit-tests, its events
+ * belong to the drag machine). Never NULL — no hit falls back to the root
+ * (Android already routed the event to that window). */
 struct awl_surface* awl_subsurface_hit(struct awl_surface* root, float bx, float by,
                                        uint64_t prefer, uint64_t exclude,
                                        float* lx, float* ly);
