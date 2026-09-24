@@ -134,7 +134,7 @@ testapk: native
 
 # ---------------- SukiSU module zip ----------------
 # Template lives in module/ (module.prop / sepolicy.rule / service.sh /
-# customize.sh fragment). The full
+# customize.sh / the plat_service_contexts.anland fragment). The full
 # contexts file is NOT zipped — customize.sh generates it at flash time from
 # the device's live system original (guards against stale OTA shadowing);
 # update installs are idempotent. The build only merges in the latest
@@ -144,7 +144,7 @@ module: native pulse
 	rm -rf "$(OUT)/module"
 	mkdir -p "$$MOD"
 	cp module/module.prop module/sepolicy.rule module/service.sh \
-	   module/customize.sh "$$MOD/"
+	   module/customize.sh module/plat_service_contexts.anland "$$MOD/"
 	cp LICENSE "$$MOD/"
 	cp "$(OUT)/waylandbridge" "$$MOD/"
 	cp -r "$(PA_ROOT)" "$$MOD/pulse"   # PulseAudio tree (bin/lib/etc), see `make pulse`
