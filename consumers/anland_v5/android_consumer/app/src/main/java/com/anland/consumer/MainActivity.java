@@ -2313,6 +2313,10 @@ public class MainActivity extends Activity
     public boolean onKeyDown(int keyCode, KeyEvent event) {
         if (handleSourceAwareKey(event))
             return true;
+        // Before the repeat swallow: each repeat must become one more tap, so
+        // held-key auto-repeat still works (see handleImeDelTap).
+        if (handleImeDelTap(event))
+            return true;
         if (event.getRepeatCount() > 0)
             return true;
 
@@ -2360,6 +2364,35 @@ public class MainActivity extends Activity
         // the accessibility-interception path so the normal Android Back and
         // extra-keys-bar behaviour is unchanged when interception is off.
         return forwardKeyToLinux(event, true);
+    }
+
+    /**
+     * Backspace while the soft keyboard is open is delivered as an instant
+     * press+release tap: LatinIME acts on the DEL ACTION_UP and consumes it,
+     * so a forwarded press would never see its release — the desktop then
+     * holds the key down and its own key repeat drains the field (Android
+     * apps delete on ACTION_DOWN and never depend on the UP; the desktop
+     * keys off the release instead). Repeats each become one more tap, so
+     * held-key auto-repeat still works.
+     *
+     * <p>Activity paths only: the accessibility interception receives both the
+     * DOWN and the UP itself (the IME never sees the key), so it keeps the
+     * ordinary press/release forwarding.
+     *
+     * @return true when the event was consumed
+     */
+    private boolean handleImeDelTap(KeyEvent event) {
+        if (event.getKeyCode() != KeyEvent.KEYCODE_DEL || !systemIme.isImeWanted())
+            return false;
+        if (event.getAction() == KeyEvent.ACTION_DOWN) {
+            int evdev = KeyResolver.resolveEvdevCode(event.getKeyCode(),
+                    event.getScanCode(), false);
+            if (evdev > 0) {
+                mNative.sendKey(0, evdev);
+                mNative.sendKey(1, evdev);
+            }
+        }
+        return true;   /* UP swallowed — already released with the tap */
     }
 
     private boolean forwardKeyToLinux(KeyEvent event) {
@@ -2417,6 +2450,8 @@ public class MainActivity extends Activity
     @Override
     public boolean onKeyUp(int keyCode, KeyEvent event) {
         if (handleSourceAwareKey(event))
+            return true;
+        if (handleImeDelTap(event))
             return true;
         forwardKeyToLinux(event);
         return true;
