@@ -6,6 +6,21 @@ Anland runs the graphical Linux apps of a container on a **rooted Android** devi
 
 It ships as a SukiSU/KernelSU module (`anland-awl`): a root daemon, a host APK, the session inside the container, and an audio bridge. The companion launcher [anland-shell](https://github.com/SuperTurtleDev/anland-shell) manages the containers and starts the apps.
 
+> [!IMPORTANT]
+> **Branch status.** `main` is the active development branch — the refactored 6.x
+> architecture. As a consequence of the rewrite it does not yet reach the feature
+> completeness of 5.x: if you want stability and the full desktop experience, use
+> the [`legacy`](https://github.com/SuperTurtleDev/anland/tree/legacy) branch
+> (5.x) instead. 5.x stays in maintenance until 6.x catches up with the 5.x
+> feature set (complete desktop, virtual keyboard, accessibility, …).
+
+**Why the rewrite?** 5.x exchanged frames over a private display protocol (the
+"Anland Display Protocol"): every compositor — KWin, Weston, … — needed its own
+adaptation backend written against that protocol, and each of those had to be
+maintained separately. The 6.x refactor makes Wayland itself the frame-exchange
+protocol, so stock compositors work unmodified and only the host side needs
+maintaining.
+
 ## Why it is not a standard compositor
 
 A standard Wayland compositor — Weston, Sway, a desktop session — takes over a machine's display: it owns the whole screen, composites every client into one output, reads input from evdev, and clients reach it through the `wayland-0` socket. On a phone that model degrades into "one fullscreen remote-desktop window". Anland keeps the protocol half of a compositor and replaces the display half with Android itself:
@@ -58,6 +73,23 @@ The pieces:
 - **anlandx** — the session inside the container: links the daemon's socket, runs rootless Xwayland with a small X window manager, and publishes the app environment.
 - **pulse** — PulseAudio for Android (OpenSL ES / AAudio sinks) so container apps have sound.
 - **module** — the SukiSU/KernelSU packaging: boot service, SELinux domain, contexts generated at flash time from the device's live system files.
+
+## Rendering backends: SC and EGL
+
+The daemon composites each window through one of two backends, selected by
+`sc_enabled` in the daemon config (`/data/adb/modules/anland-awl/config.json`,
+default `1`; applied when a window attaches):
+
+- **SC (SurfaceControl) — efficient, low overhead, scanout direct.** Every
+  wayland layer becomes a SurfaceControl sibling and SurfaceFlinger/HWC does the
+  compositing — the daemon composites nothing, and a client's dma-buf can be
+  scanned out zero-copy on an HWC plane. The trade-off: surface *movement*
+  responds more slowly, since positions land through SF transactions. Best for
+  content whose surfaces mostly sit still — games.
+- **EGL (GL renderer) — smooth movement, higher GPU usage.** A per-window GPU
+  compositor samples every layer into one buffer and presents it through
+  eglSwapBuffers. Surface movement is smooth, at the price of a GPU composite
+  every frame. Best for scrolling content — web browsing.
 
 ## Requirements
 

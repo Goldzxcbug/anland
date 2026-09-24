@@ -6,6 +6,16 @@ Anland 在 **已 root 的 Android** 设备上运行 Linux 容器里的图形应�
 
 它以 SukiSU/KernelSU 模块（`anland-awl`）的形式发布：一个 root 守护进程、一个宿主 APK、容器内的会话，以及音频桥。配套启动器 [anland-shell](https://github.com/SuperTurtleDev/anland-shell) 负责管理容器和启动应用。
 
+> [!IMPORTANT]
+> **分支状态。** `main` 是活跃开发分支（重构后的 6.x 架构）。由于重构，功能尚不及
+> 5.x 完整：追求稳定和完整桌面体验请使用
+> [`legacy`](https://github.com/SuperTurtleDev/anland/tree/legacy) 分支（5.x）。
+> 5.x 会持续维护，直到 6.x 补齐 5.x 的功能（完整桌面、虚拟键盘、无障碍等）。
+
+**为什么重构？** 5.x 用一套私有显示协议（"Anland Display Protocol"）交换帧：每个合成器
+——KWin、Weston……——都要针对该协议单独维护一套适配后端，维护成本高。6.x 的重构把帧
+交换协议标准化为 Wayland 本身，原生合成器无需改动即可接入，只有宿主一侧需要维护。
+
 ## 它和标准合成器有什么不同
 
 标准的 Wayland 合成器——Weston、Sway、桌面会话——接管整台机器的显示：独占整个屏幕、把所有客户端合成到一个输出、从 evdev 读取输入，客户端通过 `wayland-0` socket 连接。这套模型放到手机上就会退化成"一个全屏的远程桌面窗口"。Anland 保留了合成器的协议那一半，把显示那一半交还给 Android：
@@ -58,6 +68,19 @@ flowchart LR
 - **anlandx**——容器内的会话：链接守护进程的 socket、运行 rootless Xwayland 和一个小型 X 窗口管理器、发布应用环境。
 - **pulse**——Android 版 PulseAudio（OpenSL ES / AAudio 输出），让容器应用有声音。
 - **module**——SukiSU/KernelSU 模块封装：开机服务、SELinux 域、刷入时从设备活系统文件生成 contexts。
+
+## 渲染后端：SC 与 EGL
+
+守护进程以两种后端之一合成每个窗口，由守护进程配置（`/data/adb/modules/anland-awl/config.json` 的
+`sc_enabled`，默认 `1`，窗口挂载时生效）决定：
+
+- **SC（SurfaceControl）——高效、低占用、扫描直出。** 每个 wayland 图层成为一个
+  SurfaceControl 兄弟层，由 SurfaceFlinger/HWC 负责合成——守护进程自己不合成，客户端的
+  dma-buf 可以零拷贝直上 HWC 平面。代价是 surface *移动* 响应较慢：位置要经由 SF 事务
+  落地。适合 surface 基本不动的场景——游戏。
+- **EGL（GL 渲染器）——移动平滑、GPU 占用高。** 每窗口一个 GPU 合成器，把所有图层
+  采样进一个缓冲区，经 eglSwapBuffers 呈现。surface 移动平滑，代价是每帧一次 GPU
+  合成。适合滚动内容——网页浏览。
 
 ## 环境要求
 
