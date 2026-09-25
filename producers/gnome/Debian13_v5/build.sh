@@ -7,16 +7,23 @@
 # are root or an ordinary user with sudo rights.
 #
 # The Mutter patch enables the Anland backend, and the sibling 'mutter/'
-# directory contains the backend files copied into the source tree. The Mutter
-# source version is pinned below because the patch targets that Ubuntu package
-# revision. XWayland follows the latest source version available to apt.
+# directory contains the backend files copied into the source tree.
+#
+# The Mutter version below is a *preference*, not a hard pin: it names the
+# packaging revision the patch was written against. Debian supersedes revisions
+# in trixie-updates/-security, which drops the superseded one from the archive,
+# so a hard pin eventually stops resolving and wedges the build. When the
+# preferred revision is gone the script falls back to the newest source version
+# apt can see and lets the patch step report whether it still applies. XWayland
+# always follows the latest source version available to apt.
 #
 # You can override the patch locations with MUTTER_PATCH=... and
-# XWAYLAND_PATCH=... ./build.sh.
+# XWAYLAND_PATCH=... ./build.sh, and pin a different Mutter revision with
+# MUTTER_VERSION=... ./build.sh.
 #
 set -u
 
-MUTTER_VERSION='48.7-0+deb13u1'
+MUTTER_VERSION="${MUTTER_VERSION:-48.7-0+deb13u1}"
 
 # ---- sudo helper (no-op if already root) -----------------------------------
 if [ "$(id -u)" -eq 0 ]; then
@@ -66,14 +73,49 @@ ensure_deb_src() {
     $SUDO apt-get update -qq || warn "apt-get update reported issues"
 }
 
+# ---- resolve a source version apt can actually fetch ------------------------
+# A pinned packaging revision only exists until Debian supersedes it in
+# trixie-updates/-security; the superseded revision then leaves the archive and
+# `apt-get source pkg=version` fails outright. Treat the pin as a preference:
+# keep it while it resolves, otherwise fall back to the newest revision apt
+# offers and let the patch step judge whether that source is still compatible.
+resolve_source_version() {
+    local src="$1" preferred="${2:-}"
+    local available latest
+
+    available="$(apt-cache showsrc "$src" 2>/dev/null | sed -n 's/^Version: //p')"
+    [ -n "$available" ] || { printf '\n'; return 0; }
+
+    if [ -n "$preferred" ] && \
+            printf '%s\n' "$available" | grep -qxF -- "$preferred"; then
+        printf '%s\n' "$preferred"
+        return 0
+    fi
+
+    latest="$(printf '%s\n' "$available" | sort -V | tail -1)"
+    if [ -n "$preferred" ]; then
+        # stderr, not warn(): callers capture stdout as the version to build.
+        printf '\033[1;33m[warn] source %s has no version %s; building %s instead\033[0m\n' \
+            "'$src'" "$preferred" "$latest" >&2
+    fi
+    printf '%s\n' "$latest"
+}
+
 # ---- build one source package with an optional overlay and patch ------------
 build_pkg() {
     local src="$1" patch="$2" version="${3:-}" overlay_dir="${4:-}" \
-        sentinel="${5:-}" source_spec="$1" source_label
+        sentinel="${5:-}" resolved source_spec="$1" source_label
 
     if [ -n "$version" ]; then
-        source_spec="$src=$version"
-        source_label="$version"
+        resolved="$(resolve_source_version "$src" "$version")"
+        if [ -n "$resolved" ]; then
+            source_spec="$src=$resolved"
+            source_label="$resolved"
+        else
+            # No deb-src index (e.g. showsrc unavailable): fall back to an
+            # unversioned fetch so apt resolves the newest source itself.
+            source_label="$version (unverified)"
+        fi
     else
         source_label='latest available'
     fi
