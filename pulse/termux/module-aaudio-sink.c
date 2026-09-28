@@ -62,7 +62,8 @@ PA_MODULE_USAGE(
 #define DEFAULT_SINK_NAME "AAudio sink"
 
 enum {
-    SINK_MESSAGE_RENDER = PA_SINK_MESSAGE_MAX
+    SINK_MESSAGE_RENDER = PA_SINK_MESSAGE_MAX,
+    SINK_MESSAGE_STREAM_REOPENED
 };
 
 struct userdata {
@@ -146,7 +147,7 @@ static void error_callback(AAudioStream *stream, void *userdata, aaudio_result_t
     } \
 }
 
-static int pa_open_aaudio_stream(struct userdata *u)
+static int pa_open_aaudio_stream(struct userdata *u, uint32_t rate)
 {
     bool want_float;
     aaudio_format_t format;
@@ -162,8 +163,8 @@ static int pa_open_aaudio_stream(struct userdata *u)
     format = want_float ? AAUDIO_FORMAT_PCM_FLOAT : AAUDIO_FORMAT_PCM_I16;
     AAudioStreamBuilder_setFormat(u->builder, format);
 
-    if (u->rate)
-        AAudioStreamBuilder_setSampleRate(u->builder, u->rate);
+    if (rate)
+        AAudioStreamBuilder_setSampleRate(u->builder, rate);
 
     AAudioStreamBuilder_setChannelCount(u->builder, ss->channels);
 
@@ -197,30 +198,80 @@ static int sink_process_msg(pa_msgobject *o, int code, void *data, int64_t offse
     switch (code) {
         case SINK_MESSAGE_RENDER:
             return process_render(u, data, offset);
+        case SINK_MESSAGE_STREAM_REOPENED:
+            /* resume_stream() replaced a disconnected stream: apply the new
+             * buffer-derived fixed latency through the base handler instead
+             * of pa_sink_set_fixed_latency(), whose synchronous send to this
+             * very queue from the IO thread would deadlock. */
+            code = PA_SINK_MESSAGE_SET_FIXED_LATENCY;
+            offset = (int64_t) get_latency(u);
+            break;
     }
 
     return pa_sink_process_msg(o, code, data, offset, memchunk);
 };
 
+/* Resume the retained stream.  When the stream died while the sink was
+ * suspended (device/routing change -> AAUDIO_ERROR_DISCONNECTED), reopen a
+ * fresh stream pinned to the sink's current rate and start that, so the sink
+ * recovers instead of running silent until the module is reloaded.  Runs on
+ * the IO thread: closing the dead stream cannot wait on its data callback
+ * (a disconnected stream has none left), and opening the new one touches no
+ * old state.  On failure the stream stays NULL and the next idle
+ * suspend/resume cycle retries; error_callback()'s own suspend/resume round
+ * trips route live disconnects through here too. */
+static void resume_stream(struct userdata *u) {
+    uint32_t pin;
+    aaudio_result_t r = u->stream ? AAudioStream_requestStart(u->stream) : AAUDIO_ERROR_DISCONNECTED;
+
+    if (r != AAUDIO_ERROR_DISCONNECTED) {
+        if (r < 0)
+            pa_log("AAudioStream_requestStart() failed: %d.", r);
+        return;
+    }
+
+    pin = u->sink->sample_spec.rate;
+    pa_log("AAudio stream disconnected - reopening on the new route.");
+
+    if (u->stream) {
+        AAudioStream_requestStop(u->stream);
+        if (!u->no_close)
+            AAudioStream_close(u->stream);
+        u->stream = NULL;
+    }
+
+    if (pa_open_aaudio_stream(u, pin) < 0 || AAudioStream_requestStart(u->stream) < 0) {
+        pa_log("Reopening the AAudio stream failed - retrying on the next resume.");
+        return;
+    }
+
+    if (u->ss.rate != pin)
+        pa_log_warn("Reopened AAudio stream at %u Hz (sink keeps %u Hz).", u->ss.rate, pin);
+
+    /* async post only: never block the IO thread on its own queue */
+    pa_asyncmsgq_post(u->thread_mq.inq, PA_MSGOBJECT(u->sink), SINK_MESSAGE_STREAM_REOPENED, NULL, 0, NULL, NULL);
+}
+
 static int state_func_io(pa_sink *s, pa_sink_state_t state, pa_suspend_cause_t suspend_cause) {
     struct userdata *u = s->userdata;
 
     if (PA_SINK_IS_LINKED(s->thread_info.state) && state == PA_SINK_UNLINKED) {
-        if (!u->no_close)
-            AAudioStream_close(u->stream);
-        else
-            AAudioStream_requestStop(u->stream);
+        if (u->stream) {
+            if (!u->no_close)
+                AAudioStream_close(u->stream);
+            else
+                AAudioStream_requestStop(u->stream);
+        }
     } else if (PA_SINK_IS_OPENED(s->thread_info.state) &&
                state == PA_SINK_SUSPENDED) {
         /* Closing here can wait for data_callback(), which is synchronously
          * waiting for this IO thread's message queue.  It deadlocks on
          * alioth.  Stop and retain the stream; resume reuses it instead of
          * leaking a newly opened AAudioStream on every idle wake. */
-        if (AAudioStream_requestStop(u->stream) < 0)
+        if (u->stream && AAudioStream_requestStop(u->stream) < 0)
             pa_log("AAudioStream_requestStop() failed.");
     } else if (s->thread_info.state == PA_SINK_SUSPENDED && PA_SINK_IS_OPENED(state)) {
-        if (AAudioStream_requestStart(u->stream) < 0)
-            pa_log("AAudioStream_requestStart() failed.");
+        resume_stream(u);
     } else if (s->thread_info.state == PA_SINK_INIT && PA_SINK_IS_LINKED(state)) {
         if (PA_SINK_IS_OPENED(state)) {
             if (AAudioStream_requestStart(u->stream) < 0)
@@ -317,7 +368,7 @@ int pa__init(pa_module*m) {
 
     pa_modargs_get_value_boolean(ma, "no_close_hack", &u->no_close);
 
-    if (pa_open_aaudio_stream(u) < 0)
+    if (pa_open_aaudio_stream(u, u->rate) < 0)
         goto fail;
 
     pa_sink_new_data_init(&data);
