@@ -190,26 +190,6 @@ diff --git a/src/backends/anland/anland_input.cpp b/src/backends/anland/anland_i
                        now(), this);
  }
  
-diff --git a/src/backends/anland/anland_egl_backend.cpp b/src/backends/anland/anland_egl_backend.cpp
---- a/src/backends/anland/anland_egl_backend.cpp
-+++ b/src/backends/anland/anland_egl_backend.cpp
-@@ -16,6 +16,7 @@
- #include "opengl/egldisplay.h"
- #include "opengl/eglnativefence.h"
- #include "opengl/glutils.h"
-+#include "core/renderloop.h"
- #ifndef ANLAND_KWIN_66
- #include "platformsupport/scenes/opengl/basiceglsurfacetexture_wayland.h"
- #endif
-@@ -280,7 +281,7 @@
-     if (index >= 0 && index < m_bufCount && !m_accumDamage[index].isEmpty()) {
-         // Only this slot's old content needs painting. Do not add new damage
-         // to the other rotation buffers when asking the compositor to run.
--        scheduleRepaint(nullptr);
-+        m_output->renderLoop()->scheduleRepaint();
-     }
- }
- 
 diff --git a/src/compositor_wayland.cpp b/src/compositor_wayland.cpp
 --- a/src/compositor_wayland.cpp
 +++ b/src/compositor_wayland.cpp

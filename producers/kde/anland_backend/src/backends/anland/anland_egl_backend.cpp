@@ -12,6 +12,7 @@
 // kwin
 #include "core/graphicsbuffer.h" // DmaBufAttributes
 #include "core/output.h" // OutputTransform
+#include "core/renderloop.h"
 #include "opengl/eglcontext.h"
 #include "opengl/egldisplay.h"
 #include "opengl/eglnativefence.h"
@@ -280,7 +281,13 @@ void AnlandEglLayer::scheduleBufferCatchUp(int index)
     if (index >= 0 && index < m_bufCount && !m_accumDamage[index].isEmpty()) {
         // Only this slot's old content needs painting. Do not add new damage
         // to the other rotation buffers when asking the compositor to run.
+#ifdef ANLAND_KWIN_66
+        // KWin 6.6 added per-layer repaint scheduling.
         scheduleRepaint(nullptr);
+#else
+        // Older KWin versions schedule the compositor through the render loop.
+        m_output->renderLoop()->scheduleRepaint();
+#endif
     }
 }
 

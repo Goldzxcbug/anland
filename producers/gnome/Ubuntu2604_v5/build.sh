@@ -8,15 +8,16 @@
 #
 # The Mutter patch enables the Anland backend, and the sibling 'mutter/'
 # directory contains the backend files copied into the source tree. The Mutter
-# source version is pinned below because the patch targets that Ubuntu package
-# revision. XWayland follows the latest source version available to apt.
+# source version follows the latest version available to apt by default. Set
+# MUTTER_VERSION to pin a revision when needed. XWayland follows the latest
+# source version available to apt.
 #
 # You can override the patch locations with MUTTER_PATCH=... and
 # XWAYLAND_PATCH=... ./build.sh.
 #
 set -u
 
-MUTTER_VERSION='50.1-0ubuntu2.2'
+MUTTER_VERSION="${MUTTER_VERSION:-}"
 
 # ---- sudo helper (no-op if already root) -----------------------------------
 if [ "$(id -u)" -eq 0 ]; then
@@ -51,10 +52,10 @@ log()  { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33m[warn] %s\033[0m\n' "$*"; }
 die()  { printf '\033[1;31m[error] %s\033[0m\n' "$*" >&2; exit 1; }
 
-# Ubuntu may remove an older source version from the current Sources index
-# while the corresponding files remain available in the archive pool. Keep the
-# build pinned to MUTTER_VERSION instead of silently switching to a newer
-# package revision whose patch may no longer apply.
+# When MUTTER_VERSION is pinned, Ubuntu may remove that version from the current
+# Sources index while its files remain available in the archive pool. Fetch the
+# exact pinned revision instead of silently switching to a newer revision whose
+# patch may no longer apply.
 fetch_archived_source() {
     local src="$1" version="$2" dest="$3"
     local base="${MUTTER_SOURCE_POOL:-http://ports.ubuntu.com/ubuntu-ports/pool/main/m/mutter}"
@@ -189,7 +190,11 @@ main() {
     xwayland_patch="$(find_patch xwayland.patch "${XWAYLAND_PATCH:-}")" \
         || die "xwayland.patch not found (set XWAYLAND_PATCH=... to override)"
 
-    log "mutter version : $MUTTER_VERSION"
+    if [ -n "$MUTTER_VERSION" ]; then
+        log "mutter version : $MUTTER_VERSION (pinned)"
+    else
+        log "mutter version : latest available to APT"
+    fi
     log "mutter.patch   : $mutter_patch"
     log "xwayland.patch : $xwayland_patch"
     log "xwayland source: latest available"
