@@ -34,7 +34,12 @@ ANLAND_INSTALL="${ANLAND_INSTALL:-0}"
 ANLAND_LOCK_PACKAGES="${ANLAND_LOCK_PACKAGES:-0}"
 BUILD_XWAYLAND="${BUILD_XWAYLAND:-0}"
 KWIN_SOURCE="${KWIN_SOURCE:-kwin-6.7.5-1.fc43}"
-DNF_IGNORE_EXCLUDES_OPTS=(--setopt=exclude= --disable-repo=google-chrome)
+DNF_IGNORE_EXCLUDES_OPTS=(--setopt=exclude=)
+# The official Fedora container may not define this optional third-party repo;
+# DNF treats disabling an unknown repo ID as a fatal error.
+if dnf repolist --all 2>/dev/null | awk '$1 == "google-chrome" { found=1 } END { exit !found }'; then
+    DNF_IGNORE_EXCLUDES_OPTS+=(--disable-repo=google-chrome)
+fi
 
 find_patch() {
     local name="$1" explicit="${2:-}"
