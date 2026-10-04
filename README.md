@@ -51,15 +51,15 @@ What that design buys you:
 
 ```mermaid
 flowchart LR
-    subgraph LC ["Linux container (Droidspaces)"]
-        APP ["GUI apps — Wayland & X11"]
-        SESS ["anlandx session<br/>Xwayland + session D-Bus"]
+    subgraph LC["Linux container (Droidspaces)"]
+        APP["GUI apps — Wayland & X11"]
+        SESS["anlandx session<br/>Xwayland + session D-Bus"]
     end
-    subgraph AND ["Android"]
-        D ["waylandbridge root daemon<br/>Wayland protocol + GPU"]
-        H ["host APK<br/>one Activity per window"]
-        SF ["SurfaceFlinger"]
-        P ["PulseAudio bridge"]
+    subgraph AND["Android"]
+        D["waylandbridge root daemon<br/>Wayland protocol + GPU"]
+        H["host APK<br/>one Activity per window"]
+        SF["SurfaceFlinger"]
+        P["PulseAudio bridge"]
     end
     APP --> SESS
     SESS -- "wayland socket" --> D

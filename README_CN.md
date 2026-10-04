@@ -45,15 +45,15 @@ Anland 在 **已 root 的 Android** 设备上运行 Linux 容器里的图形应�
 
 ```mermaid
 flowchart LR
-    subgraph LC ["Linux 容器（Droidspaces）"]
-        APP ["GUI 应用 — Wayland 与 X11"]
-        SESS ["anlandx 会话<br/>Xwayland + 会话 D-Bus"]
+    subgraph LC["Linux 容器（Droidspaces）"]
+        APP["GUI 应用 — Wayland 与 X11"]
+        SESS["anlandx 会话<br/>Xwayland + 会话 D-Bus"]
     end
-    subgraph AND ["Android"]
-        D ["waylandbridge root 守护进程<br/>Wayland 协议 + GPU"]
-        H ["宿主 APK<br/>每窗口一个 Activity"]
-        SF ["SurfaceFlinger"]
-        P ["PulseAudio 桥"]
+    subgraph AND["Android"]
+        D["waylandbridge root 守护进程<br/>Wayland 协议 + GPU"]
+        H["宿主 APK<br/>每窗口一个 Activity"]
+        SF["SurfaceFlinger"]
+        P["PulseAudio 桥"]
     end
     APP --> SESS
     SESS -- "wayland socket" --> D
