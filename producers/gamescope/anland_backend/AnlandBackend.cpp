@@ -573,6 +573,11 @@ namespace gamescope
                 break;
             default: break;
             }
+            if (ev->kind == AG_TOUCH_DOWN || ev->kind == AG_TOUCH_MOVE || ev->kind == AG_TOUCH_UP) {
+                // Steam's idle timer needs one activity update per incoming touch event.
+                ++inputCounter;
+                nudge_steamcompmgr();
+            }
             wlserver_unlock();
         }
         // Called under the existing Wayland seat lock. Passthrough contacts stay

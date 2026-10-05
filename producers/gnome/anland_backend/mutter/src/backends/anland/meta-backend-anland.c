@@ -1288,8 +1288,13 @@ reconnect_cb (gpointer user_data)
       return G_SOURCE_CONTINUE;
     }
 
-  /* The shared layer runs the handshake, drops the previous session's work and
-   * publishes the first render target on success. */
+  /* Reconnect waits for the old session's events to drain before reusing buffer
+   * identities. Keep draining on every tick, even if retirement takes more than
+   * one dispatch batch, so activation is not required to finish teardown. */
+  dispatch_present_events (backend);
+
+  /* The shared layer runs the handshake and publishes the first render target
+   * on success. */
   if (anland_de_backend_reconnect (backend->present_backend) != 0)
     return G_SOURCE_CONTINUE; /* no consumer yet, or unusable selection */
 
