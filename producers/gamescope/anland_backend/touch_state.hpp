@@ -20,8 +20,8 @@ public:
             return {};
         bool held = false;
         for (const auto &contact : m_contacts)
-            held |= contact.second.button == button;
-        m_contacts.emplace(id, Contact{button, trackpad});
+            held |= contact.second.active && contact.second.button == button;
+        m_contacts.emplace(id, Contact{button, trackpad, true});
         return {true, button, button != 0 && button != Passthrough && !held};
     }
 
@@ -30,14 +30,26 @@ public:
         if (it == m_contacts.end())
             return {};
         const uint32_t button = it->second.button;
+        const bool active = it->second.active;
         m_contacts.erase(it);
         bool held = false;
         for (const auto &contact : m_contacts)
-            held |= contact.second.button == button;
-        return {true, button, button != 0 && button != Passthrough && !held};
+            held |= contact.second.active && contact.second.button == button;
+        return {true, button, active && button != 0 && button != Passthrough && !held};
     }
 
-    bool contains(int id) const { return m_contacts.count(id) != 0; }
+    // Pointer focus changes reset the seat's buttons. Keep old contact ids until
+    // UP, but prevent them from moving or releasing a new focus's pointer.
+    // Native touch points retain their own surface until their matching UP.
+    void reset_pointer_focus() {
+        for (auto &contact : m_contacts)
+            if (contact.second.button != Passthrough)
+                contact.second.active = false;
+    }
+    bool active(int id) const {
+        const auto it = m_contacts.find(id);
+        return it != m_contacts.end() && it->second.active;
+    }
     bool passthrough(int id) const {
         const auto it = m_contacts.find(id);
         return it != m_contacts.end() && it->second.button == Passthrough;
@@ -50,6 +62,6 @@ public:
     bool empty() const { return m_contacts.empty(); }
 
 private:
-    struct Contact { uint32_t button; bool trackpad; };
+    struct Contact { uint32_t button; bool trackpad; bool active; };
     std::map<int, Contact> m_contacts;
 };

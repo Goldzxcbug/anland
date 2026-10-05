@@ -201,6 +201,7 @@ namespace gamescope
             // XWM destroys the backend while the Wayland loop is still running.
             // Quiesce callbacks under the same lock used by event dispatch.
             wlserver_lock();
+            DetachPointerFocus();
             if (m_Wakeup) wl_event_source_remove(m_Wakeup);
             m_Wakeup = nullptr;
             m_Connector.SetClipboard(nullptr);
@@ -271,6 +272,7 @@ namespace gamescope
             if (!(disableCamera && strcmp(disableCamera, "1") == 0))
                 m_CameraStarted = anland_camera_start() == 0;
             wlserver_lock();
+            AttachPointerFocus();
             m_Ime = create_local_ime();
             m_Clipboard = anland_clipboard_start();
             m_Connector.SetClipboard(m_Clipboard);
@@ -517,6 +519,45 @@ namespace gamescope
 
 	private:
 
+        // A separate standard-layout object lets Wayland callbacks recover their
+        // owner without applying wl_container_of to the polymorphic backend.
+        struct PointerFocusWatch {
+            wl_listener focus{};
+            wl_listener destroy{};
+            CAnlandBackend *backend = nullptr;
+        } m_PointerFocus;
+
+        static void PointerFocusChanged(wl_listener *listener, void *)
+        {
+            PointerFocusWatch *watch = wl_container_of(listener, watch, focus);
+            // wlroots resets pointer buttons on focus changes. Do not send UPs
+            // into the new surface or let old contacts suppress its next DOWN.
+            watch->backend->m_Touches.reset_pointer_focus();
+            watch->backend->m_Buttons.clear();
+        }
+        static void PointerSeatDestroyed(wl_listener *listener, void *)
+        {
+            PointerFocusWatch *watch = wl_container_of(listener, watch, destroy);
+            watch->backend->DetachPointerFocus();
+        }
+        void AttachPointerFocus()
+        {
+            m_PointerFocus.backend = this;
+            m_PointerFocus.focus.notify = &PointerFocusChanged;
+            m_PointerFocus.destroy.notify = &PointerSeatDestroyed;
+            wl_signal_add(&wlserver.wlr.seat->pointer_state.events.focus_change,
+                          &m_PointerFocus.focus);
+            wl_signal_add(&wlserver.wlr.seat->events.destroy, &m_PointerFocus.destroy);
+        }
+        void DetachPointerFocus()
+        {
+            if (!m_PointerFocus.backend)
+                return;
+            wl_list_remove(&m_PointerFocus.focus.link);
+            wl_list_remove(&m_PointerFocus.destroy.link);
+            m_PointerFocus.backend = nullptr;
+        }
+
         static void InputSink(void *userdata, const anland_gamescope_input_event *ev)
         {
             auto *self = static_cast<CAnlandBackend *>(userdata);
@@ -585,7 +626,7 @@ namespace gamescope
         // not one per finger. Modes are latched so a mode switch cannot strand UP.
         void TouchMotion(const anland_gamescope_input_event &ev, uint32_t time)
         {
-            if (!m_Touches.contains(ev.code) || !wlserver.mouse_focus_surface)
+            if (!m_Touches.active(ev.code) || !wlserver.mouse_focus_surface)
                 return;
             const double x = (ev.x * g_nOutputWidth + focusedWindowOffsetX) * focusedWindowScaleX;
             const double y = (ev.y * g_nOutputHeight + focusedWindowOffsetY) * focusedWindowScaleY;
@@ -669,8 +710,8 @@ namespace gamescope
             for (auto button : m_Buttons) wlserver_mousebutton(button, false, time);
             while (!m_Touches.empty()) TouchUp(m_Touches.first(), time);
             wlr_seat_touch_notify_frame(wlserver.wlr.seat);
-            wlserver_unlock();
             m_Keys.clear(); m_Buttons.clear();
+            wlserver_unlock();
         }
         static int Wakeup(void *userdata)
         {

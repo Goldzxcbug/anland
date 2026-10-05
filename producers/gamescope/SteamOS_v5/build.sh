@@ -49,9 +49,10 @@ STAGE="$RUN/stage"
 # 533 MB of pure history) and repeated that download on every run.
 DEPCACHE="${DEPCACHE:-$WORKDIR/depcache}"
 mkdir -p "$STAGE" "$DEPCACHE"
+DEPCACHE="$(cd "$DEPCACHE" && pwd)"
 prefetch_dependencies() {
     local -a rows=()
-    local line row path revision url name dir attempt ok index=0
+    local line row path revision url name dir attempt ok cache_state index=0
     while IFS= read -r line || [[ -n "$line" ]]; do
         [[ -z "$line" || "$line" == \#* ]] && continue
         rows+=("$line")
@@ -63,27 +64,29 @@ prefetch_dependencies() {
         index=$((index + 1))
         dir="$DEPCACHE/$name"
         if git -C "$dir" cat-file -e "$revision^{commit}" 2>/dev/null; then
-            printf '  -> %s cached (%s)\n' "$name" "$path"
-            continue
+            cache_state=cached
+        else
+            rm -rf -- "$dir"
+            git init -q --bare "$dir" || return 1
+            git -C "$dir" remote add origin "$url" || return 1
+            ok=0
+            for attempt in 1 2 3 4 5; do
+                if git -C "$dir" fetch -q --depth 1 origin "$revision" </dev/null &&
+                    git -C "$dir" cat-file -e "$revision^{commit}" 2>/dev/null; then
+                    ok=1
+                    break
+                fi
+                printf '  -> retry %s for %s\n' "$attempt" "$name" >&2
+                sleep 5
+            done
+            [[ "$ok" == 1 ]] || { echo "Failed to fetch $name from $url" >&2; return 1; }
+            cache_state=fetched
         fi
-        rm -rf -- "$dir"
-        git init -q --bare "$dir" || return 1
-        git -C "$dir" remote add origin "$url" || return 1
-        ok=0
-        for attempt in 1 2 3 4 5; do
-            if git -C "$dir" fetch -q --depth 1 origin "$revision" </dev/null &&
-                git -C "$dir" cat-file -e "$revision^{commit}" 2>/dev/null; then
-                ok=1
-                break
-            fi
-            printf '  -> retry %s for %s\n' "$attempt" "$name" >&2
-            sleep 5
-        done
-        [[ "$ok" == 1 ]] || { echo "Failed to fetch $name from $url" >&2; return 1; }
         # A branch ref and HEAD keep makepkg's shared clone from seeing an empty repo.
+        # Repair them on cache hits too, including an interrupted initial fetch.
         git -C "$dir" update-ref refs/heads/anland-pinned "$revision" || return 1
         git -C "$dir" symbolic-ref HEAD refs/heads/anland-pinned || return 1
-        printf '  -> %s fetched (%s)\n' "$name" "$path"
+        printf '  -> %s %s (%s)\n' "$name" "$cache_state" "$path"
     done
 }
 printf 'Resolving pinned dependencies into %s\n' "$DEPCACHE"
