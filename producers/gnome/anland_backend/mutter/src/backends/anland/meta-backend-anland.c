@@ -350,22 +350,8 @@ connect_device (MetaBackendAnland  *backend,
   /* The socket path is only a hint: the shared device layer also probes
    * $ANLAND_SOCKET and the well-known locations a container or desktop session
    * mounts the daemon on, and records which one answered. */
-  /* Window-level AWL import is not wired into Mutter's renderer yet. */
-  const char *present_mode = g_getenv ("ANLAND_PRESENT_BACKEND");
-  if (present_mode && *present_mode && g_strcmp0 (present_mode, "legacy") != 0)
-    {
-      if (error)
-        g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
-                     "AWL presentation is not yet supported by Mutter");
-      return FALSE;
-    }
-
   config = (anland_de_backend_config_t) {
-    .present = {
-      .backend = ANLAND_PRESENT_BACKEND_LEGACY,
-      .endpoint = backend->socket_path,
-      .runtime_dir = NULL,
-    },
+    .present = { .endpoint = backend->socket_path },
     .name = "mutter",
   };
 

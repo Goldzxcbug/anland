@@ -8,6 +8,8 @@
 #include "input.h"
 #include "ime.hpp"
 #include "clipboard.hpp"
+#include "touch_state.hpp"
+#include <linux/input-event-codes.h>
 #include <mutex>
 #include "anland_audio.h"
 #include "anland_camera.h"
@@ -549,8 +551,12 @@ namespace gamescope
                 }
                 break;
             case AG_BUTTON:
-                if (ev->pressed) self->m_Buttons.insert(ev->code); else self->m_Buttons.erase(ev->code);
-                wlserver_mousebutton(ev->code, ev->pressed, time); break;
+                // Each physical button source owes exactly one release. Duplicate
+                // DOWN/UP reports must not inflate wlroots' n_pressed counter.
+                if (ev->pressed ? self->m_Buttons.insert(ev->code).second
+                                : self->m_Buttons.erase(ev->code) != 0)
+                    wlserver_mousebutton(ev->code, ev->pressed, time);
+                break;
             case AG_AXIS:
                 wlr_seat_pointer_notify_axis(wlserver.wlr.seat, time,
                     ev->code == 0 ? WL_POINTER_AXIS_VERTICAL_SCROLL : WL_POINTER_AXIS_HORIZONTAL_SCROLL,
@@ -558,12 +564,9 @@ namespace gamescope
                     WL_POINTER_AXIS_SOURCE_WHEEL, WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL);
                 wlr_seat_pointer_notify_frame(wlserver.wlr.seat);
                 break;
-            case AG_TOUCH_DOWN:
-                self->m_Touches.insert(ev->code);
-                wlserver_touchdown(ev->x, ev->y, ev->code, time, &self->m_Connector); break;
-            case AG_TOUCH_MOVE:
-                wlserver_touchmotion(ev->x, ev->y, ev->code, time, false, &self->m_Connector); break;
-            case AG_TOUCH_UP: self->m_Touches.erase(ev->code); wlserver_touchup(ev->code, time); break;
+            case AG_TOUCH_DOWN: self->TouchDown(*ev, time); break;
+            case AG_TOUCH_MOVE: self->TouchMotion(*ev, time); break;
+            case AG_TOUCH_UP: self->TouchUp(ev->code, time); break;
             case AG_TOUCH_FRAME: wlr_seat_touch_notify_frame(wlserver.wlr.seat); break;
             case AG_RESOURCE_INVALID:
                 if (ev->code == ANLAND_DEVICE_SERVICE_CAMERA) anland_camera_clear();
@@ -572,7 +575,68 @@ namespace gamescope
             }
             wlserver_unlock();
         }
+        // Called under the existing Wayland seat lock. Passthrough contacts stay
+        // native touches; mouse-emulated contacts hold one button per button kind,
+        // not one per finger. Modes are latched so a mode switch cannot strand UP.
+        void TouchMotion(const anland_gamescope_input_event &ev, uint32_t time)
+        {
+            if (!m_Touches.contains(ev.code) || !wlserver.mouse_focus_surface)
+                return;
+            const double x = (ev.x * g_nOutputWidth + focusedWindowOffsetX) * focusedWindowScaleX;
+            const double y = (ev.y * g_nOutputHeight + focusedWindowOffsetY) * focusedWindowScaleY;
+            if (m_Touches.passthrough(ev.code)) {
+                wlr_seat_touch_notify_motion(wlserver.wlr.seat, time, ev.code, x, y);
+            } else if (m_Touches.trackpad(ev.code)) {
+                wlserver_mousemotion(x - wlserver.mouse_surface_cursorx,
+                                     y - wlserver.mouse_surface_cursory, time);
+            } else {
+                g_bPendingTouchMovement = true;
+                wlserver_mousewarp(x, y, time, false);
+            }
+        }
+        void TouchDown(const anland_gamescope_input_event &ev, uint32_t time)
+        {
+            if (!wlserver.mouse_focus_surface)
+                return; // No press was delivered, so no release is owed.
+            const auto mode = GetTouchClickMode();
+            if (mode == TouchClickModes::Disabled)
+                return;
+            uint32_t button = 0;
+            switch (mode) {
+            case TouchClickModes::Passthrough: button = AnlandTouchState::Passthrough; break;
+            case TouchClickModes::Left:
+            case TouchClickModes::Trackpad: button = BTN_LEFT; break;
+            case TouchClickModes::Right: button = BTN_RIGHT; break;
+            case TouchClickModes::Middle: button = BTN_MIDDLE; break;
+            default: break;
+            }
+            const auto change = m_Touches.down(ev.code, button, mode == TouchClickModes::Trackpad);
+            if (!change.accepted)
+                return;
+            if (button == AnlandTouchState::Passthrough) {
+                const double x = (ev.x * g_nOutputWidth + focusedWindowOffsetX) * focusedWindowScaleX;
+                const double y = (ev.y * g_nOutputHeight + focusedWindowOffsetY) * focusedWindowScaleY;
+                wlr_seat_touch_notify_down(wlserver.wlr.seat, wlserver.mouse_focus_surface,
+                                          time, ev.code, x, y);
+            } else {
+                if (mode != TouchClickModes::Trackpad)
+                    TouchMotion(ev, time);
+                if (change.edge)
+                    wlserver_mousebutton(button, true, time);
+            }
+        }
+        void TouchUp(int id, uint32_t time)
+        {
+            const auto change = m_Touches.up(id);
+            if (!change.accepted)
+                return;
+            if (change.button == AnlandTouchState::Passthrough)
+                wlr_seat_touch_notify_up(wlserver.wlr.seat, time, id);
+            else if (change.edge)
+                wlserver_mousebutton(change.button, false, time);
+        }
         void AttachSession()
+
         {
             if (!s_session)
                 return;
@@ -598,9 +662,10 @@ namespace gamescope
                 wlr_keyboard_notify_key(wlserver.wlr.virtual_keyboard_device, &key);
             }
             for (auto button : m_Buttons) wlserver_mousebutton(button, false, time);
-            for (auto touch : m_Touches) wlserver_touchup(touch, time);
+            while (!m_Touches.empty()) TouchUp(m_Touches.first(), time);
+            wlr_seat_touch_notify_frame(wlserver.wlr.seat);
             wlserver_unlock();
-            m_Keys.clear(); m_Buttons.clear(); m_Touches.clear();
+            m_Keys.clear(); m_Buttons.clear();
         }
         static int Wakeup(void *userdata)
         {
@@ -676,7 +741,8 @@ namespace gamescope
         bool m_AudioStarted = false;
         bool m_Capture = false;
         std::chrono::steady_clock::time_point m_NextReconnect{};
-        std::set<int32_t> m_Keys, m_Buttons, m_Touches;
+        std::set<int32_t> m_Keys, m_Buttons;
+        AnlandTouchState m_Touches;
         anland_gamescope_input m_Input{};
         CAnlandConnector m_Connector;
 	};
