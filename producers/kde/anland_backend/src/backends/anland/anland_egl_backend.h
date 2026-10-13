@@ -90,6 +90,8 @@ public:
      */
     void setPendingFence(int fd);
     int takePendingFence();
+    /* True once per frame the layer rendered, so present() can skip frames it did not. */
+    bool takePainted();
 
     /** Update the transport handle after the backend rebuilds its session. */
     void setDevice(anland_device *device)
@@ -133,6 +135,7 @@ private:
     /* Render fence for the frame being composed, or -1. Created in doEndFrame(),
      * consumed by the backend's commit when it presents. */
     int m_pendingFence = -1;
+    bool m_painted = false;
     std::array<std::shared_ptr<GLTexture>, ANLAND_DEVICE_MAX_BUFS> m_textures;
     std::array<std::unique_ptr<GLFramebuffer>, ANLAND_DEVICE_MAX_BUFS> m_fbos;
     /* Per-buffer accumulated damage: each buffer must remember everything that
