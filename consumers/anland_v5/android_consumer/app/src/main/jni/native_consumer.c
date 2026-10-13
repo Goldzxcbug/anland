@@ -156,8 +156,23 @@ static int collect_dmabufs(struct consumer_state *s)
             continue;
         }
 
-        int fd = anb->handle->data[0];   /* first fd backs the dma-buf */
         int stride = anb->stride, width = anb->width, height = anb->height;
+        /* Qualcomm gralloc puts the pixel dma-buf first, MediaTek puts its
+         * gralloc_extra metadata handle there and the dma-buf later. Only a
+         * dma-buf reports a size, so take the first fd large enough to hold
+         * the pixels. */
+        int fd = -1;
+        for (int k = 0; k < anb->handle->numFds && fd < 0; k++) {
+            off_t size = lseek(anb->handle->data[k], 0, SEEK_END);
+            if (size >= (off_t)stride * 4 * height)
+                fd = anb->handle->data[k];
+        }
+        if (fd < 0) {
+            LOGE("no dma-buf among the %d fds of the buffer on attempt %d",
+                 anb->handle->numFds, attempt);
+            api.cancelBuffer(win, anb, -1);
+            continue;
+        }
 
         /* deduplicate by ANativeWindowBuffer pointer (stable per queue slot) */
         bool dup_found = false;
