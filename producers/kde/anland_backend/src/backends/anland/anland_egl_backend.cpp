@@ -285,7 +285,12 @@ void AnlandEglLayer::scheduleBufferCatchUp(int index)
         // KWin 6.6 added per-layer repaint scheduling.
         scheduleRepaint(nullptr);
 #else
-        // Older KWin versions schedule the compositor through the render loop.
+        // Older KWin versions schedule the compositor through the render loop,
+        // which runs a frame without marking this layer dirty. KWin then
+        // presents without painting and the slot's stale content reaches the
+        // screen: fades blink once per rotation buffer. Turn the owed region
+        // into layer damage so the frame actually repaints it.
+        addRepaint(m_accumDamage[index]);
         m_output->renderLoop()->scheduleRepaint();
 #endif
     }
