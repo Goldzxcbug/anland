@@ -61,6 +61,18 @@ bool AnlandOutput::present(const QList<OutputLayer *> &layersToUpdate, const std
 void AnlandOutput::present(const std::shared_ptr<OutputFrame> &frame)
 {
 #endif
+    // KWin 6.3 calls present() after every composite, painted or not. Committing an
+    // unpainted frame shows whatever the slot last held, and its PRESENTED event
+    // schedules the next composite, so an idle desktop ran at the full refresh rate.
+    // Drop it instead: the OutputFrame's destructor tells the RenderLoop.
+    if (!m_eglLayer || !m_eglLayer->takePainted()) {
+#ifdef ANLAND_KWIN_66
+        return true;
+#else
+        return;
+#endif
+    }
+
     // The scene has already been rendered into the daemon's dmabuf by the layer
     // (AnlandEglLayer::doEndFrame). Hand it to the consumer now.
     m_frame = frame;
@@ -162,10 +174,17 @@ void AnlandOutput::onConsumerReady()
 {
     if (m_awaitingPresent) {
         m_awaitingPresent = false;
+        // RenderLoop reschedules on its own when something asked for a repaint
+        // while this frame was in flight. Forcing one here composited after every
+        // frame, and KWin 6.3 never clears a layer's scheduled flag when it has no
+        // repaint region (Compositor::prePaintPass()), so that frame always found
+        // the layer dirty and the software cursor damaged: an idle desktop kept
+        // rendering at the full refresh rate.
         completeFrame();
+        return;
     }
-    // Render the next frame in lockstep with the consumer, exactly as the 5.27
-    // backend did: the consumer's buffer-ready drives scheduleRepaint().
+    // A buffer-ready that does not complete one of our frames (after a reconnect,
+    // say) still has to wake the compositor.
     m_renderLoop->scheduleRepaint();
 }
 
