@@ -1,0 +1,32 @@
+{
+  "suite": "Arch Linux ARM",
+  "sources": {
+    "mango": {
+      "url": "https://github.com/DreamMaoMao/mango.git"
+    },
+    "wlroots": {
+      "url": "https://gitlab.freedesktop.org/wlroots/wlroots.git"
+    },
+    "scenefx": {
+      "url": "https://github.com/wlrfx/scenefx.git"
+    }
+  },
+  "patches": {
+    "mango.patch": "5ddd1eed5d382b00bd3a848a89b3858745644a774f8432df00710316714c978a",
+    "wlroots.patch": "aa6779bac078b448a31bd34dc1914aa99c7635cbfccc4ecd9a7d66543911c239",
+    "scenefx.patch": "212c2a0972d6275180268869a6a7c2747d0f884b0831376eb9ef36b39743322c"
+  },
+  "private_prefix": "/usr/lib/mango-anland",
+  "public_linkage": "shared-private-display-producer",
+  "system_minimums": {
+    "wayland": "1.24",
+    "wayland-protocols": "1.47",
+    "libdrm": "2.4.129",
+    "libxkbcommon": "1.11",
+    "pixman": "0.43"
+  },
+  "xwayland": {
+    "recipe_sha256": "df95661992f0ae4412cc2f3ea7e03f42c829091e3829a9686c9514af126cd45f",
+    "patch_sha256": "9f500d4ac901af6d8286c988de013d213c05cb637fc9fe190a7426d0c0ef152b"
+  }
+}

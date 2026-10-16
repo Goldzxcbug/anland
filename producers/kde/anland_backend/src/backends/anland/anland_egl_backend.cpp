@@ -285,12 +285,8 @@ void AnlandEglLayer::scheduleBufferCatchUp(int index)
         // KWin 6.6 added per-layer repaint scheduling.
         scheduleRepaint(nullptr);
 #else
-        // Older KWin has no per-layer scheduling, and every frame it composites
-        // also damages the software cursor (CursorScene::prePaint() returns its
-        // rect unconditionally). A catch-up frame therefore always made new damage
-        // for the other slots, so the slots woke each other forever and an idle
-        // desktop rendered at the full refresh rate. Leave the debt in the slot
-        // instead: the next real frame repaints it through beginFrame()'s repaint.
+        // Older KWin versions schedule the compositor through the render loop.
+        m_output->renderLoop()->scheduleRepaint();
 #endif
     }
 }
@@ -336,9 +332,6 @@ bool AnlandEglLayer::doEndFrame(const QRegion &renderedDeviceRegion, const QRegi
         glFinish();
     }
     setPendingFence(fence.takeFileDescriptor().take());
-    // KWin runs a paint pass whenever a layer reports it needs one, even when the
-    // region to render comes out empty. Such a frame changed nothing.
-    m_painted = !renderedDeviceRegion.isEmpty();
     return true;
 }
 
@@ -350,11 +343,6 @@ void AnlandEglLayer::setPendingFence(int fd)
         close(m_pendingFence);
     }
     m_pendingFence = fd;
-}
-
-bool AnlandEglLayer::takePainted()
-{
-    return std::exchange(m_painted, false);
 }
 
 int AnlandEglLayer::takePendingFence()

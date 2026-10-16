@@ -1,6 +1,6 @@
-# SteamOS aarch64: release sources, shared Anland overlay, native package build.
+# SteamOS aarch64: current Gamescope and dependency default branches.
 pkgname=gamescope
-pkgver=3.16.28
+pkgver=0
 pkgrel=7
 pkgdesc='Native Gamescope with Anland backend and Steam Big Picture launcher'
 arch=('aarch64')
@@ -11,47 +11,49 @@ makedepends=('meson' 'ninja' 'git' 'python' 'pkgconf' 'gcc' 'glslang' 'vulkan-he
 conflicts=('gamescope-anland')
 replaces=('gamescope-anland')
 options=('!strip' '!debug')
-source=("gamescope-$pkgver.zip::https://github.com/ValveSoftware/gamescope/archive/refs/tags/$pkgver.zip"
-        'gamescope.patch' 'anland-overlay.tar' 'dependencies.lock' 'startup.sh')
+source=('gamescope::git+https://github.com/ValveSoftware/gamescope.git'
+        'gamescope.patch' 'anland-overlay.tar' 'sources.conf' 'startup.sh')
 noextract=('anland-overlay.tar')
-# build.sh supplies SHA256 for this run's downloaded ZIP and local inputs.
-# This is transfer-integrity checking, not an independently published upstream hash.
 sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
 _dependency_paths=()
 _dependency_names=()
-_dependency_revisions=()
-_root_revision=''
 declare -A _seen_paths=()
-while read -r _path _revision _url _extra || [[ -n "$_path" ]]; do
+while read -r _path _url _extra || [[ -n "$_path" ]]; do
   [[ -z "$_path" || "$_path" == \#* ]] && continue
-  [[ -z "$_extra" && "$_revision" =~ ^[0-9a-f]{40}$ && "$_url" == https://*.git ]] || return 1
-  [[ -z "${_seen_paths[$_path]:-}" ]] || { error 'Duplicate dependency path'; return 1; }
-  _seen_paths[$_path]=1
+  [[ -z "$_extra" && "$_url" == https://*.git ]] || return 1
   if [[ "$_path" == . ]]; then
     [[ "$_url" == https://github.com/ValveSoftware/gamescope.git ]] || return 1
-    _root_revision="$_revision"
     continue
   fi
+  [[ -z "${_seen_paths[$_path]:-}" ]] || { error 'Duplicate dependency path'; return 1; }
+  _seen_paths[$_path]=1
   [[ "$_path" =~ ^(src|subprojects|thirdparty)/[a-zA-Z0-9_-]+$ ]] || return 1
-  _dependency_revisions+=("$_revision")
   _name="anland-dep-${#_dependency_names[@]}"
   _dependency_paths+=("$_path")
   _dependency_names+=("$_name")
-  source+=("$_name::git+$_url#commit=$_revision")
+  source+=("$_name::git+$_url")
   sha256sums+=('SKIP')
-done < "$startdir/dependencies.lock"
-[[ "$_root_revision" == fa0b4d3342078f01eadff0193e09c3b561f40c03 && ${#_dependency_names[@]} == 8 ]] || {
-  error 'Incomplete or incompatible Gamescope 3.16.28 dependency lock'; return 1
+done < "$startdir/sources.conf"
+[[ ${#_dependency_names[@]} -gt 0 ]] || { error 'Empty dependency source list'; return 1; }
+unset _path _url _extra _name _seen_paths
+
+pkgver() {
+  cd "$srcdir/gamescope"
+  local description
+  description="$(git describe --long --tags 2>/dev/null || true)"
+  if [[ "$description" =~ ^v?([0-9]+(\.[0-9]+)+)-([0-9]+)-g([0-9a-f]+)$ ]]; then
+    printf '%s.r%s.g%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[3]}" "${BASH_REMATCH[4]}"
+  else
+    printf '0.0.0.r%s.g%s\n' "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+  fi
 }
-unset _path _revision _url _extra _name _seen_paths
 
 prepare() {
-  local tree="$srcdir/gamescope-$pkgver" i destination
+  local tree="$srcdir/gamescope" i destination
   [[ -f "$tree/meson.build" ]] || return 1
   for i in "${!_dependency_names[@]}"; do
     destination="$tree/${_dependency_paths[i]}"
-    [[ $(git -C "$srcdir/${_dependency_names[i]}" rev-parse HEAD) == "${_dependency_revisions[i]}" ]] || return 1
-    if [[ -d "$destination" ]]; then rmdir "$destination" || return 1; fi
+    rm -rf "$destination"
     mkdir -p "$(dirname "$destination")"
     cp -a "$srcdir/${_dependency_names[i]}" "$destination" || return 1
   done
@@ -76,13 +78,13 @@ for wrap in sorted(root.glob('*.wrap')):
             raise ValueError('Unsafe overlay: '+name)
     shutil.copytree(root/'packagefiles'/overlay, root/directory, dirs_exist_ok=True)
 PY
-  patch --batch --fuzz=0 -Np1 -d "$tree" -i "$srcdir/gamescope.patch" || return 1
+  patch --batch --forward --fuzz=2 --no-backup-if-mismatch -Np1 -d "$tree" -i "$srcdir/gamescope.patch" || return 1
   mkdir -p "$tree/src/Backends/anland"
   tar -xf "$srcdir/anland-overlay.tar" -C "$tree/src/Backends/anland" || return 1
 }
 
 build() {
-  meson setup "$srcdir/build" "$srcdir/gamescope-$pkgver" \
+  meson setup "$srcdir/build" "$srcdir/gamescope" \
     --prefix=/usr --libdir=lib --buildtype=release --wrap-mode=nodownload \
     -Denable_openvr_support=false -Denable_tests=false -Dbenchmark=disabled || return 1
   ninja -C "$srcdir/build" -j"${JOBS:-2}" src/gamescope src/gamescopereaper \
@@ -100,7 +102,7 @@ check() {
 }
 
 package() {
-  local tree="$srcdir/gamescope-$pkgver" name
+  local tree="$srcdir/gamescope" name
   # Install into pkgdir only; preserve the SteamOS session assets.
   for name in gamescope gamescopereaper gamescopectl gamescope-type gamescopestream; do
     install -Dm755 "$srcdir/build/src/$name" "$pkgdir/usr/bin/$name"
@@ -161,7 +163,7 @@ Icon=steam
 Terminal=false
 Categories=Game;
 EOF
-  install -Dm644 "$srcdir/dependencies.lock" "$pkgdir/usr/share/doc/gamescope-anland/dependencies.lock"
+  install -Dm644 "$srcdir/sources.conf" "$pkgdir/usr/share/doc/gamescope-anland/sources.conf"
   find "$pkgdir" -type d -exec chmod 755 {} +
   find "$pkgdir/usr/share" "$pkgdir/usr/lib/systemd" -type f -exec chmod 644 {} +
   # Keep the installed-file verification manifest, excluding itself.

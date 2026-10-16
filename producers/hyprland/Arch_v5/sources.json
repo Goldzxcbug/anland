@@ -1,0 +1,43 @@
+{
+  "suite": "Arch Linux ARM",
+  "sources": {
+    "hyprland": {
+      "method": "git",
+      "url": "https://github.com/hyprwm/Hyprland.git"
+    },
+    "aquamarine": {
+      "method": "git",
+      "url": "https://github.com/hyprwm/aquamarine.git"
+    }
+  },
+  "patches": {
+    "hyprland.patch": "03db70a0eaefee4f2a18a5dc3d8b0f5ac0e17710669f50fee0985f0966903c5a",
+    "aquamarine.patch": "7a80db73559a345340facf190048437172c41724abe5cbb7064fc52a32e8f66a",
+    "hyprgrass.patch": "78e8aac8a504caa1b4c79688722e08fa2b47ddfeb53d437d961866b6718bd92b"
+  },
+  "plugins": {
+    "hyprgrass": {
+      "url": "https://github.com/horriblename/hyprgrass.git"
+    },
+    "wf-touch": {
+      "url": "https://github.com/WayfireWM/wf-touch.git"
+    }
+  },
+  "xwayland": {
+    "recipe_sha256": "df95661992f0ae4412cc2f3ea7e03f42c829091e3829a9686c9514af126cd45f",
+    "patch_sha256": "9f500d4ac901af6d8286c988de013d213c05cb637fc9fe190a7426d0c0ef152b"
+  },
+  "public_linkage": "built-in-once-in-renamed-aquamarine-anland",
+  "lua": "5.5 (Arch lua)",
+  "hyprutils": "system >=0.14 / SONAME 13",
+  "arch_package_baseline": {
+    "repository": "extra",
+    "architecture": "aarch64",
+    "source_recipe_reference": "https://raw.githubusercontent.com/archlinuxarm/PKGBUILDs/master/extra/hyprland/PKGBUILD",
+    "package_prefix": "/usr",
+    "sdk_pkgconfig": "/usr/share/pkgconfig/hyprland.pc",
+    "patched_aquamarine_pkgconfig": "/usr/lib/pkgconfig/aquamarine-anland.pc",
+    "patched_aquamarine_soname": "libaquamarine-anland.so.14",
+    "hyprpm_headers": "matching package-owned SDK; no unpatched upstream header checkout"
+  }
+}

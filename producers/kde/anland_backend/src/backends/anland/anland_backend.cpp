@@ -569,6 +569,18 @@ void AnlandBackend::processInputEvent(const anland_device_input_t &ev)
         return;
     }
 
+    if (ev.type == ANLAND_DEVICE_IN_CLIPBOARD || ev.type == ANLAND_DEVICE_IN_TEXT_INPUT) {
+        const uint32_t size = ev.type == ANLAND_DEVICE_IN_CLIPBOARD ? ev.clipboard.size : ev.text_input.size;
+        if (size > ANLAND_DEVICE_MAX_PAYLOAD_SIZE) {
+            // Reject before allocating or narrowing to QByteArray's length type.
+            // The unread payload belongs to this session; never parse it as input.
+            qCWarning(KWIN_ANLAND) << "oversized input payload, dropping session:" << size;
+            anland_de_backend_drop_session(m_presentBackend);
+            enterFallback();
+            return;
+        }
+    }
+
     switch (ev.type) {
     case ANLAND_DEVICE_IN_PTR_MOTION: {
         const QPointF pos = mapInputToLogical(QPointF(ev.pointer_motion.x, ev.pointer_motion.y));
