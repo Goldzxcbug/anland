@@ -5,11 +5,18 @@
 # include content identities, so a newer upstream source never overwrites an
 # existing cache or local edits.
 anland_prepare_latest_apt_source() {
-    local package=$1 workdir=$2 patch_file=${3:-} offline=${4:-0} extra_identity=${5:-}
+    local package=$1 workdir=$2 patch_file=${3:-} offline=${4:-0} extra_identity=${5:-} suite=${6:-} requested_version=${7:-}
+    local source_target=$package
+    [[ -z $suite ]] || source_target+="/$suite"
     local downloads latest_record temp dsc version safe_version source_id patch_id identity tree file src_cache
     local -a dscs=()
     downloads="$workdir/source-downloads"
     latest_record="$workdir/$package.latest-source"
+    [[ -z $suite ]] || latest_record="$workdir/$package-$suite.latest-source"
+    if [[ -n $requested_version ]]; then
+        source_target="$package=$requested_version"
+        latest_record="$workdir/$package-${requested_version//:/_}.latest-source"
+    fi
     mkdir -p "$downloads" || return 1
 
     if [[ $offline == 1 ]]; then
@@ -36,7 +43,7 @@ anland_prepare_latest_apt_source() {
         fi
         if [[ $(id -u) == 0 ]]; then apt-get update >&2; else sudo apt-get update >&2; fi || return 1
         temp=$(mktemp -d "$downloads/.$package.XXXXXX") || return 1
-        if ! (cd "$temp" && apt-get source --download-only --only-source "$package" >&2); then
+        if ! (cd "$temp" && apt-get source --download-only --only-source "$source_target" >&2); then
             printf 'Cannot fetch latest %s source; enable deb-src repositories\n' "$package" >&2
             return 1
         fi
@@ -95,7 +102,7 @@ anland_prepare_latest_apt_source() {
 # build tree that may contain local edits.
 anland_prepare_latest_git_source() {
     local name=$1 url=$2 workdir=$3 patch_file=${4:-} offline=${5:-0} extra_identity=${6:-}
-    local history=${7:-shallow} suffix= downloads record temp commit repo patch_id identity tree
+    local history=${7:-shallow} ref=${8:-} suffix= downloads record temp commit repo patch_id identity tree
     local -a clone_options=(--quiet)
     case $history in
         shallow) clone_options+=(--depth=1) ;;
@@ -121,7 +128,14 @@ anland_prepare_latest_git_source() {
     else
         temp=$(mktemp -d "$downloads/.$name.XXXXXX") || return 1
         rmdir "$temp" || return 1
-        if ! git clone "${clone_options[@]}" "$url" "$temp"; then
+        if [[ -n $ref ]]; then
+            local -a fetch_options=(--quiet --filter=blob:none)
+            [[ $history != shallow ]] || fetch_options+=(--depth=1)
+            git init --quiet "$temp" &&
+                git -C "$temp" remote add origin "$url" &&
+                git -C "$temp" fetch "${fetch_options[@]}" origin "$ref" &&
+                git -C "$temp" checkout --quiet --detach FETCH_HEAD || return 1
+        elif ! git clone "${clone_options[@]}" "$url" "$temp"; then
             rm -rf -- "$temp"
             return 1
         fi

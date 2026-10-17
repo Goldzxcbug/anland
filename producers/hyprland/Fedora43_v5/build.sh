@@ -228,14 +228,14 @@ python3 - "$SCRIPT_DIR/sources.json" > "$WORKDIR/sources.tsv" <<'PY'
 import json,sys
 v=json.load(open(sys.argv[1]))
 for group in ('sources','plugins'):
-    for name,e in v[group].items(): print(name,e['url'],sep='\t')
+    for name,e in v[group].items(): print(name,e['url'],e.get('revision',''),sep='\t')
 PY
 [[ $? == 0 ]] || fedora_die 'source URLs'
 declare -A upstream_trees upstream_commits
 source_records=()
-while IFS=$'\t' read -r name url; do
+while IFS=$'\t' read -r name url revision; do
     [[ -n $name && -n $url ]] || fedora_die 'invalid source URL record'
-    source_result=$(anland_prepare_latest_git_source "$name" "$url" "$WORKDIR/latest-sources" '' "$ANLAND_OFFLINE" "$FEDORA_INPUT_ID") ||
+    source_result=$(anland_prepare_latest_git_source "$name" "$url" "$WORKDIR/latest-sources" '' "$ANLAND_OFFLINE" "$FEDORA_INPUT_ID" shallow "$revision") ||
         fedora_die "cannot fetch latest $name source"
     IFS=$'\t' read -r upstream_tree upstream_commit <<< "$source_result"
     [[ -d $upstream_tree && $upstream_commit =~ ^[0-9a-f]{40,64}$ ]] || fedora_die "invalid latest $name source identity"

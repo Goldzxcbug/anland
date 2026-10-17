@@ -92,8 +92,8 @@ fedora_reuse() {
 fedora_seal() { printf '%s\n' "$FEDORA_INPUT_ID" > "$1/.anland-source-identity" || fedora_die 'cannot record source identity'; }
 
 fedora_git() {
-    local name=$1 url=$2 patch=$3 result tree commit
-    result=$(anland_prepare_latest_git_source "$name" "$url" "$WORKDIR" "$patch" "$ANLAND_OFFLINE" "$FEDORA_INPUT_ID") ||
+    local name=$1 url=$2 patch=$3 revision=${4:-} result tree commit
+    result=$(anland_prepare_latest_git_source "$name" "$url" "$WORKDIR" "$patch" "$ANLAND_OFFLINE" "$FEDORA_INPUT_ID" shallow "$revision") ||
         fedora_die "cannot prepare latest $name source"
     IFS=$'\t' read -r tree commit <<< "$result"
     printf '%s\t%s\n' "$tree" "$commit"
@@ -244,12 +244,12 @@ declare -A source_tree=() build_dir=()
 python3 - "$SCRIPT_DIR/sources.json" > "$WORKDIR/sources.tsv" <<'PY'
 import json,sys
 v=json.load(open(sys.argv[1]))
-for name,e in v['sources'].items(): print(name,e['url'],v['patches'][name+'.patch'],sep='\t')
+for name,e in v['sources'].items(): print(name,e['url'],v['patches'][name+'.patch'],e.get('revision',''),sep='\t')
 PY
 [[ $? == 0 ]] || fedora_die 'source lock'
-while IFS=$'\t' read -r name url patchsha; do
+while IFS=$'\t' read -r name url patchsha revision; do
     printf '%s  %s\n' "$patchsha" "$SCRIPT_DIR/$name.patch" | sha256sum -c --status - || fedora_die "patch checksum: $name"
-    result=$(fedora_git "$name" "$url" "$SCRIPT_DIR/$name.patch") || fedora_die "latest source: $name"
+    result=$(fedora_git "$name" "$url" "$SCRIPT_DIR/$name.patch" "$revision") || fedora_die "source: $name"
     IFS=$'\t' read -r tree commit <<< "$result"
     source_tree[$name]=$tree
     if [[ ! -f $tree/.anland-fedora-overlay-id ]]; then
@@ -299,7 +299,7 @@ meson_component() {
     stage_pc
 }
 meson_component wlroots -Dexamples=false -Dbackends=drm,libinput -Drenderers=gles2 \
-    -Dallocators=gbm -Dsession=enabled -Dlibliftoff=disabled -Dxwayland=enabled -Dcolor-management=disabled
+    -Dallocators=gbm -Dsession=enabled -Dlibliftoff=disabled -Dxwayland=enabled
 meson_component scenefx -Dexamples=false -Dcolor-management=disabled
 meson_component mango --sysconfdir=/etc/mango-anland -Danland=enabled -Dxwayland=enabled
 package="$WORKDIR/runtime"
@@ -307,7 +307,7 @@ fedora_run mkdir -p "$package"
 fedora_run env DESTDIR="$package" cmake --install "$WORKDIR/build/public/libdisplay_producer"
 for name in wlroots scenefx mango; do fedora_run env DESTDIR="$package" meson install -C "${build_dir[$name]}" --no-rebuild; done
 fedora_run rm -rf -- "$package$PREFIX/lib/systemd" "$package$PREFIX/share/wayland-sessions"
-fedora_run mv "$package/etc/mango-anland/mango/config.conf" "$package/etc/mango-anland/config.conf"
+fedora_run mv "$package/etc/mango-anland/mango/"* "$package/etc/mango-anland/"
 fedora_run rmdir "$package/etc/mango-anland/mango"
 fedora_run install -Dm755 "$SCRIPT_DIR/startup.sh" "$package/usr/bin/mango-anland"
 printf '#!/bin/sh\nexport LD_LIBRARY_PATH=/usr/lib/mango-anland/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}\nexec /usr/lib/mango-anland/bin/mmsg "$@"\n' > "$package/usr/bin/mmsg-anland" || fedora_die 'mmsg wrapper'

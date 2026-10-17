@@ -1,3 +1,9 @@
+--- a/debian/rules
++++ b/debian/rules
+@@ -13 +13,2 @@
+-	dh_auto_configure -- \
++	dh_auto_configure -- \
++		-Ddocs=false -Ddevel-docs=false \
 --- a/hw/xwayland/xwayland-glamor-gbm.c
 +++ b/hw/xwayland/xwayland-glamor-gbm.c
 @@ -590,8 +590,17 @@

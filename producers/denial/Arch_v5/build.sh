@@ -290,27 +290,32 @@ PY_FLUTTER_SOURCES
 prepare_sources() {
     log 'Prepare Denial and Anland sources'
     local latest_result latest_tree base_version flutter_tree
-    latest_result=$(anland_prepare_latest_git_source denial "$DENIAL_URL" "$WORKDIR/latest-sources" '' "$ANLAND_OFFLINE") ||
-        die 'cannot resolve Denial default branch'
+    latest_result=$(anland_prepare_latest_git_source denial "$DENIAL_URL" "$WORKDIR/latest-sources" '' "$ANLAND_OFFLINE" '' shallow "$DENIAL_REVISION") ||
+        die 'cannot resolve the Denial revision supported by the backend patch'
     IFS=$'\t' read -r latest_tree DENIAL_REV <<< "$latest_result"
     [[ -d $latest_tree && $DENIAL_REV =~ ^[0-9a-f]{40,64}$ ]] || die 'invalid latest Denial identity'
+    [[ $DENIAL_REV == "$DENIAL_REVISION" ]] || die 'cached Denial revision differs from sources.conf'
     SOURCE="$WORKDIR/src/denial-$DENIAL_REV"
     [[ $ARTIFACTS_DIR != "$SOURCE" && $ARTIFACTS_DIR != "$SOURCE/"* ]] || die 'packages must be outside the source tree'
     checkout "$SOURCE" "$DENIAL_URL" "$DENIAL_REV" "${DENIAL_SOURCE:-$latest_tree}"
-    # Flutter's SDK version is derived from ancestor tags; retain Git metadata
-    # while omitting historical file blobs from the initial network transfer.
-    latest_result=$(anland_prepare_latest_git_source flutter "$FLUTTER_URL" "$WORKDIR/latest-sources" '' "$ANLAND_OFFLINE" '' full) ||
-        die 'cannot resolve Flutter default branch'
+    # Denial's fork has no release tags; its source lock identifies the matching
+    # Flutter SDK branch and revision, independently of the fork's default branch.
+    local flutter_lock="$SOURCE/prebuilt/flutter-engine/SOURCE_LOCK.json" flutter_revision
+    flutter_revision=$(jq -er '.flutter.revision' "$flutter_lock") || die 'missing Denial Flutter revision'
+    FLUTTER_URL=$(jq -er '.flutter.repository' "$flutter_lock") || die 'missing Denial Flutter repository'
+    FLUTTER_VERSION=$(jq -er '.flutter.branch | capture("^denial/(?<version>[0-9]+\\.[0-9]+\\.[0-9]+)$").version' "$flutter_lock") ||
+        die 'cannot derive Flutter SDK version from Denial source lock'
+    latest_result=$(anland_prepare_latest_git_source flutter "$FLUTTER_URL" "$WORKDIR/latest-sources" '' "$ANLAND_OFFLINE" '' shallow "$flutter_revision") ||
+        die 'cannot resolve the Flutter revision selected by Denial'
     IFS=$'\t' read -r flutter_tree FLUTTER_REV <<< "$latest_result"
     [[ -d $flutter_tree && $FLUTTER_REV =~ ^[0-9a-f]{40}$ ]] || die 'invalid latest Flutter identity'
+    [[ $FLUTTER_REV == "$flutter_revision" ]] || die 'cached Flutter revision differs from Denial source lock'
     ENGINE_SOURCES="$WORKDIR/engine/sources/$FLUTTER_REV.json"
     run mkdir -p "$(dirname -- "$ENGINE_SOURCES")"
     resolve_flutter_dependencies "$flutter_tree" > "$ENGINE_SOURCES.pending" || die 'cannot resolve current Flutter DEPS; adapt the source resolver'
     run mv -- "$ENGINE_SOURCES.pending" "$ENGINE_SOURCES"
     export DENIAL_ENGINE_SOURCES="$ENGINE_SOURCES"
-    FLUTTER_VERSION=$(git -C "$flutter_tree" describe --tags --abbrev=0 --match '[0-9]*') || die 'cannot derive the current Flutter SDK version from upstream tags'
     [[ $FLUTTER_VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][A-Za-z0-9.+-]+)?$ ]] || die 'unrecognized Flutter SDK version; adapt the version resolver'
-    FLUTTER_VERSION="${FLUTTER_VERSION%%+*}+git.${FLUTTER_REV:0:12}"
     FLUTTER=$(realpath -m -- "${DENIAL_FLUTTER_ROOT:-$WORKDIR/engine/checkout-$FLUTTER_REV}") || die 'invalid Flutter checkout path'
     if [[ -z ${DENIAL_ENGINE_DIR:-} ]]; then
         ENGINE=$(realpath -m -- "$WORKDIR/engine/build/$FLUTTER_REV/out/denial_host_release_arm64_anland_ganesh") ||
@@ -342,8 +347,16 @@ PY
     [[ -s $SCRIPT_DIR/denial.patch ]] || die 'missing component patch: denial.patch'
     cat -- "$SCRIPT_DIR/denial.patch" >> "$patch" || die 'cannot read denial.patch'
     emit_adapter_patch engine > "$ENGINE_PATCH" || die 'cannot extract Flutter engine patch'
-    if ! patch --batch --force --fuzz=2 --no-backup-if-mismatch -p1 -d "$SOURCE" --reverse --dry-run -i "$patch" >/dev/null 2>&1; then
-        if ! patch --batch --forward --fuzz=2 --no-backup-if-mismatch -p1 -d "$SOURCE" --dry-run -i "$patch" >/dev/null 2>&1; then
+    if ! cmp -s "$patch" "$previous"; then
+        # Several blocks touch the same file. A dry run cannot see changes from
+        # earlier blocks, so validate the complete sequence on a disposable copy.
+        local probe
+        probe=$(mktemp -d "$WORKDIR/.patch-check.XXXXXX") || die 'cannot create patch check tree'
+        run cp -a --reflink=auto "$SOURCE/." "$probe/"
+        local applies=0
+        patch --batch --forward --fuzz=2 --no-backup-if-mismatch -p1 -d "$probe" -i "$patch" >/dev/null 2>&1 && applies=1
+        run rm -rf -- "$probe"
+        if [[ $applies == 0 ]]; then
             [[ -f $previous ]] || die 'source has conflicting edits; refusing to overwrite them'
             run patch --batch --force --fuzz=2 --no-backup-if-mismatch -p1 -d "$SOURCE" --reverse --dry-run -i "$previous"
             run patch --batch --force --fuzz=2 --no-backup-if-mismatch -p1 -d "$SOURCE" --reverse -i "$previous"
@@ -1188,9 +1201,9 @@ package_all() {
     run rm -rf -- "$BUILD/package-check"
     run mkdir -p "$BUILD/package-check"
     for package in "${packages[@]}"; do
-        bsdtar -xOf "$package" .PKGINFO | grep -qx 'arch = aarch64' || die "wrong package architecture: $package"
         local info
         info=$(bsdtar -xOf "$package" .PKGINFO) || die "cannot read package metadata: $package"
+        grep -qx 'arch = aarch64' <<< "$info" || die "wrong package architecture: $package"
         case ${package##*/} in
             denial-anland-engine-*)
                 grep -qx 'pkgname = denial-anland-engine' <<< "$info" || die 'wrong engine package name'

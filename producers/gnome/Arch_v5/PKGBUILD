@@ -85,9 +85,9 @@ makedepends=(
   sysprof
   wayland-protocols
 )
-# Sources follow the current GNOME Mutter and gvdb default branches.
+# Keep the backend patch aligned with the GNOME 51 runtime ABI.
 source=(
-  'mutter::git+https://gitlab.gnome.org/GNOME/mutter.git'
+  'mutter::git+https://gitlab.gnome.org/GNOME/mutter.git#commit=138a14fbeef09d49ebf5be8a0cb83b042dd5c841'
   'gvdb::git+https://gitlab.gnome.org/GNOME/gvdb.git'
   'mutter.patch'
   'mutter-overlay.tar.gz'
@@ -125,10 +125,8 @@ build() {
   mutter_version=$(_mutter_version) || return 1
   local meson_options=(
     -D docs=true
-    -D egl_device=true
     -D installed_tests=false
     -D tests=disabled
-    -D wayland_eglstream=true
     -D anland=enabled
     "-Dc_args=-DANLAND_MUTTER_${mutter_version%%.*}"
   )
@@ -160,7 +158,9 @@ package_mutter() {
   [[ -n "$library" ]] || { error 'Mutter shared library missing'; return 1; }
   soname=${library##*/}
   soname=${soname%%.so.*}
-  provides=("$soname.so")
+  # The ABI is known only after pkgver/build; avoid makepkg expanding an empty
+  # local variable while it inspects split-package metadata before the build.
+  read -r -a provides <<< "$soname.so"
   optdepends=(
     'bash-completion: Bash completions for gdctl'
     'mutter-devkit: Mutter SDK, "MDK"'

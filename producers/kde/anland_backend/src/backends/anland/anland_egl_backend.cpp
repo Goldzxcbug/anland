@@ -173,7 +173,11 @@ bool AnlandEglLayer::importBuffers(int count)
         // EglBackend::importDmaBufAsTexture() builds the EGLImage and wraps it in
         // a GLTexture in one step (the 5.27-era manual EGLImageKHR +
         // EGLImageTexture(...) dance is gone in 6.x).
+#ifdef ANLAND_KWIN_68
+        std::shared_ptr<GLTexture> texture = m_backend->openglContext()->importDmaBufAsTexture(attrs);
+#else
         std::shared_ptr<GLTexture> texture = m_backend->importDmaBufAsTexture(attrs);
+#endif
         if (!texture) {
             qCWarning(KWIN_ANLAND) << "failed to import dmabuf" << i << "as texture";
             releaseBuffers();
@@ -215,7 +219,11 @@ void AnlandEglLayer::onOutputTransformChanged()
 #endif
 }
 
+#ifdef ANLAND_KWIN_68
+std::optional<OutputLayerBeginFrameInfo> AnlandEglLayer::beginFrame(OutputFrame *)
+#else
 std::optional<OutputLayerBeginFrameInfo> AnlandEglLayer::doBeginFrame()
+#endif
 {
 #ifdef ANLAND_KWIN_66
     m_backend->openglContext()->makeCurrent();
@@ -291,7 +299,9 @@ void AnlandEglLayer::scheduleBufferCatchUp(int index)
     }
 }
 
-#ifdef ANLAND_KWIN_66
+#ifdef ANLAND_KWIN_68
+bool AnlandEglLayer::endFrame(const Region &renderedDeviceRegion, const Region &damagedDeviceRegion, OutputFrame *frame)
+#elif defined(ANLAND_KWIN_66)
 bool AnlandEglLayer::doEndFrame(const Region &renderedDeviceRegion, const Region &damagedDeviceRegion, OutputFrame *frame)
 #else
 bool AnlandEglLayer::doEndFrame(const QRegion &renderedDeviceRegion, const QRegion &damagedDeviceRegion, OutputFrame *frame)
@@ -352,10 +362,12 @@ int AnlandEglLayer::takePendingFence()
     return fd;
 }
 
+#ifndef ANLAND_KWIN_68
 DrmDevice *AnlandEglLayer::scanoutDevice() const
 {
     return m_backend->drmDevice();
 }
+#endif
 
 #ifdef ANLAND_KWIN_67
 FormatModifierMap AnlandEglLayer::supportedDrmFormats() const
@@ -371,11 +383,16 @@ std::shared_ptr<GLTexture> AnlandEglLayer::texture() const
     return m_textures[m_currentIndex];
 }
 
+#ifdef ANLAND_KWIN_68
+AnlandEglBackend::AnlandEglBackend(AnlandBackend *b, RenderDevice *device)
+    : EglBackend(device)
+#else
 AnlandEglBackend::AnlandEglBackend(AnlandBackend *b)
 #ifdef ANLAND_KWIN_66
     : EglBackend()
 #else
     : AbstractEglBackend()
+#endif
 #endif
     , m_backend(b)
 {
@@ -400,14 +417,18 @@ anland_device *AnlandEglBackend::device() const
     return m_backend->device();
 }
 
+#ifndef ANLAND_KWIN_68
 DrmDevice *AnlandEglBackend::drmDevice() const
 {
     return m_backend->drmDevice();
 }
+#endif
 
 bool AnlandEglBackend::initializeEgl()
 {
-#ifdef ANLAND_KWIN_67
+#ifdef ANLAND_KWIN_68
+    return initClientExtensions();
+#elif defined(ANLAND_KWIN_67)
     if (!initClientExtensions() || !m_backend->renderDevice()) {
         return false;
     }

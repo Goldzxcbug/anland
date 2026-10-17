@@ -15,7 +15,7 @@ optdepends=('mangobar: panel' 'xdg-desktop-portal-wlr: desktop portal')
 backup=(etc/mango-anland/config.conf)
 source=(
     'mango::git+https://github.com/DreamMaoMao/mango.git'
-    'wlroots::git+https://gitlab.freedesktop.org/wlroots/wlroots.git'
+    'wlroots::git+https://gitlab.freedesktop.org/wlroots/wlroots.git#commit=d783533489e1f75d6886c2ab5c5960090ef268f8'
     'scenefx::git+https://github.com/wlrfx/scenefx.git'
     'anland-inputs.tar.gz'
 )
@@ -105,7 +105,7 @@ build() {
     DESTDIR="$srcdir/stage" cmake --install "$srcdir/build-public"
     _stage_pc
     _meson wlroots -Dexamples=false -Dbackends=drm,libinput -Drenderers=gles2 \
-        -Dallocators=gbm -Dsession=enabled -Dlibliftoff=disabled -Dxwayland=enabled -Dcolor-management=disabled
+        -Dallocators=gbm -Dsession=enabled -Dlibliftoff=disabled -Dxwayland=enabled
     _meson scenefx -Dexamples=false -Dcolor-management=disabled
     _meson mango --sysconfdir=/etc/mango-anland -Danland=enabled -Dxwayland=enabled
 }
@@ -114,7 +114,7 @@ package() {
     for name in wlroots scenefx mango; do DESTDIR="$pkgdir" meson install -C "$srcdir/build-$name" --no-rebuild; done
     # Never ship the patch's legacy service/restart launcher.
     rm -rf "$pkgdir$_prefix/lib/systemd" "$pkgdir$_prefix/share/wayland-sessions"
-    mv "$pkgdir/etc/mango-anland/mango/config.conf" "$pkgdir/etc/mango-anland/config.conf"
+    mv "$pkgdir/etc/mango-anland/mango/"* "$pkgdir/etc/mango-anland/"
     rmdir "$pkgdir/etc/mango-anland/mango"
     install -Dm755 "$srcdir/anland-inputs/startup.sh" "$pkgdir/usr/bin/mango-anland"
     printf '#!/bin/sh\nexport LD_LIBRARY_PATH="%s/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"\nexec %s/bin/mmsg "$@"\n' "$_prefix" "$_prefix" > "$pkgdir/usr/bin/mmsg-anland"

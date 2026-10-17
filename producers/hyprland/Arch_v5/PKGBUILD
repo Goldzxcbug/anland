@@ -1,4 +1,4 @@
-# Build the current Hyprland, Aquamarine and plugin default branches.
+# Build the backend-compatible Hyprland and Aquamarine revisions.
 # Keep the complete /usr SDK and runtime layout; only the ABI-patched
 # Aquamarine is renamed, so system Aquamarine and its consumers stay intact.
 pkgbase=hyprland-anland
@@ -32,12 +32,13 @@ optdepends=('hyprpm: build and install plugins'
     'xdg-desktop-portal-hyprland: xdg-desktop-portal backend for hyprland'
     'polkit: authentication')
 source=(
- 'hyprland::git+https://github.com/hyprwm/Hyprland.git'
- 'aquamarine::git+https://github.com/hyprwm/aquamarine.git'
- 'hyprgrass::git+https://github.com/horriblename/hyprgrass.git'
- 'wf-touch::git+https://github.com/WayfireWM/wf-touch.git'
+ 'hyprland::git+https://github.com/hyprwm/Hyprland.git#commit=ff672deb68f6b5364f402914f006cb17389a0444'
+ 'aquamarine::git+https://github.com/hyprwm/aquamarine.git#commit=f31c47a1b9d300847d8fc3108ad959448103dfc1'
+ 'hyprgrass::git+https://github.com/horriblename/hyprgrass.git#commit=a8979156cd87e7c58d126ac0437cae498a5b2d18'
+ 'wf-touch::git+https://github.com/WayfireWM/wf-touch.git#commit=8974eb0f6a65464b63dd03b842795cb441fb6403'
+ 'udis86::git+https://github.com/canihavesomecoffee/udis86.git#commit=5336633af70f3917760a6d441ff02d93477b0c86'
  'anland-inputs.tar.gz')
-sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' '@INPUT_SHA256@')
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' '@INPUT_SHA256@')
 _prefix=/usr
 
 pkgver() {
@@ -98,6 +99,7 @@ prepare() {
         cp -a "$srcdir/$name" "$srcdir/trees/$name"
         rm -rf "$srcdir/trees/$name/.git"
     done
+    cp -a "$srcdir/udis86/." "$srcdir/trees/hyprland/subprojects/udis86/"
     cp -aL "$srcdir/anland-inputs/backend/aquamarine/." "$srcdir/trees/aquamarine/"
     mkdir -p "$srcdir/trees/aquamarine/src/backend/anland/public"
     cp -aL "$srcdir/anland-inputs/"{common,libdisplay_producer} "$srcdir/trees/aquamarine/src/backend/anland/public/"
@@ -117,7 +119,7 @@ build() {
     export GIT_COMMIT_HASH="$_commit"
     export GIT_TAG="$(git -C "$srcdir/hyprland" describe --tags --always HEAD)"
     _cmake aquamarine -DCMAKE_INSTALL_INCLUDEDIR=include/aquamarine-anland
-    _cmake hyprland -DNO_HYPRPM=OFF -DNO_UWSM=OFF -DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON
+    _cmake hyprland -DNO_HYPRPM=OFF -DNO_UWSM=OFF -DNO_RTKIT=ON -DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON
     meson setup --reconfigure "$srcdir/build-hyprgrass" "$srcdir/trees/hyprgrass" --prefix="$_prefix" \
         --libdir=lib/hyprland/plugins --buildtype=release --wrap-mode=nodownload -Dtests=auto
     meson compile -C "$srcdir/build-hyprgrass" -j "${JOBS:-2}"

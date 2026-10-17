@@ -5,14 +5,15 @@
       "url": "https://github.com/DreamMaoMao/mango.git"
     },
     "wlroots": {
-      "url": "https://gitlab.freedesktop.org/wlroots/wlroots.git"
+      "url": "https://gitlab.freedesktop.org/wlroots/wlroots.git",
+      "revision": "d783533489e1f75d6886c2ab5c5960090ef268f8"
     },
     "scenefx": {
       "url": "https://github.com/wlrfx/scenefx.git"
     }
   },
   "patches": {
-    "mango.patch": "5ddd1eed5d382b00bd3a848a89b3858745644a774f8432df00710316714c978a",
+    "mango.patch": "e9d89119d5f45241e565bdecd819573d2417fe88bebc2ebe376cd6366ac3d59a",
     "wlroots.patch": "aa6779bac078b448a31bd34dc1914aa99c7635cbfccc4ecd9a7d66543911c239",
     "scenefx.patch": "212c2a0972d6275180268869a6a7c2747d0f884b0831376eb9ef36b39743322c"
   },
@@ -26,7 +27,7 @@
     "pixman": "0.43"
   },
   "xwayland": {
-    "recipe_sha256": "df95661992f0ae4412cc2f3ea7e03f42c829091e3829a9686c9514af126cd45f",
+    "recipe_sha256": "32665b898839e902dc5f9853a25fb15540720954359a2fbadd20872af8c6f2cd",
     "patch_sha256": "9f500d4ac901af6d8286c988de013d213c05cb637fc9fe190a7426d0c0ef152b"
   }
 }

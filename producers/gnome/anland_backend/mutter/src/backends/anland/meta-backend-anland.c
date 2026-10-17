@@ -18,6 +18,9 @@
 #include "backends/meta-stage-view-private.h"
 #include "backends/meta-virtual-monitor.h"
 #include "backends/native/meta-renderer-native-private.h"
+#ifdef ANLAND_MUTTER_51
+#include "common/meta-cogl-drm-formats.h"
+#endif
 #include "meta/meta-backend.h"
 #include "meta/meta-context.h"
 #include "meta/meta-wayland-compositor.h"
@@ -423,7 +426,7 @@ update_virtual_monitor (MetaBackendAnland  *backend,
   if (backend->virtual_monitor)
     {
       release_stage_view (backend);
-#ifdef ANLAND_MUTTER_50
+#if defined(ANLAND_MUTTER_50) || defined(ANLAND_MUTTER_51)
       {
         GList *mode_infos = NULL;
         mode_infos = g_list_append (mode_infos,
@@ -445,7 +448,7 @@ update_virtual_monitor (MetaBackendAnland  *backend,
       return TRUE;
     }
 
-#ifdef ANLAND_MUTTER_50
+#if defined(ANLAND_MUTTER_50) || defined(ANLAND_MUTTER_51)
   g_autoptr (MetaVirtualMonitorInfo) info =
     meta_virtual_monitor_info_new_simple (backend->output.width,
                                           backend->output.height,
@@ -849,13 +852,18 @@ on_stage_view_present (ClutterStageView *stage_view,
   cogl_context = cogl_framebuffer_get_context (framebuffer);
   cogl_framebuffer_flush (framebuffer);
 
-  #ifdef ANLAND_MUTTER_50
+#if defined(ANLAND_MUTTER_50) || defined(ANLAND_MUTTER_51)
   if (cogl_context_has_winsys_feature (cogl_context,
                                        COGL_WINSYS_FEATURE_SYNC_FD))
 #else
   if (cogl_context_has_feature (cogl_context, COGL_FEATURE_ID_SYNC_FD))
 #endif
+#ifdef ANLAND_MUTTER_51
+    fence_fd = cogl_renderer_get_latest_sync_fd (
+      cogl_display_get_renderer (cogl_context_get_display (cogl_context)));
+#else
     fence_fd = cogl_context_get_latest_sync_fd (cogl_context);
+#endif
 
   /* Native fence support is a capability, not a guarantee that this particular
    * export succeeded. Without an fd, wait for rendering before committing the
@@ -1123,9 +1131,22 @@ activate_consumer (MetaBackendAnland *backend)
       stride = fb.stride;
       offset = fb.offset;
       modifier = fb.modifier;
+#ifdef ANLAND_MUTTER_51
+      CoglContext *cogl_context =
+        meta_renderer_native_get_cogl_context (renderer_native);
+      CoglRenderer *cogl_renderer =
+        cogl_display_get_renderer (cogl_context_get_display (cogl_context));
+      const MetaFormatInfo *format_info =
+        meta_format_info_from_drm_format (DRM_FORMAT_ABGR8888);
+      framebuffers[i] = cogl_renderer_create_dma_buf_framebuffer (
+        cogl_renderer, cogl_context, fb.width, fb.height,
+        DRM_FORMAT_ABGR8888, format_info->cogl_format,
+        1, &fd, &stride, &offset, &modifier, &error);
+#else
       framebuffers[i] = meta_renderer_native_create_dma_buf_framebuffer (
         renderer_native, fb.width, fb.height,
         DRM_FORMAT_ABGR8888, 1, &fd, &stride, &offset, &modifier, &error);
+#endif
 
       /* meta_renderer_native_create_dma_buf_framebuffer() imports the dmabuf
        * into an EGLImage synchronously (EGL_IMAGE_PRESERVED_KHR), so the dup can

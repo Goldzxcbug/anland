@@ -119,7 +119,11 @@ void AnlandInputDevice::pointerAxis(PointerAxis axis, qreal delta, qint32 deltaV
         deltaV120 != 0 ? PointerAxisSource::Wheel : PointerAxisSource::Continuous;
     // 6.x pointerAxisChanged carries an explicit "inverted" (natural scroll) flag;
     // the daemon already delivers deltas in KWin's direction, so it is never set.
+#ifdef ANLAND_KWIN_68
+    Q_EMIT pointerAxisChanged(axis, delta, deltaV120, source, false, false, now(), this);
+#else
     Q_EMIT pointerAxisChanged(axis, delta, deltaV120, source, false, now(), this);
+#endif
     Q_EMIT InputDevice::pointerFrame(this);
 }
 

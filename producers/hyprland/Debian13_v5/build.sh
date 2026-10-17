@@ -89,7 +89,7 @@ for name in lock['sources']:
     print('source', name, lock['runtime_packages'][name], sep='\t')
 for name in ('hyprgrass', 'wf-touch'):
     e = lock['plugins'][name]
-    print('plugin', name, e['url'], sep='\t')
+    print('plugin', name, e['url'], e.get('revision', ''), sep='\t')
 PY
     [ $? -eq 0 ] || die 'cannot read sources.json'
     for name in aquamarine hyprland hyprgrass; do
@@ -97,18 +97,19 @@ PY
         patch_file[$name]="$(find_patch "$name" "${!var:-}")" || die "cannot select $name patch"
         verify_patch "$name" "${patch_file[$name]}"
     done
-    while IFS=$'\t' read -r kind name a; do
+    while IFS=$'\t' read -r kind name a b; do
         if [[ $kind == source ]]; then
-            local extra
+            local extra requested_version
             extra=$(source_identity "$name" "${patch_file[$name]:-}") || die "source identity: $name"
-            result=$(anland_prepare_latest_apt_source "$name" "$WORKDIR" "" "${ANLAND_OFFLINE:-0}" "$extra") || die "cannot fetch latest Debian source: $name"
+            requested_version=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["sources"][sys.argv[2]].get("version", ""))' "$SCRIPT_DIR/sources.json" "$name") || die "source version: $name"
+            result=$(anland_prepare_latest_apt_source "$name" "$WORKDIR" "" "${ANLAND_OFFLINE:-0}" "$extra" trixie-backports "$requested_version") || die "cannot fetch compatible source: $name"
             IFS=$'\t' read -r tree source_version <<< "$result"
             source_tree[$name]=$tree; version[$name]=$source_version; runtime[$name]=$a
         else
             local patch="" extra
             [[ $name != hyprgrass ]] || patch=${patch_file[hyprgrass]}
             extra=$(source_identity "$name" "$patch") || die "source identity: $name"
-            result=$(anland_prepare_latest_git_source "$name" "$a" "$WORKDIR" "$patch" "${ANLAND_OFFLINE:-0}" "$extra") || die "cannot fetch latest Git source: $name"
+            result=$(anland_prepare_latest_git_source "$name" "$a" "$WORKDIR" "$patch" "${ANLAND_OFFLINE:-0}" "$extra" shallow "$b") || die "cannot fetch compatible Git source: $name"
             IFS=$'\t' read -r tree source_version <<< "$result"
             plugin[$name]=$tree
         fi

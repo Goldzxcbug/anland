@@ -51,16 +51,23 @@ public:
     AnlandEglLayer(AnlandOutput *output, AnlandEglBackend *backend);
     ~AnlandEglLayer() override;
 
+#ifdef ANLAND_KWIN_68
+    std::optional<OutputLayerBeginFrameInfo> beginFrame(OutputFrame *frame = nullptr) override;
+    bool endFrame(const Region &renderedDeviceRegion, const Region &damagedDeviceRegion, OutputFrame *frame) override;
+#else
     std::optional<OutputLayerBeginFrameInfo> doBeginFrame() override;
 #ifdef ANLAND_KWIN_66
     bool doEndFrame(const Region &renderedDeviceRegion, const Region &damagedDeviceRegion, OutputFrame *frame) override;
 #else
     bool doEndFrame(const QRegion &renderedDeviceRegion, const QRegion &damagedDeviceRegion, OutputFrame *frame) override;
 #endif
+#endif
 
     // OutputLayer pure virtuals. anland imports the consumer's dmabufs and
     // never allocates or scans out through DRM itself, so these are stubs.
+#ifndef ANLAND_KWIN_68
     DrmDevice *scanoutDevice() const override;
+#endif
     #ifdef ANLAND_KWIN_67
     FormatModifierMap supportedDrmFormats() const override;
 #else
@@ -154,7 +161,11 @@ class AnlandEglBackend : public AbstractEglBackend
     Q_OBJECT
 
 public:
+#ifdef ANLAND_KWIN_68
+    AnlandEglBackend(AnlandBackend *b, RenderDevice *device);
+#else
     AnlandEglBackend(AnlandBackend *b);
+#endif
     ~AnlandEglBackend() override;
 
 #ifdef ANLAND_KWIN_67
@@ -171,7 +182,9 @@ public:
     OutputLayer *primaryLayer(Output *output) override;
     bool present(Output *output, const std::shared_ptr<OutputFrame> &frame) override;
 #endif
+#ifndef ANLAND_KWIN_68
     DrmDevice *drmDevice() const override;
+#endif
 
     AnlandBackend *backend() const
     {

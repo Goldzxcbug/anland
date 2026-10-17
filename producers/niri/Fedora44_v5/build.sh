@@ -241,7 +241,8 @@ for name in niri smithay satellite; do
         patchsha=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["patches"][sys.argv[2]+".patch"])' "$SCRIPT_DIR/sources.json" "$name") || fedora_die "patch checksum: $name"
         printf '%s  %s\n' "$patchsha" "$patch" | sha256sum -c --status - || fedora_die "patch checksum: $name"
     fi
-    result=$(anland_prepare_latest_git_source "$name" "$url" "$WORKDIR" "$patch" "$ANLAND_OFFLINE" "$FEDORA_INPUT_ID") || fedora_die "cannot prepare latest $name source"
+    revision=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]].get("revision", ""))' "$SCRIPT_DIR/sources.json" "$name") || fedora_die "source revision: $name"
+    result=$(anland_prepare_latest_git_source "$name" "$url" "$WORKDIR" "$patch" "$ANLAND_OFFLINE" "$FEDORA_INPUT_ID" shallow "$revision") || fedora_die "cannot prepare $name source"
     IFS=$'\t' read -r tree commit <<< "$result"
     source_tree[$name]=$tree
     if [[ $name == niri && ! -f $tree/.anland-niri-overlay-id ]]; then

@@ -3,11 +3,13 @@
   "sources": {
     "hyprland": {
       "method": "git",
-      "url": "https://github.com/hyprwm/Hyprland.git"
+      "url": "https://github.com/hyprwm/Hyprland.git",
+      "revision": "ff672deb68f6b5364f402914f006cb17389a0444"
     },
     "aquamarine": {
       "method": "git",
-      "url": "https://github.com/hyprwm/aquamarine.git"
+      "url": "https://github.com/hyprwm/aquamarine.git",
+      "revision": "f31c47a1b9d300847d8fc3108ad959448103dfc1"
     }
   },
   "patches": {
@@ -17,14 +19,16 @@
   },
   "plugins": {
     "hyprgrass": {
-      "url": "https://github.com/horriblename/hyprgrass.git"
+      "url": "https://github.com/horriblename/hyprgrass.git",
+      "revision": "a8979156cd87e7c58d126ac0437cae498a5b2d18"
     },
     "wf-touch": {
-      "url": "https://github.com/WayfireWM/wf-touch.git"
+      "url": "https://github.com/WayfireWM/wf-touch.git",
+      "revision": "8974eb0f6a65464b63dd03b842795cb441fb6403"
     }
   },
   "xwayland": {
-    "recipe_sha256": "df95661992f0ae4412cc2f3ea7e03f42c829091e3829a9686c9514af126cd45f",
+    "recipe_sha256": "32665b898839e902dc5f9853a25fb15540720954359a2fbadd20872af8c6f2cd",
     "patch_sha256": "9f500d4ac901af6d8286c988de013d213c05cb637fc9fe190a7426d0c0ef152b"
   },
   "public_linkage": "built-in-once-in-renamed-aquamarine-anland",

@@ -107,30 +107,6 @@ index 4d9ec2e3..ff9c728c 100644
  /*----------------------------------------------------------*/
  
  /* ------------------ Protocol internal code ------------------------------ */
-diff --git a/include/mango/layout/horizontal.h b/include/mango/layout/horizontal.h
-index 615059fa..5537e110 100644
---- a/include/mango/layout/horizontal.h
-+++ b/include/mango/layout/horizontal.h
-@@ -2,6 +2,7 @@
- #define __HORIZONTAL_H__
- 
- #include "mango/common/types.h"
-+#include <stdbool.h>
- 
- void tile(Monitor *m);
- bool tile_predict(Monitor *m, Client *c, struct wlr_box *out);
-diff --git a/include/mango/layout/vertical.h b/include/mango/layout/vertical.h
-index 8cf29ece..07cb4f8d 100644
---- a/include/mango/layout/vertical.h
-+++ b/include/mango/layout/vertical.h
-@@ -2,6 +2,7 @@
- #define __LAYOUT_VERTICAL_H__ 1
- 
- #include "mango/common/types.h"
-+#include <stdbool.h>
- 
- void vertical_tile(Monitor *m);
- bool vertical_tile_predict(Monitor *m, Client *c, struct wlr_box *out);
 diff --git a/meson.build b/meson.build
 index 5f6c7764..d0d9ceeb 100644
 --- a/meson.build
@@ -585,9 +561,10 @@ diff --git a/src/input/touch.c b/src/input/touch.c
 index 11ac8798..9966dd4a 100644
 --- a/src/input/touch.c
 +++ b/src/input/touch.c
-@@ -1,10 +1,12 @@
+@@ -1,11 +1,13 @@
  #include "mango/input/touch.h"
 +#include "anland_backend/anland.h"
+ #include "mango/common/input-event-codes.h"
  #include "mango/common/log.h"
  #include "mango/common/server.h"
  #include "mango/common/util.h"
@@ -597,7 +574,7 @@ index 11ac8798..9966dd4a 100644
 +#include "mango/manage/layer.h"
  #include "mango/manage/misc.h"
  #include "mango/manage/monitor.h"
- #include <linux/input-event-codes.h>
+ #include <wayland-client-core.h>
 @@ -15,6 +17,7 @@
  #include <wlr/types/wlr_idle_notify_v1.h>
  #include <wlr/types/wlr_input_device.h>

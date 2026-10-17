@@ -191,7 +191,8 @@ PY_IDENTITY
             patchsha=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["patches"][sys.argv[2]+".patch"])' "$SCRIPT_DIR/sources.json" "$name") || die "patch checksum: $name"
             printf '%s  %s\n' "$patchsha" "$patch" | sha256sum -c --status - || die "patch checksum: $name"
         fi
-        result=$(anland_prepare_latest_git_source "$name" "$url" "$WORKDIR" "$patch" "$ANLAND_OFFLINE" "$identity") || die "cannot prepare latest $name source"
+        revision=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]].get("revision", ""))' "$SCRIPT_DIR/sources.json" "$name") || die "source revision: $name"
+        result=$(anland_prepare_latest_git_source "$name" "$url" "$WORKDIR" "$patch" "$ANLAND_OFFLINE" "$identity" shallow "$revision") || die "cannot prepare $name source"
         IFS=$'\t' read -r tree commit <<< "$result"
         source_tree[$name]=$tree; source_commit[$name]=$commit
         if [[ $name == niri && ! -f $tree/.anland-niri-overlay-id ]]; then

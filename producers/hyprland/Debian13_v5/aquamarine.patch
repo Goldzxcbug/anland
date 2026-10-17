@@ -9,17 +9,6 @@ Subject: Anland v5 aquamarine native integration (Debian 13)
 +
 +# Generated self-contained public overlay: never link a second producer copy.
 +include(src/backend/anland/anland.cmake)
---- a/debian/control
-+++ b/debian/control
-@@ -6,7 +6,7 @@ Uploaders:
-  Carl Keinath <carl.keinath@gmail.com>,
-  Chow Loong Jin <hyperair@debian.org>,
-  Alex Myczko <tar@debian.org>,
--Build-Depends:
-+Build-Depends: libpipewire-0.3-dev, libspa-0.2-dev,
-  debhelper-compat (= 13),
-  cmake,
-  hwdata,
 --- a/include/aquamarine/allocator/Allocator.hpp
 +++ b/include/aquamarine/allocator/Allocator.hpp
 @@ -27,5 +27,7 @@ namespace Aquamarine {

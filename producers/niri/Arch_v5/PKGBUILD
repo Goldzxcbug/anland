@@ -1,5 +1,5 @@
 # Maintainer: anland contributors
-# Current niri upstream plus the single repository Anland backend.
+# Niri v26.04 and its matching Smithay revision plus the Anland backend.
 pkgname=niri-anland
 pkgver=0
 pkgrel=5
@@ -10,8 +10,8 @@ license=('GPL-3.0-or-later')
 depends=(glibc gcc-libs mesa libdrm libinput seatd libdisplay-info libxkbcommon pixman wayland pango cairo pipewire libpipewire systemd-libs xwayland-satellite xorg-xwayland)
 makedepends=(cargo rust cmake make gcc clang pkgconf patch tar unzip)
 source=(
-  'niri::git+https://github.com/niri-wm/niri.git'
-  'smithay-latest::git+https://github.com/Smithay/smithay.git'
+  'niri::git+https://github.com/niri-wm/niri.git#commit=8ed0da44d974c32c6877d2f4630c314da0717ecb'
+  'smithay-latest::git+https://github.com/Smithay/smithay.git#commit=ff5fa7df392cecfba049ffed55cdaa4e98a8e7ef'
   'niri.patch'
   'smithay.patch'
   'anland-overlay.tar'

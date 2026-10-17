@@ -88,7 +88,7 @@ prepare_source() {
     local name="$1" result tree commit
     log "Fetch latest $name"
     result=$(anland_prepare_latest_git_source "$name" "${url[$name]}" "$WORKDIR" \
-        "${patch_file[$name]}" "${ANLAND_OFFLINE:-0}" "$(source_identity "$name")") || die "cannot prepare latest $name source"
+        "${patch_file[$name]}" "${ANLAND_OFFLINE:-0}" "$(source_identity "$name")" shallow "${revision[$name]}") || die "cannot prepare $name source"
     IFS=$'\t' read -r tree commit <<< "$result"
     source_tree[$name]=$tree
     if [ "$name" = mango ]; then
@@ -218,7 +218,7 @@ build_xwayland() {
     local out="$WORKDIR/xwayland" patch="$SCRIPT_DIR/xwayland.patch" result
     local version tree arch changes marker listing file name package_arch found=0
     run mkdir -p "$out" "$ARTIFACTS_DIR"
-    result=$(anland_prepare_latest_apt_source xwayland "$out" "$patch" "$ANLAND_OFFLINE") || die 'cannot prepare latest Ubuntu Xwayland source'
+    result=$(anland_prepare_latest_apt_source xwayland "$out" "$patch" "${ANLAND_OFFLINE:-0}") || die 'cannot prepare latest Ubuntu Xwayland source'
     IFS=$'\t' read -r tree version <<< "$result"
     # dpkg-buildpackage writes packages beside the prepared source tree.
     out=$(dirname -- "$tree") || die 'cannot resolve Xwayland output directory'
@@ -274,7 +274,7 @@ main() {
     run cmake --install "$WORKDIR/common/libdisplay_producer"
     meson_build "${source_tree[wlroots]}" "$WORKDIR/build/wlroots" \
         -Dexamples=false -Dbackends=drm,libinput -Drenderers=gles2 -Dallocators=gbm \
-        -Dsession=enabled -Dlibliftoff=disabled -Dxwayland=enabled -Dcolor-management=disabled
+        -Dsession=enabled -Dlibliftoff=disabled -Dxwayland=enabled
     meson_build "${source_tree[scenefx]}" "$WORKDIR/build/scenefx" -Dexamples=false -Dcolor-management=disabled
     meson_build "${source_tree[mango]}" "$WORKDIR/build/mango" --sysconfdir="$PREFIX/etc" -Danland=enabled -Dxwayland=enabled
     package_deb

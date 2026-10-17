@@ -7,6 +7,9 @@ endif()
 if(PROJECT_VERSION VERSION_GREATER_EQUAL "6.7")
     target_compile_definitions(kwin PUBLIC ANLAND_KWIN_67=1)
 endif()
+if(PROJECT_VERSION VERSION_GREATER_EQUAL "6.8")
+    target_compile_definitions(kwin PUBLIC ANLAND_KWIN_68=1)
+endif()
 target_sources(kwin PRIVATE
     anland_backend.cpp
     anland_egl_backend.cpp

@@ -79,6 +79,9 @@ build() {
     -D b_pie=true \
     -D python.bytecompile=1 \
     -D ipv6=true \
+    -D xorg=false \
+    -D xnest=false \
+    -D xephyr=false \
     -D xvfb=false \
     -D xdmcp=false \
     -D xcsecurity=true \

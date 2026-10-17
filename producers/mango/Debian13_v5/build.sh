@@ -34,14 +34,14 @@ find_patch() {
     die "$name.patch not found (set ${name^^}_PATCH)"
 }
 declare -a components=() dependencies=()
-declare -A url checksum options patch_file source_tree build_dir dependency_method dependency_tree
+declare -A revision url checksum options patch_file source_tree build_dir dependency_method dependency_tree
 load_lock() {
     local kind name pin source rest var
     while read -r kind name pin source rest; do
         [ -n "$kind" ] && [ "${kind#\#}" = "$kind" ] || continue
         url[$name]=$source
         case "$kind" in
-            git) components+=("$name")
+            git) components+=("$name"); revision[$name]=$pin
                  var="${name^^}_PATCH"
                  patch_file[$name]="$(find_patch "$name" "${!var:-}")" || die "cannot select $name patch" ;;
             apt) dependencies+=("$name"); dependency_method[$name]=apt; options[$name]=$rest ;;
@@ -63,7 +63,7 @@ prepare_source() {
     } | sha256sum | awk '{print $1}') || die "cannot identify $name inputs"
     log "Fetch latest $name"
     result=$(anland_prepare_latest_git_source "$name" "${url[$name]}" "$WORKDIR" \
-        "${patch_file[$name]}" "${ANLAND_OFFLINE:-0}" "$extra_identity") || die "cannot prepare latest $name source"
+        "${patch_file[$name]}" "${ANLAND_OFFLINE:-0}" "$extra_identity" shallow "${revision[$name]}") || die "cannot prepare $name source"
     IFS=$'\t' read -r tree commit <<< "$result"
     source_tree[$name]=$tree
     if [ "$name" = mango ]; then
@@ -230,7 +230,21 @@ main() {
     [ "$(dpkg --print-architecture)" = arm64 ] || die 'requires Debian arm64'
     run mkdir -p "$WORKDIR/src" "$WORKDIR/build" "$PREFIX"
     load_lock
-    if [ "${ANLAND_WITH_DEPS:-0}" = 1 ]; then bootstrap; fi
+    if [ "${ANLAND_WITH_DEPS:-0}" = 1 ]; then
+        run $SUDO apt-get update
+        run $SUDO apt-get build-dep -y --no-install-recommends \
+            wayland libdrm wayland-protocols libxkbcommon pixman xwayland
+        run $SUDO apt-get install -y --no-install-recommends \
+            libpipewire-0.3-dev libinput-dev libudev-dev libseat-dev libdisplay-info-dev \
+            libgbm-dev libegl-dev libgles-dev libvulkan-dev glslang-tools \
+            libpcre2-dev libcjson-dev libpango1.0-dev libpixman-1-dev \
+            libwayland-dev libdrm-dev libxkbcommon-dev libffi-dev libexpat1-dev \
+            libxml2-dev bison libxcb1-dev libxcb-render0-dev libxcb-randr0-dev \
+            libxcb-xfixes0-dev libxcb-icccm4-dev libxcb-composite0-dev \
+            libxcb-errors-dev libxcb-ewmh-dev libxcb-res0-dev libxcb-shape0-dev \
+            libxcb-shm0-dev xkb-data hwdata wayland-protocols patchelf xwayland
+        bootstrap
+    fi
     local name
     for name in "${components[@]}"; do prepare_source "$name"; done
     log 'Build display_producer'
@@ -240,7 +254,7 @@ main() {
     run cmake --install "$WORKDIR/common/libdisplay_producer"
     meson_build "${source_tree[wlroots]}" "$WORKDIR/build/wlroots" \
         -Dexamples=false -Dbackends=drm,libinput -Drenderers=gles2 -Dallocators=gbm \
-        -Dsession=enabled -Dlibliftoff=disabled -Dxwayland=enabled -Dcolor-management=disabled
+        -Dsession=enabled -Dlibliftoff=disabled -Dxwayland=enabled
     meson_build "${source_tree[scenefx]}" "$WORKDIR/build/scenefx" -Dexamples=false -Dcolor-management=disabled
     meson_build "${source_tree[mango]}" "$WORKDIR/build/mango" --sysconfdir="$PREFIX/etc" -Danland=enabled -Dxwayland=enabled
     package_deb

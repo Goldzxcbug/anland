@@ -58,7 +58,7 @@ fedora_srpm_prepare() {
     if [[ $name == mutter ]]; then
         local mutter_major=${version%%.*}
         [[ $mutter_major =~ ^[0-9]+$ ]] || fedora_die 'cannot derive Mutter API major from current SRPM'
-        options+=" -Dc_args=-DANLAND_MUTTER_$mutter_major"
+        options+=" -Dc_args=\"%{build_cflags} -DANLAND_MUTTER_$mutter_major\""
     fi
     fedora_run rpm -K "$srpm"
 

@@ -2195,8 +2195,8 @@ diff --git a/compositor/src/bin/deniald/wayland_frontend.rs b/compositor/src/bin
  #[path = "wayland_frontend/cursor_state.rs"]
 @@ -155,6 +157,8 @@
  #[cfg(feature = "flutter")]
- #[path = "wayland_frontend/idle_inhibit.rs"]
- mod idle_inhibit;
+ #[path = "wayland_frontend/idle_notify.rs"]
+ mod idle_notify;
 +#[path = "wayland_frontend/injected_text.rs"]
 +pub(crate) mod injected_text;
  #[path = "wayland_frontend/input.rs"]
@@ -3019,7 +3019,7 @@ diff --git a/compositor/src/bin/deniald/wayland_frontend/startup.rs b/compositor
          let dmabuf_state = DmabufState::new();
 -        let drm_syncobj_state = if supports_syncobj_eventfd(&drm_device) {
 +        let drm_syncobj_state = if let Some(drm_device) =
-+            drm_device.filter(|device| supports_syncobj_eventfd(device))
++            drm_device.as_ref().filter(|device| supports_syncobj_eventfd(device))
 +        {
              info!("advertising linux-drm-syncobj-v1 explicit synchronization");
              Some(DrmSyncobjState::new::<RuntimeState>(
@@ -3479,3 +3479,50 @@ index ec594b1..75f6177 100644
              drm_syncobj_state,
              dmabuf_global: None,
              dmabuf_render_node: None,
+diff --git a/compositor/src/bin/deniald/wayland_frontend.rs b/compositor/src/bin/deniald/wayland_frontend.rs
+--- a/compositor/src/bin/deniald/wayland_frontend.rs
++++ b/compositor/src/bin/deniald/wayland_frontend.rs
+@@ -414,5 +414,5 @@
+ pub(super) struct WaylandFrontend {
+-    output_metadata_device: DrmDeviceFd,
++    output_metadata_device: Option<DrmDeviceFd>,
+     pub start_time: Instant,
+     socket_name: OsString,
+     loop_handle: LoopHandle<'static, RuntimeState>,
+diff --git a/compositor/src/bin/deniald/wayland_frontend/startup.rs b/compositor/src/bin/deniald/wayland_frontend/startup.rs
+--- a/compositor/src/bin/deniald/wayland_frontend/startup.rs
++++ b/compositor/src/bin/deniald/wayland_frontend/startup.rs
+@@ -156,5 +156,5 @@
+                 spec.name.clone(),
+                 output_metadata::resolve(
+-                    output_metadata::read(&drm_device, spec.id, &spec.name),
++                    output_metadata::read(drm_device.as_ref(), spec.id, &spec.name),
+                     None,
+                     &spec.name,
+diff --git a/compositor/src/bin/deniald/wayland_frontend/topology.rs b/compositor/src/bin/deniald/wayland_frontend/topology.rs
+--- a/compositor/src/bin/deniald/wayland_frontend/topology.rs
++++ b/compositor/src/bin/deniald/wayland_frontend/topology.rs
+@@ -234,5 +234,5 @@
+     pub fn output_metadata_changed(&self) -> bool {
+         self.outputs.iter().any(|entry| {
+-            output_metadata::read(&self.output_metadata_device, entry.id, &entry.connector)
++            output_metadata::read(self.output_metadata_device.as_ref(), entry.id, &entry.connector)
+                 .is_some_and(|native| {
+                     !output_metadata::same(&entry.output.physical_properties(), &native)
+@@ -300,5 +300,5 @@
+                     spec.id,
+                     output_metadata::resolve(
+-                        output_metadata::read(&self.output_metadata_device, spec.id, &spec.name),
++                        output_metadata::read(self.output_metadata_device.as_ref(), spec.id, &spec.name),
+                         self.outputs
+                             .iter()
+diff --git a/compositor/src/bin/deniald/wayland_frontend/output_metadata.rs b/compositor/src/bin/deniald/wayland_frontend/output_metadata.rs
+--- a/compositor/src/bin/deniald/wayland_frontend/output_metadata.rs
++++ b/compositor/src/bin/deniald/wayland_frontend/output_metadata.rs
+@@ -11,4 +11,5 @@
+-pub(super) fn read(drm: &DrmDeviceFd, id: OutputId, name: &str) -> Option<PhysicalProperties> {
++pub(super) fn read(drm: Option<&DrmDeviceFd>, id: OutputId, name: &str) -> Option<PhysicalProperties> {
++    let drm = drm?;
+     let Some(handle) = u32::try_from(id.0)
+         .ok()
+         .and_then(|id| std::num::NonZeroU32::new(id).map(connector::Handle::from))

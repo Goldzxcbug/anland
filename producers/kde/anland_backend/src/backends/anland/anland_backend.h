@@ -63,7 +63,9 @@ public:
 
     bool initialize() override;
 
-#ifdef ANLAND_KWIN_66
+#ifdef ANLAND_KWIN_68
+    std::unique_ptr<EglBackend> createOpenGLBackend(RenderDevice *device) override;
+#elif defined(ANLAND_KWIN_66)
     std::unique_ptr<EglBackend> createOpenGLBackend() override;
 #else
     std::unique_ptr<OpenGLBackend> createOpenGLBackend() override;
@@ -76,6 +78,7 @@ public:
     Outputs outputs() const override;
 #endif
 
+#ifndef ANLAND_KWIN_68
     EglDisplay *sceneEglDisplayObject() const override;
 #ifdef ANLAND_KWIN_67
     // KWin 6.7 groups the DRM node and its EGL display in RenderDevice.
@@ -83,6 +86,7 @@ public:
 #else
     // Older KWin owns the surfaceless EGL display separately.
     void setEglDisplay(std::unique_ptr<EglDisplay> &&display);
+#endif
 #endif
 
     anland_device *device() const
@@ -112,6 +116,7 @@ public:
      * compositor setup (syncobj-timeline / dmabuf-feedback probing), so it must
      * be non-null; AnlandEglBackend::drmDevice() forwards to it.
      */
+#ifndef ANLAND_KWIN_68
 #ifdef ANLAND_KWIN_67
     DrmDevice *drmDevice() const;
 #else
@@ -119,6 +124,7 @@ public:
     {
         return m_drmDevice.get();
     }
+#endif
 #endif
     AnlandInputDevice *inputDevice() const
     {
@@ -216,11 +222,13 @@ private:
     int m_currentBuffer = -1;
     uint32_t m_bufferCount = 0;
 
+#ifndef ANLAND_KWIN_68
 #ifdef ANLAND_KWIN_67
     std::unique_ptr<RenderDevice> m_renderDevice;
 #else
     std::unique_ptr<DrmDevice> m_drmDevice;
     std::unique_ptr<EglDisplay> m_eglDisplay;
+#endif
 #endif
     QVector<AnlandOutput *> m_outputs;
     std::unique_ptr<AnlandInputDevice> m_inputDevice;
@@ -247,6 +255,9 @@ private:
     QPointer<LockedPointerV1Interface> m_captureMouseLock;
     QPointer<ConfinedPointerV1Interface> m_captureMouseConfined;
     QMetaObject::Connection m_captureMouseSurfaceConn;
+#ifdef ANLAND_KWIN_68
+    QMetaObject::Connection m_captureMouseSurfaceConfinedConn;
+#endif
     QMetaObject::Connection m_captureMouseLockConn;
     QMetaObject::Connection m_captureMouseConfinedConn;
     bool m_captureMouseActive = false; // last CONSUMER_VAR_CAPTURE_MOUSE value sent

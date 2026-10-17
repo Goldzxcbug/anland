@@ -26,7 +26,9 @@ AnlandOutput::AnlandOutput(AnlandBackend *parent, const QString &name)
     : Output(parent)
 #endif
     , m_backend(parent)
+#ifndef ANLAND_KWIN_68
     , m_renderLoop(std::make_unique<RenderLoop>(this))
+#endif
 {
 #ifdef ANLAND_KWIN_66
     setParent(parent);
@@ -43,12 +45,23 @@ AnlandOutput::~AnlandOutput()
 {
 }
 
+#ifndef ANLAND_KWIN_68
 RenderLoop *AnlandOutput::renderLoop() const
 {
     return m_renderLoop.get();
 }
+#endif
 
-#ifdef ANLAND_KWIN_66
+#ifdef ANLAND_KWIN_68
+std::expected<void, OutputError> AnlandOutput::testPresentation(const std::shared_ptr<OutputFrame> &frame)
+{
+    Q_UNUSED(frame)
+    return {};
+}
+std::expected<void, OutputError> AnlandOutput::present(const QList<OutputLayer *> &layersToUpdate, const std::shared_ptr<OutputFrame> &frame)
+{
+    Q_UNUSED(layersToUpdate)
+#elif defined(ANLAND_KWIN_66)
 bool AnlandOutput::testPresentation(const std::shared_ptr<OutputFrame> &frame)
 {
     Q_UNUSED(frame)
@@ -88,7 +101,9 @@ void AnlandOutput::present(const std::shared_ptr<OutputFrame> &frame)
         m_frame.reset();
         m_renderLoop->scheduleRepaint();
     }
-#ifdef ANLAND_KWIN_66
+#ifdef ANLAND_KWIN_68
+    return {};
+#elif defined(ANLAND_KWIN_66)
     return true;
 #endif
 }
