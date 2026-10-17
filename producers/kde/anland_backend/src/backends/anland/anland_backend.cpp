@@ -70,6 +70,7 @@ static const int s_reconnectIntervalMs = 200;
  * backend does), then the standard render node — which on the kgsl/turnip stack
  * is the msm node exposed at /dev/dri/renderD128.
  */
+#ifndef ANLAND_KWIN_68
 #ifdef ANLAND_KWIN_67
 using AnlandRenderDevice = RenderDevice;
 #else
@@ -104,6 +105,7 @@ static std::unique_ptr<AnlandRenderDevice> openRenderDevice()
 
     return AnlandRenderDevice::open(QStringLiteral("/dev/dri/renderD128"));
 }
+#endif
 
 static void detachAudioBeforeConsumerRelease(void *)
 {
@@ -211,6 +213,7 @@ bool AnlandBackend::initialize()
         return false;
     }
 
+#ifndef ANLAND_KWIN_68
     // KWin dereferences renderBackend->drmDevice() during OpenGL compositor
     // setup; without a real device it segfaults. Open one up front.
 #ifdef ANLAND_KWIN_67
@@ -223,6 +226,7 @@ bool AnlandBackend::initialize()
         qCWarning(KWIN_ANLAND) << "no usable DRM render device; cannot bring up OpenGL compositing";
         return false;
     }
+#endif
 
     m_inputDevice = std::make_unique<AnlandInputDevice>();
 
@@ -289,6 +293,13 @@ bool AnlandBackend::initialize()
     return true;
 }
 
+#ifdef ANLAND_KWIN_68
+std::unique_ptr<EglBackend> AnlandBackend::createOpenGLBackend(RenderDevice *device)
+{
+    // KWin's GPU manager owns and selects the render device starting with 6.8.
+    return std::make_unique<AnlandEglBackend>(this, device);
+}
+#else
 #ifdef ANLAND_KWIN_66
 std::unique_ptr<EglBackend> AnlandBackend::createOpenGLBackend()
 #else
@@ -297,6 +308,7 @@ std::unique_ptr<OpenGLBackend> AnlandBackend::createOpenGLBackend()
 {
     return std::make_unique<AnlandEglBackend>(this);
 }
+#endif
 
 std::unique_ptr<InputBackend> AnlandBackend::createInputBackend()
 {
@@ -324,6 +336,7 @@ Outputs AnlandBackend::outputs() const
     return ret;
 }
 
+#ifndef ANLAND_KWIN_68
 EglDisplay *AnlandBackend::sceneEglDisplayObject() const
 {
 #ifdef ANLAND_KWIN_67
@@ -346,6 +359,7 @@ void AnlandBackend::setEglDisplay(std::unique_ptr<EglDisplay> &&display)
 {
     m_eglDisplay = std::move(display);
 }
+#endif
 #endif
 
 bool AnlandBackend::presentFrame(int fenceFd)
@@ -567,6 +581,18 @@ void AnlandBackend::processInputEvent(const anland_device_input_t &ev)
 {
     if (!m_inputDevice) {
         return;
+    }
+
+    if (ev.type == ANLAND_DEVICE_IN_CLIPBOARD || ev.type == ANLAND_DEVICE_IN_TEXT_INPUT) {
+        const uint32_t size = ev.type == ANLAND_DEVICE_IN_CLIPBOARD ? ev.clipboard.size : ev.text_input.size;
+        if (size > ANLAND_DEVICE_MAX_PAYLOAD_SIZE) {
+            // Reject before allocating or narrowing to QByteArray's length type.
+            // The unread payload belongs to this session; never parse it as input.
+            qCWarning(KWIN_ANLAND) << "oversized input payload, dropping session:" << size;
+            anland_de_backend_drop_session(m_presentBackend);
+            enterFallback();
+            return;
+        }
     }
 
     switch (ev.type) {
@@ -867,12 +893,23 @@ void AnlandBackend::updateMouseCaptureVar()
     if (surface != m_captureMouseSurface.data()) {
         QObject::disconnect(m_captureMouseSurfaceConn);
         m_captureMouseSurfaceConn = QMetaObject::Connection();
+#ifdef ANLAND_KWIN_68
+        QObject::disconnect(m_captureMouseSurfaceConfinedConn);
+        m_captureMouseSurfaceConfinedConn = QMetaObject::Connection();
+#endif
         m_captureMouseSurface = surface;
         if (surface) {
             // Fires when a lock is installed on / removed from this surface, so we
             // pick up a freshly created zwp_locked_pointer_v1 (and its later removal).
+#ifdef ANLAND_KWIN_68
+            m_captureMouseSurfaceConn = connect(surface, &SurfaceInterface::lockedPointerRegionChanged,
+                                                this, &AnlandBackend::updateMouseCaptureVar);
+            m_captureMouseSurfaceConfinedConn = connect(surface, &SurfaceInterface::confinedPointerRegionChanged,
+                                                        this, &AnlandBackend::updateMouseCaptureVar);
+#else
             m_captureMouseSurfaceConn = connect(surface, &SurfaceInterface::pointerConstraintsChanged,
                                                 this, &AnlandBackend::updateMouseCaptureVar);
+#endif
         }
     }
 
