@@ -98,7 +98,7 @@ build_pkg() {
     fi
 
     log "Applying patch: $patch -> $tree"
-    ( cd "$tree" && patch --batch --fuzz=2 --no-backup-if-mismatch -p1 --forward --reject-file=- < "$patch" ) \
+    ( cd "$tree" && patch --batch -p1 --forward --reject-file=- < "$patch" ) \
         || die "patch did not apply cleanly for $src"
 
     log "Building '$src' (.deb, keeping official version)"
