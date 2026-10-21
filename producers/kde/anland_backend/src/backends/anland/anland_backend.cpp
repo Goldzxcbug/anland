@@ -1220,7 +1220,11 @@ void AnlandBackend::sendTextInputToKWin(const QByteArray &text)
         // path. It submits through text-input v1/v2/v3 when available, and falls
         // back to keysym -> virtual keyboard events when the client has no
         // text-input protocol enabled.
+#ifdef ANLAND_KWIN_68
+        inputMethod->sendText(string);
+#else
         inputMethod->commitText(string);
+#endif
     }
 }
 

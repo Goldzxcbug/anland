@@ -5,7 +5,9 @@
 # Usage:
 #   ./build.sh [additional makepkg options]
 #
-# makepkg fetches current upstream default branches; patches allow up to two context lines of fuzz.
+# KWin uses the verified 6.8.0 release; its patch must apply without fuzz.
+# BUILD_XWAYLAND=0 reuses an already installed patched Xwayland.
+# Xwayland keeps its existing upstream source policy.
 # KWIN_PATCH and XWAYLAND_PATCH override the maintained patches.
 # Builds do not install compositor packages by default. ANLAND_INSTALL=1 opts
 # into installation; INSTALL remains supported as an explicit legacy override.
@@ -50,6 +52,11 @@ KWIN_OVERLAY_ROOT="$WORKDIR/kwin-overlay"
 KWIN_SRCDEST_DIR="$WORKDIR/kwin-sources"
 XWAYLAND_SRCDEST_DIR="$WORKDIR/xwayland-sources"
 PKGDEST_DIR="$WORKDIR/packages"
+BUILD_XWAYLAND="${BUILD_XWAYLAND:-1}"
+[[ "$BUILD_XWAYLAND" == '0' || "$BUILD_XWAYLAND" == '1' ]] || die 'BUILD_XWAYLAND must be 0 or 1'
+mkdir -p "$WORKDIR"
+exec 9>"$WORKDIR/.build.lock"
+flock -n 9 || die "another KWin Arch build is using $WORKDIR"
 KWIN_BUILDDIR="$WORKDIR/kwin-build"
 XWAYLAND_BUILDDIR="$WORKDIR/xwayland-build"
 PACMAN_LOCAL_CONFIG="$WORKDIR/pacman-local.conf"
@@ -76,12 +83,19 @@ prepare_kwin_stage() {
     # must be self-contained (relative links only resolve inside the checkout).
     cp -aL "$BACKEND_SRC/src" "$KWIN_OVERLAY_ROOT/kwin/"
     tar -chf "$KWIN_STAGE/anland-overlay.tar" -C "$KWIN_OVERLAY_ROOT" "kwin/src/backends/anland"
+    # Freeze all local inputs in the staged makepkg recipe, not just upstream.
+    local release_sha patch_sha overlay_sha
+    release_sha="$(source "$KWIN_STAGE/PKGBUILD"; printf '%s' "${sha256sums[0]}")"
+    patch_sha="$(sha256sum "$KWIN_STAGE/kwin.patch" | cut -d' ' -f1)"
+    overlay_sha="$(sha256sum "$KWIN_STAGE/anland-overlay.tar" | cut -d' ' -f1)"
+    printf '\n# Generated local input checksums.\nsha256sums=(\x27%s\x27 \x27%s\x27 \x27%s\x27)\n' \
+        "$release_sha" "$patch_sha" "$overlay_sha" >> "$KWIN_STAGE/PKGBUILD"
 }
 
 export JOBS="${JOBS:-$(nproc)}"
 INSTALL="${ANLAND_INSTALL:-${INSTALL:-0}}"
 [[ "$INSTALL" == '0' || "$INSTALL" == '1' ]] || die 'INSTALL must be 0 or 1'
-MAKEPKG_ARGS=(-C -f -s --clean)
+MAKEPKG_ARGS=(-f -s)
 if [[ "$INSTALL" == '1' ]]; then
     log "Building and installing tracked xorg-xwayland and kwin packages (-j$JOBS)"
 else
@@ -114,16 +128,20 @@ install_packages() {
     sudo pacman --config "$PACMAN_LOCAL_CONFIG" -U --noconfirm "$@"
 }
 
-prepare_xwayland_stage
-run_makepkg "$XWAYLAND_STAGE" "$XWAYLAND_SRCDEST_DIR" "$XWAYLAND_BUILDDIR" "$@"
-
 shopt -s nullglob
-mapfile -t xwayland_packages < <(cd "$XWAYLAND_STAGE" && PKGDEST="$PKGDEST_DIR" makepkg --packagelist)
-(( ${#xwayland_packages[@]} > 0 )) || die 'makepkg returned no xwayland package names'
-for pkg in "${xwayland_packages[@]}"; do [[ -s "$pkg" ]] || die "missing package: $pkg"; done
-if [[ "$INSTALL" == '1' ]]; then
-    log 'Installing the freshly built patched Xwayland package'
-    install_packages "${xwayland_packages[@]}"
+if [[ "$BUILD_XWAYLAND" == '1' ]]; then
+    prepare_xwayland_stage
+    run_makepkg "$XWAYLAND_STAGE" "$XWAYLAND_SRCDEST_DIR" "$XWAYLAND_BUILDDIR" "$@"
+
+    mapfile -t xwayland_packages < <(cd "$XWAYLAND_STAGE" && PKGDEST="$PKGDEST_DIR" makepkg --packagelist)
+    (( ${#xwayland_packages[@]} > 0 )) || die 'makepkg returned no xwayland package names'
+    for pkg in "${xwayland_packages[@]}"; do [[ -s "$pkg" ]] || die "missing package: $pkg"; done
+    if [[ "$INSTALL" == '1' ]]; then
+        log 'Installing the freshly built patched Xwayland package'
+        install_packages "${xwayland_packages[@]}"
+    fi
+else
+    log 'Reusing installed Xwayland (BUILD_XWAYLAND=0); no Xwayland rebuild or installation'
 fi
 
 prepare_kwin_stage
@@ -136,17 +154,15 @@ if [[ "$INSTALL" == '1' ]]; then
     log 'Installing the freshly built anland KWin package'
     install_packages "${kwin_packages[@]}"
 
-    sudo touch /etc/environment
-    sudo sed -i '/^ANLAND_SKIP_IMPLICIT_SYNC_WAIT=/d' /etc/environment
-    printf '%s\n' 'ANLAND_SKIP_IMPLICIT_SYNC_WAIT=1' | sudo tee -a /etc/environment >/dev/null
+    # Anland-only runtime switches belong to startup.sh, not /etc/environment.
 fi
 shopt -u nullglob
 
 cat <<EOF
 
-Done. The patched aarch64 Xwayland and current KWin packages were built.
+Done. KWin 6.8.0 was built for aarch64 (BUILD_XWAYLAND=$BUILD_XWAYLAND).
 Package artifacts: $PKGDEST_DIR
-The packages keep the names 'xorg-xwayland' and 'kwin' and use pkgrel 1.1.
+The packages keep the names 'xorg-xwayland' and 'kwin'; KWin uses pkgrel 1.1.
 EOF
 
 if [[ "$INSTALL" == '1' ]]; then

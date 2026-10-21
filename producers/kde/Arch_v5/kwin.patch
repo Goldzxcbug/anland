@@ -6,37 +6,6 @@ diff --git a/src/backends/CMakeLists.txt b/src/backends/CMakeLists.txt
  add_subdirectory(drm)
  add_subdirectory(fakeinput)
  add_subdirectory(libinput)
-diff --git a/src/inputmethod.cpp b/src/inputmethod.cpp
---- a/src/inputmethod.cpp
-+++ b/src/inputmethod.cpp
-@@ -515,6 +515,16 @@
-     }
- }
- 
-+void InputMethod::commitText(const QString &text)
-+{
-+    if (text.isEmpty()) {
-+        return;
-+    }
-+
-+    // Use the same routing path as a real zwp_input_method_v1 commit_string.
-+    commitString(m_serial++, text);
-+}
-+
- void InputMethod::commitString(quint32 serial, const QString &text)
- {
-     if (auto t2 = waylandServer()->seat()->textInputV2(); t2 && t2->isEnabled()) {
-diff --git a/src/inputmethod.h b/src/inputmethod.h
---- a/src/inputmethod.h
-+++ b/src/inputmethod.h
-@@ -202,6 +202,7 @@
- 
-     RectF cursorRectangle() const;
- 
-+    void commitText(const QString &text);
- Q_SIGNALS:
-     void panelChanged();
-     void activeChanged(bool active);
 diff --git a/src/main_wayland.cpp b/src/main_wayland.cpp
 --- a/src/main_wayland.cpp
 +++ b/src/main_wayland.cpp
@@ -56,7 +25,7 @@ diff --git a/src/main_wayland.cpp b/src/main_wayland.cpp
      QCommandLineOption locale1Option(QStringLiteral("locale1"), i18n("Extract locale information from locale1 rather than the user's configuration"));
  
      QCommandLineParser parser;
-@@ -424,6 +426,7 @@
+@@ -426,6 +428,7 @@
      parser.addOption(heightOption);
      parser.addOption(scaleOption);
      parser.addOption(outputCountOption);
@@ -112,18 +81,3 @@ diff --git a/src/wayland/transaction.cpp b/src/wayland/transaction.cpp
      const DmaBufAttributes *attributes = entry->buffer->dmabufAttributes();
      if (!attributes) {
          return;
-diff --git a/src/scene/surfaceitem.cpp b/src/scene/surfaceitem.cpp
---- a/src/scene/surfaceitem.cpp
-+++ b/src/scene/surfaceitem.cpp
-@@ -144,4 +144,11 @@ void SurfaceItem::addDamage(const Region &region)
-     m_lastDamage = now;
-+    bool damageAlreadyPending = !region.isEmpty() && !m_damage.empty();
-+    for (const auto &[device, damage] : m_damage) {
-+        damageAlreadyPending = damageAlreadyPending && damage.contains(region.boundingRect());
-+    }
-+    if (damageAlreadyPending) {
-+        return;
-+    }
-     for (auto &[device, damage] : m_damage) {
-         damage += region;
-     }
