@@ -552,6 +552,8 @@ public class SettingsActivity extends Activity {
                 return getString(R.string.device_class_touchpad);
             case InputGrab.CLASS_MOUSE:
                 return getString(R.string.device_class_mouse);
+            case InputGrab.CLASS_GAMEPAD:
+                return getString(R.string.device_class_gamepad);
             case InputGrab.CLASS_KEYBOARD:
             default:
                 // A node that merely carries a few keys — gpio-keys, a powerkey —
