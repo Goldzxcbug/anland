@@ -48,6 +48,8 @@
     <string name="immersive_no_scancode">請先為沉浸模式綁定按鍵</string>
     <string name="immersive_failed">無法進入沉浸模式：root 遭拒或無法使用</string>
     <string name="immersive_no_devices">無法進入沉浸模式：沒有可接管的輸入裝置</string>
+    <string name="immersive_controller_failed">無法進入沉浸模式：未能屏蔽 Android 手把輸入，已取消輸入接管</string>
+    <string name="immersive_controller_interrupted">沉浸模式已結束：Android 手把接管失效，已釋放輸入接管</string>
     <string name="immersive_interrupted">沉浸模式已結束，輸入已交還 Android</string>
     <string name="immersive_inputs_system_power">✕ %1$s — 為保留電源鍵控制，交由 Android 處理</string>
     <string name="immersive_entering_mode">已進入沉浸模式：%1$s</string>

@@ -18,6 +18,8 @@ import android.media.AudioFocusRequest;
 import android.media.AudioManager;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.util.Log;
 import android.util.SparseArray;
 import android.view.Display;
@@ -200,6 +202,8 @@ public class MainActivity extends Activity
     // Raw hardware-touchpad coordinate state while pointer capture is active.
     // Gesture recognition itself belongs to Touchpad above.
     private float capturedTouchpadAccel = 1.0f;
+    /** Raw mouse speed at which half of the configured acceleration is applied. */
+    private static final float RELATIVE_ACCEL_REFERENCE_COUNTS_PER_S = 1000f;
     private boolean capturedTouchpadBaselineValid = false;
     private int capturedTouchpadBaselinePointers = 0;
     private float capturedTouchpadLastCentroidX = 0f;
@@ -261,31 +265,26 @@ public class MainActivity extends Activity
     }
 
     // Called from native on_fallback (display lib dropped the connection). Runs on a
-    // native worker thread, so hop to the UI thread before touching the toast/finish.
-    // If the daemon socket is gone the daemon really went down, so close this window.
+    // native worker thread, so hop to the UI thread before touching the window.
+    // The display transport already has a reconnect path; only close this window
+    // after repeated root probes agree that the producer socket is really gone.
     public void onFallback(){
+        Log.w(TAG, "display transport fallback");
         runOnUiThread(() -> {
             // The producer connection is gone: every consumer var regresses to 0.
             // The producer resends the current value once it reconnects.
             captureMouseForced = false;
             if (mRoot != null)
                 mRoot.post(this::syncPointerCapture);
-            if (!isSocketFile(resolveSocketPath())) {
-                //exit
-                android.widget.Toast.makeText(this, "Deamon Down",
-                        android.widget.Toast.LENGTH_SHORT).show();
-                finish();
-            }
+            probeDaemonAsync();
         });
     }
 
     @Override
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
-        // Off the main thread: this callback fires for every dialog and app
-        // switch, and the rooted probe can block on su.
-        probeDaemonAsync();
         if (hasFocus) {
+            lifecycleHandler.removeCallbacks(delayedFocusStop);
             // Become the accessibility-key target and the focused instance, so real
             // camera frames route to this window (others get blank frames).
             sInstance = this;
@@ -295,6 +294,13 @@ public class MainActivity extends Activity
             // here when that session is still active.
             if (immersiveActive && mResumed && isOplusRefreshRateLockEnabled())
                 OplusRefreshRateLease.acquire(this);
+        } else if (immersive != null && mResumed) {
+            // Focus can flicker during a SurfaceView/display transition. Give the
+            // window a short chance to regain focus before releasing input; a real
+            // pause still tears the session down in onPause().
+            Log.i(TAG, "window focus lost; delaying immersive stop");
+            lifecycleHandler.removeCallbacks(delayedFocusStop);
+            lifecycleHandler.postDelayed(delayedFocusStop, FOCUS_STOP_DELAY_MS);
         }
         if (hasFocus && clipboard != null) {
             clipboard.pushClipboard();
@@ -306,15 +312,6 @@ public class MainActivity extends Activity
                 clearPointerCaptureBackTracking();
                 releasePointerCapture(false);
             }
-        }
-        // Losing focus means something else is on screen (a system dialog, a
-        // call). Holding an exclusive grab on every input device through that
-        // would leave the user with nothing to answer it with.
-        if (!hasFocus && immersive != null) {
-            immersive.stop();
-            releaseAllForwardedKeys();
-            releaseScreenTouches();
-            OplusRefreshRateLease.release(this);
         }
     }
 
@@ -443,17 +440,35 @@ public class MainActivity extends Activity
 
     /** Guards against probes piling up while focus flips back and forth. */
     private volatile boolean socketProbeInFlight;
+    private final Handler lifecycleHandler = new Handler(Looper.getMainLooper());
+    private static final long FOCUS_STOP_DELAY_MS = 750L;
+    private static final long SURFACE_STOP_DELAY_MS = 750L;
+    private static final long SOCKET_PROBE_RETRY_MS = 400L;
+    private static final int SOCKET_PROBE_FAILURES_TO_CLOSE = 3;
+    private int socketProbeFailures;
+    private final Runnable delayedFocusStop = () -> {
+        if (!hasWindowFocus() && mResumed && immersive != null) {
+            Log.i(TAG, "focus remained lost; stopping immersive input");
+            immersive.stop();
+            releaseAllForwardedKeys();
+            releaseScreenTouches();
+            OplusRefreshRateLease.release(this);
+        }
+    };
+    private final Runnable delayedSurfaceStop = () -> {
+        if (!surfaceReady && mResumed && immersive != null) {
+            Log.i(TAG, "surface remained unavailable; stopping immersive input");
+            immersive.stop();
+            releaseAllForwardedKeys();
+            releaseScreenTouches();
+            OplusRefreshRateLease.release(this);
+        }
+    };
 
     /**
-     * Checks the daemon socket without blocking the UI thread, and closes this
-     * window only on a definite answer.
-     *
-     * <p>Called from {@link #onWindowFocusChanged}, which fires for every dialog,
-     * gesture and app switch. The rooted probe shells out to {@code su} and can
-     * take seconds, or wait on a permission prompt forever; on the main thread
-     * that is an ANR, and a probe that merely failed to answer would close a
-     * window whose daemon is fine. The answer only ever closes the window, so
-     * arriving late costs nothing.
+     * Checks the daemon socket without blocking the UI thread. A single failed
+     * root probe is not proof that the daemon is gone: su/SELinux and socket
+     * namespace visibility can fail transiently during a display reconnect.
      */
     private void probeDaemonAsync() {
         if (socketProbeInFlight)
@@ -469,11 +484,27 @@ public class MainActivity extends Activity
                 socketProbeInFlight = false;
                 if (isFinishing() || isDestroyed())
                     return;
-                if (present != null && !present) {
-                    android.widget.Toast.makeText(this, "Deamon Down",
-                            android.widget.Toast.LENGTH_SHORT).show();
-                    finish();
+                if (present == null) {
+                    Log.w(TAG, "daemon socket probe inconclusive");
+                    lifecycleHandler.postDelayed(MainActivity.this::probeDaemonAsync,
+                            SOCKET_PROBE_RETRY_MS);
+                    return;
                 }
+                if (present) {
+                    socketProbeFailures = 0;
+                    return;
+                }
+                socketProbeFailures++;
+                Log.w(TAG, "daemon socket probe says missing (" + socketProbeFailures
+                        + "/" + SOCKET_PROBE_FAILURES_TO_CLOSE + ")");
+                if (socketProbeFailures < SOCKET_PROBE_FAILURES_TO_CLOSE) {
+                    lifecycleHandler.postDelayed(MainActivity.this::probeDaemonAsync,
+                            SOCKET_PROBE_RETRY_MS);
+                    return;
+                }
+                android.widget.Toast.makeText(this, "Deamon Down",
+                        android.widget.Toast.LENGTH_SHORT).show();
+                finish();
             });
         }, "anland-socket-probe");
         worker.setDaemon(true);
@@ -1623,7 +1654,10 @@ public class MainActivity extends Activity
     @Override
     protected void onPause() {
         super.onPause();
+        Log.i(TAG, "onPause: stopping native and immersive input");
         mResumed = false;
+        lifecycleHandler.removeCallbacks(delayedFocusStop);
+        lifecycleHandler.removeCallbacks(delayedSurfaceStop);
         // Socket-missing bounce: no pipeline exists, so skip teardown (mNative is
         // null) and don't let the jump to Settings trigger any of it.
         if (mForceSettings) return;
@@ -1649,6 +1683,9 @@ public class MainActivity extends Activity
 
     @Override
     protected void onDestroy() {
+        Log.i(TAG, "onDestroy: releasing native and immersive input");
+        lifecycleHandler.removeCallbacks(delayedFocusStop);
+        lifecycleHandler.removeCallbacks(delayedSurfaceStop);
         mResumed = false;
         abandonMediaAudioFocus();
         if (immersive != null) immersive.stop();
@@ -1766,6 +1803,7 @@ public class MainActivity extends Activity
     @Override
     public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
         Log.i(TAG, "surfaceChanged: " + width + "x" + height);
+        lifecycleHandler.removeCallbacks(delayedSurfaceStop);
         viewWidth = width;
         viewHeight = height;
         updateDisplayRotation();
@@ -1790,14 +1828,17 @@ public class MainActivity extends Activity
 
     @Override
     public void surfaceDestroyed(SurfaceHolder holder) {
+        Log.i(TAG, "surfaceDestroyed: delaying immersive teardown");
         surfaceReady = false;
-        if (immersive != null) immersive.stop();
-        OplusRefreshRateLease.release(this);
-        // Before the pipeline stops: a key this window forwarded and never saw
-        // released has to be lifted, or the desktop holds it until the user
-        // presses that key again.
-        releaseAllForwardedKeys();
-        releaseScreenTouches();
+        if (mResumed && immersive != null) {
+            lifecycleHandler.removeCallbacks(delayedSurfaceStop);
+            lifecycleHandler.postDelayed(delayedSurfaceStop, SURFACE_STOP_DELAY_MS);
+        } else {
+            if (immersive != null) immersive.stop();
+            OplusRefreshRateLease.release(this);
+            releaseAllForwardedKeys();
+            releaseScreenTouches();
+        }
         releasePointerCapture(false);
         mNative.stop();
     }
@@ -2143,10 +2184,14 @@ public class MainActivity extends Activity
     }
 
     @Override
-    public void movePointerRelative(float dx, float dy) {
-        // Same acceleration curve as a captured pad, so the sensitivity slider
-        // under Touchpad & Mouse means the same thing in an immersive session.
-        sendCapturedTouchpadMotion(dx, dy);
+    public void movePointerRelative(float dx, float dy, float speedCountsPerSecond) {
+        if (dx == 0f && dy == 0f)
+            return;
+        // The speed comes from the device's timestamps, never main-thread timing.
+        float speed = speedCountsPerSecond / RELATIVE_ACCEL_REFERENCE_COUNTS_PER_S;
+        float scale = 1.0f + (capturedTouchpadAccel - 1.0f) * (speed / (1.0f + speed));
+        scale = Math.max(0.3f, Math.min(10.0f, scale));
+        movePointerBy(dx * scale, dy * scale);
     }
 
     @Override
@@ -2295,6 +2340,11 @@ public class MainActivity extends Activity
         // every input device, so nothing else may consume it.
         if (immersive != null && immersive.handleKey(event))
             return true;
+        InputDevice controller = event.getDevice();
+        if (immersive != null && immersive.usesDirectControllers() && controller != null
+                && (controller.supportsSource(InputDevice.SOURCE_GAMEPAD)
+                    || controller.supportsSource(InputDevice.SOURCE_JOYSTICK)))
+            return true; // Desktop reads evdev; queued Android buttons must not become keys.
         if (handlePointerCaptureBackKey(event))
             return true;
         // Mouse Back is already forwarded as BTN_SIDE from the MotionEvent path.

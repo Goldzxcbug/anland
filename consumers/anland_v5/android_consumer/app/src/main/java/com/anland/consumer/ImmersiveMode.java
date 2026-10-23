@@ -24,7 +24,8 @@ import java.util.Arrays;
  * keyboard and any pointer, so Android stops seeing them entirely — no gesture
  * navigation, no notification shade, no accidental Home. This class turns the
  * raw evdev stream that comes back into the input the app already knows how to
- * forward, so nothing about the desktop side changes:
+ * forward. Controllers instead stay on the desktop's bind-mounted /dev/input;
+ * the helper only pauses Android's reader, without an exclusive kernel grab:
  *
  * <ul>
  *   <li>a grabbed touchscreen is replayed as an ordinary {@link MotionEvent} and
@@ -98,8 +99,8 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
         void onTouchscreenGrabChanged(boolean grabbed);
         /** A {@link Touchpad} wired to the host's cursor, for a grabbed physical pad. */
         Touchpad newGrabbedPad();
-        /** Relative cursor motion in view pixels, with the sensitivity setting applied. */
-        void movePointerRelative(float dx, float dy);
+        /** Raw relative counts and per-device speed measured at evdev sample time. */
+        void movePointerRelative(float dx, float dy, float speedCountsPerSecond);
         void sendKey(int action, int evdev);
         void sendMouseButton(int button, boolean pressed);
         void sendMouseScroll(int axis, float value);
@@ -148,6 +149,8 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
 
         // Relative axes, accumulated over a frame and emitted on SYN_REPORT.
         float relX, relY;
+        long relativeTimeUs;
+        float relativeSpeed, relativePendingDistance;
         float wheel, hwheel;
         boolean sawHiRes = false;
 
@@ -157,6 +160,7 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
 
     private final Host host;
     private final Context ctx;
+    private String readyMessage;
     /** One exclusive raw-event transport for physical nodes and Gold output. */
     private final InputGrabTransport grab;
     private final Dev[] devs = new Dev[MAX_DEVICES];
@@ -270,6 +274,15 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
         return keycode == -1 ? -1 : KeyCodeMapper.getScanCode(keycode);
     }
 
+    /** Android keycodes can alias different raw buttons on different controllers. */
+    static int resolveToggleScanCode(int configuredScan, int eventScan) {
+        return eventScan > 0 && eventScan < KEY_CODE_LIMIT ? eventScan : configuredScan;
+    }
+
+    int toggleScanCodeFor(KeyEvent event) {
+        return resolveToggleScanCode(boundScanCode(), event.getScanCode());
+    }
+
     /**
      * Swallow the rest of the toggle press, up to its release.
      */
@@ -320,6 +333,14 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
         return boundScanCode() > 0;
     }
 
+    /** A key-driven start announces success only after helper READY. */
+    void announceWhenReady(String message) {
+        if (active)
+            toast(message);
+        else if (starting)
+            readyMessage = message;
+    }
+
     /**
      * Ends the session because the user asked to. Separate from {@link #stop}
      * so the closing toast can tell a deliberate exit from an interruption; the
@@ -341,9 +362,16 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
     boolean startWith(java.util.Collection<String> selectedNodes,
                       java.util.Collection<String> excludedNodes,
                       ImmersiveInputSource source) {
+        return startWith(selectedNodes, excludedNodes, source, boundScanCode());
+    }
+
+    /** The helper must watch the raw key that actually entered this session. */
+    boolean startWith(java.util.Collection<String> selectedNodes,
+                      java.util.Collection<String> excludedNodes,
+                      ImmersiveInputSource source, int toggleScanCode) {
         if (active || starting)
             return false;
-        int scan = Math.max(0, boundScanCode());
+        int scan = Math.max(0, toggleScanCode);
         if (scan == 0 && !source.allowsUnboundToggle()) {
             // Without an evdev code the helper cannot recognise the key that ends
             // the session, and it refuses to grab anything blind.
@@ -351,7 +379,9 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
             return false;
         }
         starting = true;
+        readyMessage = null;
         userExitPending = false;
+        Log.i(TAG, "immersive toggle: configured=" + boundScanCode() + ", session=" + scan);
         if (!grab.start(scan, selectedNodes, excludedNodes, source)) {
             starting = false;
             toast(ctx.getString(R.string.immersive_failed));
@@ -362,10 +392,9 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
         statsEvents = 0;
         java.util.Arrays.fill(statsPerDev, 0);
         stats.postDelayed(statsTick, 500);
-        // Not announced from here: the controller knows which source the user
-        // picked and says so once, for whichever halves it started. Two sources
-        // each announcing themselves is how the combined mode ended up showing
-        // two toasts on one key press.
+        // The controller queues the source label; onReady announces it once.
+        // This notification is for provisional input/pointer/profile ownership,
+        // not a claim that all selected controller leases have succeeded.
         host.onImmersiveChanged(true);
         return true;
     }
@@ -377,6 +406,7 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
         unregisterScreenOff();
         if (!active && !starting)
             return;
+        readyMessage = null;
         grab.stop();
     }
 
@@ -466,18 +496,26 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
     public void onReady(int grabbedCount) {
         starting = false;
         active = true;
-        Log.i(TAG, "immersive mode active (" + grabbedCount + " grabbed devices)");
+        Log.i(TAG, "immersive mode active (" + grabbedCount + " controlled devices)");
         host.onImmersiveChanged(true);
+        if (readyMessage != null) {
+            toast(readyMessage);
+            readyMessage = null;
+        }
     }
 
     @Override
     public void onEnded(int reason) {
+        boolean wasActive = active;
         boolean wasRunning = active || starting;
+        Log.i(TAG, "immersive ended: reason=" + reason + ", active=" + wasActive
+                + ", userExit=" + userExitPending);
         if (wasRunning && reason == InputGrab.REASON_TOGGLE)
             suppressToggleTail();
         unregisterScreenOff();
         active = false;
         starting = false;
+        readyMessage = null;
         stats.removeCallbacks(statsTick);
         releaseEverything();
         host.onTouchscreenGrabChanged(false);
@@ -499,8 +537,15 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
             case InputGrab.REASON_NO_ROOT:
                 toast(ctx.getString(R.string.immersive_failed));
                 break;
+            case InputGrab.REASON_CONTROLLER:
+                toast(ctx.getString(wasActive ? R.string.immersive_controller_interrupted
+                        : R.string.immersive_controller_failed));
+                break;
             case InputGrab.REASON_HELPER_ERR:
-                toast(ctx.getString(R.string.immersive_no_devices));
+                // Losing suppression after READY is an interruption, not a
+                // claim that no devices were available when entering.
+                toast(ctx.getString(wasActive ? R.string.immersive_interrupted
+                        : R.string.immersive_no_devices));
                 break;
             default:
                 toast(ctx.getString(R.string.immersive_interrupted));
@@ -513,18 +558,20 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
     public void onEvents(int[] batch, int count) {
         if (!active && !starting)
             return;
-        statsEvents += count / 4;
-        for (int i = 0; i + 3 < count; i += 4) {
+        statsEvents += count / InputGrabTransport.EVENT_STRIDE;
+        for (int i = 0; i + InputGrabTransport.EVENT_STRIDE <= count;
+                i += InputGrabTransport.EVENT_STRIDE) {
             int dev = batch[i];
             if (dev >= 0 && dev < statsPerDev.length)
                 statsPerDev[dev]++;
-            handleEvent(dev, batch[i + 1], batch[i + 2], batch[i + 3]);
+            long eventTimeUs = (batch[i + 4] & 0xffffffffL) | ((long) batch[i + 5] << 32);
+            handleEvent(dev, batch[i + 1], batch[i + 2], batch[i + 3], eventTimeUs);
         }
     }
 
     // ---- evdev translation ----------------------------------------------
 
-    private void handleEvent(int devIdx, int type, int code, int value) {
+    private void handleEvent(int devIdx, int type, int code, int value, long eventTimeUs) {
         if (devIdx == InputGrab.DEV_ALL) {
             // The helper had to drop records. Anything we still believe is held
             // may already be up, so let go of all of it rather than strand a key
@@ -536,8 +583,8 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
         if (devIdx < 0 || devIdx >= devs.length)
             return;
         Dev d = devs[devIdx];
-        if (d == null)
-            return;
+        if (d == null || d.cls == InputGrab.CLASS_GAMEPAD)
+            return; // Direct evdev controllers never become keyboard or touch input.
         if (d.droppingFrame) {
             if (type == EV_SYN && code == SYN_REPORT)
                 d.droppingFrame = false;
@@ -547,7 +594,7 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
         switch (type) {
             case EV_SYN:
                 if (code == SYN_REPORT)
-                    endFrame(d);
+                    endFrame(d, eventTimeUs);
                 else if (code == SYN_MT_REPORT) {
                     d.touch.endContact();
                     d.absDirty = true;
@@ -661,9 +708,25 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
     }
 
     /** SYN_REPORT: the frame is complete, so turn it into app input. */
-    private void endFrame(Dev d) {
+    private void endFrame(Dev d, long eventTimeUs) {
         if (d.relX != 0f || d.relY != 0f) {
-            host.movePointerRelative(d.relX, d.relY);
+            long elapsedUs = eventTimeUs - d.relativeTimeUs;
+            float distance = (float) Math.hypot(d.relX, d.relY);
+            if (d.relativeTimeUs == 0L || elapsedUs < 0L || elapsedUs > 100_000L) {
+                d.relativeSpeed = 0f;
+                d.relativePendingDistance = 0f;
+                d.relativeTimeUs = eventTimeUs;
+            } else if (elapsedUs > 0L) {
+                float sample = (distance + d.relativePendingDistance) * 1_000_000f / elapsedUs;
+                d.relativeSpeed = 0.5f * (d.relativeSpeed + sample);
+                d.relativePendingDistance = 0f;
+                d.relativeTimeUs = eventTimeUs;
+            } else {
+                // Same-time reports keep the previous gain; fold their distance
+                // into the next estimate instead of treating them as an idle gap.
+                d.relativePendingDistance += distance;
+            }
+            host.movePointerRelative(d.relX, d.relY, d.relativeSpeed);
             d.relX = 0f;
             d.relY = 0f;
         }
@@ -896,6 +959,8 @@ final class ImmersiveMode implements InputGrabTransport.Listener {
             d.touch.clear();
             d.absDirty = false;
             d.relX = d.relY = d.wheel = d.hwheel = 0f;
+            d.relativeTimeUs = 0L;
+            d.relativeSpeed = d.relativePendingDistance = 0f;
             d.latchedButton = 0;
             if (d.pad != null)
                 d.pad.cancel();
