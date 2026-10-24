@@ -213,35 +213,6 @@ checkout() {
     [[ $(git -C "$tree" rev-parse HEAD) == "$revision" ]] ||
         die "cached revision differs: $tree; move it aside before changing upstream version"
 }
-emit_adapter_patch() {
-    # One maintained adapter patch, two Git roots. Keep the selected blocks
-    # byte-for-byte intact so existing applied patches and engine receipts match.
-    python3 - "$SCRIPT_DIR/flutter-adapter.patch" "$1" <<'PY_ADAPTER_PATCH'
-from pathlib import Path
-import re
-import sys
-
-patch = Path(sys.argv[1]).read_bytes()
-target = sys.argv[2]
-if target not in ('denial', 'engine') or not patch.startswith(b'diff --git '):
-    raise SystemExit('invalid adapter patch or target')
-selected = []
-for block in re.split(rb'(?m)(?=^diff --git )', patch):
-    if not block:
-        continue
-    header = block.split(b'\n', 1)[0].split()
-    if len(header) != 4 or not header[2].startswith(b'a/') or not header[3].startswith(b'b/'):
-        raise SystemExit('unsupported adapter patch header')
-    engine = (header[2].startswith(b'a/engine/'), header[3].startswith(b'b/engine/'))
-    if engine[0] != engine[1]:
-        raise SystemExit('adapter patch crosses Denial and Flutter Git roots')
-    if engine[0] == (target == 'engine'):
-        selected.append(block)
-if not selected:
-    raise SystemExit('missing adapter patch section: ' + target)
-sys.stdout.buffer.write(b''.join(selected))
-PY_ADAPTER_PATCH
-}
 resolve_flutter_dependencies() {
     # Read only the selected DEPS expressions; never execute upstream DEPS code.
     python3 - "$1/DEPS" "$FLUTTER_URL" "$FLUTTER_REV" <<'PY_FLUTTER_SOURCES'
@@ -341,12 +312,12 @@ PY
     DENIAL_VERSION="${base_version}-anland5"
     export DENIAL_BUILD_VERSION="$DENIAL_VERSION" FLUTTER_GIT_URL="$FLUTTER_URL" FLUTTER_ROOT="$FLUTTER"
     local patch="$WORKDIR/denial.pending.patch" previous="$WORKDIR/denial.applied.patch" file target
-    # Denial adapter first, then backend/performance hooks; Flutter engine hunks
-    # are extracted separately and applied only in the source-selected Flutter checkout.
-    emit_adapter_patch denial > "$patch" || die 'cannot extract Denial adapter patch'
+    # denial.patch carries the whole Denial-side integration; the Flutter engine
+    # hunks live apart so they apply only in the source-selected Flutter checkout.
     [[ -s $SCRIPT_DIR/denial.patch ]] || die 'missing component patch: denial.patch'
-    cat -- "$SCRIPT_DIR/denial.patch" >> "$patch" || die 'cannot read denial.patch'
-    emit_adapter_patch engine > "$ENGINE_PATCH" || die 'cannot extract Flutter engine patch'
+    cat -- "$SCRIPT_DIR/denial.patch" > "$patch" || die 'cannot read denial.patch'
+    [[ -s $SCRIPT_DIR/flutter-engine.patch ]] || die 'missing component patch: flutter-engine.patch'
+    cp -- "$SCRIPT_DIR/flutter-engine.patch" "$ENGINE_PATCH" || die 'cannot read flutter-engine.patch'
     if ! cmp -s "$patch" "$previous"; then
         # Several blocks touch the same file. A dry run cannot see changes from
         # earlier blocks, so validate the complete sequence on a disposable copy.

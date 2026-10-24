@@ -35,8 +35,9 @@ pub struct NativeEvent {
     key_count: u32,
 }
 impl Event<AnlandInputBackend> for NativeEvent {
-    fn time(&self) -> u64 {
-        self.time
+    // Smithay 24647fc reports input time as InputTime (microseconds).
+    fn time(&self) -> InputTime {
+        InputTime::from_micros(self.time)
     }
     fn device(&self) -> AnlandDevice {
         AnlandDevice
