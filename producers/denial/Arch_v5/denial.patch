@@ -35,10 +35,10 @@ index 0000000..f54f20b
 +        println!("cargo:rerun-if-changed={}", path.join(name).display());
 +    }
 +    println!("cargo:rustc-link-search=native={}", path.display());
-+    // The package installs deniald in /usr/bin and both Anland libraries in
-+    // /usr/lib. Resolve them relative to the executable; never embed the
-+    // staging directory into a distributable executable.
-+    println!("cargo:rustc-link-arg-bin=deniald=-Wl,-rpath,$ORIGIN/../lib");
++    // deniald and the Anland libraries sit side by side in the /usr/lib runtime
++    // layout, but in /usr/bin next to /usr/lib on Ubuntu. Search both; never
++    // embed the staging directory into a distributable executable.
++    println!("cargo:rustc-link-arg-bin=deniald=-Wl,-rpath,$ORIGIN:$ORIGIN/../lib");
 +}
 diff --git a/compositor/flutter-engine/src/host.rs b/compositor/flutter-engine/src/host.rs
 index 5965112..9dfc650 100644

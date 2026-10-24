@@ -76,7 +76,6 @@ log() { printf '\n[denial-ubuntu2604] %s\n' "$*" >&2; }
 die() { printf 'denial-ubuntu2604: %s\n' "$*" >&2; exit 1; }
 
 preflight() {
-    local file
     [[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || die 'JOBS must be a positive integer'
     for flag in ANLAND_OFFLINE ANLAND_WITH_DEPS ANLAND_INSTALL ANLAND_SKIP_PLATFORM_CHECK; do
         [[ "${!flag}" == 0 || "${!flag}" == 1 ]] || die "$flag must be 0 or 1"
@@ -91,10 +90,6 @@ preflight() {
             || die 'requires an arm64 userland'
         [[ "$(id -u)" != 0 ]] || die 'build as an ordinary user; only dependency installation uses sudo'
     fi
-    for file in git jq python3 cmake ninja rsync sha256sum install patch tar xz bsdtar \
-        dpkg-deb dpkg-buildpackage dpkg-parsechangelog dpkg-source flock; do
-        command -v "$file" >/dev/null 2>&1 || die "missing required command: $file"
-    done
     [[ -L "$BACKEND" ]] || die "backend entry is not the shared symlink: $BACKEND"
     for file in CMakeLists.txt mod.rs session.c session.h; do
         [[ -f "$BACKEND/$file" ]] || die "backend overlay is incomplete: $BACKEND/$file"
@@ -106,6 +101,17 @@ preflight() {
     [[ -f "$SCRIPT_DIR/denial.patch" && -f "$SCRIPT_DIR/flutter-engine.patch" \
         && -f "$SCRIPT_DIR/xwayland.patch" ]] || die 'recipe patches are missing'
     mkdir -p "$WORKDIR/src" "$WORKDIR/state" "$BUILD" "$ARTIFACTS_DIR"
+}
+
+# Host tools are checked after install_dependencies: jq, bsdtar and rsync are
+# installed by this recipe, so a clean CI container has none of them yet at the
+# point preflight inspects the source tree.
+check_tools() {
+    local file
+    for file in git jq python3 cmake ninja rsync sha256sum install patch tar xz bsdtar \
+        dpkg-deb dpkg-buildpackage dpkg-parsechangelog dpkg-source flock; do
+        command -v "$file" >/dev/null 2>&1 || die "missing required command: $file"
+    done
 }
 
 install_dependencies() {
@@ -616,6 +622,7 @@ main() {
 
     preflight
     install_dependencies
+    check_tools
     fetch_denial
     apply_denial_patch
     overlay_backend
