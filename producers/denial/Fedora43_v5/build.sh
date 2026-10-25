@@ -216,7 +216,7 @@ PY
 }
 package_all() {
     log 'Package native Fedora Denial RPMs (no installation or service changes)'
-    local pack="$WORKDIR/package-fedora" kind stage name version requires
+    local pack="$WORKDIR/package-fedora" kind stage name version requires file app engine_root desktop_root
     local -a kinds=(engine wm)
     [[ $ANLAND_WITH_DE == 0 ]] || kinds+=(de)
     run mkdir -p "$pack"
@@ -248,9 +248,37 @@ package_all() {
         # symlinks are independent of Fedora's system /usr/lib64 convention.
         fedora_stage_rpm "$name" "$version" 'GPL-3.0-or-later AND BSD-3-Clause' "$stage" "$requires"
     done
-    runtime="$pack/wm/usr/lib/denial-anland/wm"
-    run env LD_LIBRARY_PATH="$runtime" "$runtime/deniald" --version
-    run env LD_LIBRARY_PATH="$runtime" "$runtime/deniald" --help
+    # Verify the installed layout rather than the three staging trees: the
+    # bundles carry relative symlinks into ../flutter, so only a merged tree
+    # resolves them. This mirrors the Arch and Debian checks, and running the
+    # binaries without LD_LIBRARY_PATH is what proves the packaged RUNPATH works.
+    run rm -rf -- "$BUILD/package-check"
+    run mkdir -p "$BUILD/package-check"
+    for kind in "${kinds[@]}"; do
+        run cp -a -- "$pack/$kind/." "$BUILD/package-check/"
+    done
+    runtime="$BUILD/package-check/usr/lib/denial-anland"
+    check_sha "$ENGINE_SHA256" "$runtime/flutter/lib/libflutter_engine.so"
+    check_sha "$ENGINE_ICU_SHA256" "$runtime/flutter/data/icudtl.dat"
+    check_elf "$runtime/flutter/lib/libflutter_engine.so"
+    for file in "$runtime/wm/deniald" "$runtime/wm/denialctl" "$runtime/wm/"*.so "$runtime/wm/shell/lib/"*.so; do
+        check_elf "$file"
+    done
+    run "$runtime/wm/deniald" --help
+    reported=$("$runtime/wm/deniald" --version) || die 'version inspection failed'
+    [[ $reported == *"$DENIAL_VERSION"* ]] || die "stale Denial binary: $reported"
+    [[ $(cat "$BUILD/package-check/usr/share/denial/version") == "$DENIAL_VERSION" ]] || die 'wrong release identity file'
+    if [[ $ANLAND_WITH_DE == 1 ]]; then
+        for file in "$runtime/desktop/native/"*; do
+            [[ $file == *.json ]] || check_elf "$file"
+        done
+        for app in settings:denial-settings polkit:denial-app plugins:denial-plugin-manager; do
+            check_elf "$runtime/desktop/${app%%:*}/lib/libapp.so"
+            run "$runtime/desktop/${app%%:*}/${app#*:}" --bundle "$runtime/desktop/${app%%:*}" \
+                --engine "$runtime/flutter/lib/libflutter_engine.so" --check
+        done
+        run "$runtime/desktop/native/denial-plugins" --help
+    fi
     fedora_xwayland
     fedora_finish
 }
