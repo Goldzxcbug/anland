@@ -248,36 +248,36 @@ package_all() {
         # symlinks are independent of Fedora's system /usr/lib64 convention.
         fedora_stage_rpm "$name" "$version" 'GPL-3.0-or-later AND BSD-3-Clause' "$stage" "$requires"
     done
-    # Verify the staged trees the same way the Arch and Debian recipes do: the
-    # RUNPATH built by compositor/build.rs must resolve the private libraries on
-    # its own. Setting LD_LIBRARY_PATH here would hide exactly the defect this
-    # check exists to catch, so the binaries run with the environment inherited.
-    # The engine and compositor are packaged as separate RPMs, so validate each
-    # staged tree on its own instead of a merged extraction.
-    engine_root="$pack/engine/usr/lib/denial-anland"
-    check_sha "$ENGINE_SHA256" "$engine_root/flutter/lib/libflutter_engine.so"
-    check_sha "$ENGINE_ICU_SHA256" "$engine_root/flutter/data/icudtl.dat"
-    check_elf "$engine_root/flutter/lib/libflutter_engine.so"
-    runtime="$pack/wm/usr/lib/denial-anland"
+    # Verify the installed layout rather than the three staging trees: the
+    # bundles carry relative symlinks into ../flutter, so only a merged tree
+    # resolves them. This mirrors the Arch and Debian checks, and running the
+    # binaries without LD_LIBRARY_PATH is what proves the packaged RUNPATH works.
+    run rm -rf -- "$BUILD/package-check"
+    run mkdir -p "$BUILD/package-check"
+    for kind in "${kinds[@]}"; do
+        run cp -a -- "$pack/$kind/." "$BUILD/package-check/"
+    done
+    runtime="$BUILD/package-check/usr/lib/denial-anland"
+    check_sha "$ENGINE_SHA256" "$runtime/flutter/lib/libflutter_engine.so"
+    check_sha "$ENGINE_ICU_SHA256" "$runtime/flutter/data/icudtl.dat"
+    check_elf "$runtime/flutter/lib/libflutter_engine.so"
     for file in "$runtime/wm/deniald" "$runtime/wm/denialctl" "$runtime/wm/"*.so "$runtime/wm/shell/lib/"*.so; do
         check_elf "$file"
     done
     run "$runtime/wm/deniald" --help
     reported=$("$runtime/wm/deniald" --version) || die 'version inspection failed'
     [[ $reported == *"$DENIAL_VERSION"* ]] || die "stale Denial binary: $reported"
-    [[ $(cat "$pack/wm/usr/share/denial/version") == "$DENIAL_VERSION" ]] || die 'wrong release identity file'
+    [[ $(cat "$BUILD/package-check/usr/share/denial/version") == "$DENIAL_VERSION" ]] || die 'wrong release identity file'
     if [[ $ANLAND_WITH_DE == 1 ]]; then
-        # The desktop is its own RPM; its tree lives beside the compositor one.
-        desktop_root="$pack/de/usr/lib/denial-anland"
-        for file in "$desktop_root/desktop/native/"*; do
+        for file in "$runtime/desktop/native/"*; do
             [[ $file == *.json ]] || check_elf "$file"
         done
         for app in settings:denial-settings polkit:denial-app plugins:denial-plugin-manager; do
-            check_elf "$desktop_root/desktop/${app%%:*}/lib/libapp.so"
-            run "$desktop_root/desktop/${app%%:*}/${app#*:}" --bundle "$desktop_root/desktop/${app%%:*}" \
-                --engine "$engine_root/flutter/lib/libflutter_engine.so" --check
+            check_elf "$runtime/desktop/${app%%:*}/lib/libapp.so"
+            run "$runtime/desktop/${app%%:*}/${app#*:}" --bundle "$runtime/desktop/${app%%:*}" \
+                --engine "$runtime/flutter/lib/libflutter_engine.so" --check
         done
-        run "$desktop_root/desktop/native/denial-plugins" --help
+        run "$runtime/desktop/native/denial-plugins" --help
     fi
     fedora_xwayland
     fedora_finish
