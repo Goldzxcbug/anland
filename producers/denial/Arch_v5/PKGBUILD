@@ -35,7 +35,9 @@ case $_kind in
         pkgrel=${ANLAND_DE_PKGREL:-2}
         pkgdesc='Full Denial desktop: Settings/Welcome, Polkit, portals and Plugin Manager'
         license+=(BSD-3-Clause OFL-1.1 CC-BY-SA-4.0 GPL-3.0-only)
-        depends=("denial=$pkgver-${ANLAND_PKGREL:-2}" "denial-anland-engine=$ENGINE_VERSION" glibc gcc-libs libglvnd mesa wayland libxkbcommon dbus polkit systemd-libs bash coreutils git unzip xz zlib xdg-utils xorg-xwayland zenity xdg-desktop-portal xdg-desktop-portal-gtk xdg-desktop-portal-wlr)
+        # Upstream's denial-plugin-manager declares dart directly on Arch: the
+        # compiler kit links the SDK found in PATH instead of shipping one.
+        depends=("denial=$pkgver-${ANLAND_PKGREL:-2}" "denial-anland-engine=$ENGINE_VERSION" glibc gcc-libs libglvnd mesa wayland libxkbcommon dbus polkit systemd-libs bash coreutils git unzip xz zlib xdg-utils xorg-xwayland zenity xdg-desktop-portal xdg-desktop-portal-gtk xdg-desktop-portal-wlr dart)
         optdepends=('networkmanager: network controls' 'pipewire-pulse: audio controls' 'upower: battery information' 'power-profiles-daemon: power profiles')
         provides=("denial-anland-de=$pkgver-$pkgrel")
         conflicts=(denial-anland-de)
@@ -104,7 +106,8 @@ package() {
     cp -a "$DENIAL_BUILD_DIR/plugin-build-kit" "$private/"
     # SDK metadata must remain readable after pacman changes ownership to root.
     chmod 644 "$private/plugin-build-kit/flutter/bin/cache/artifacts/material_fonts/codepoints"
-    cp -aL "$DENIAL_ENGINE_DIR/dart-sdk" "$private/"
+    # The compiler kit links the system Dart SDK from PATH at first use; shipping
+    # a private copy would add ~600 MB and contradict upstream's packaging.
     printf '%s\n' '{"schema":1,"buildKit":"../plugin-build-kit","denialctl":"../../wm/denialctl"}' > "$private/native/denial-plugins.installation.json"
     printf '%s\n' '{"schema":1,"backend":"../native/denial-plugins"}' > "$private/plugins/denial-plugin-manager.installation.json"
     ln -s ../lib/denial-anland/desktop/settings/denial-settings "$bin/denial-settings"
@@ -114,7 +117,6 @@ package() {
         [[ $name != denial-plugin-manager ]] || dir=plugins
         cat > "$bin/$name" <<EOF
 #!/usr/bin/env bash
-export PATH="/usr/lib/denial-anland/desktop/dart-sdk/bin:\$PATH"
 exec /usr/lib/denial-anland/desktop/$dir/$name "\$@"
 EOF
         chmod 755 "$bin/$name"
