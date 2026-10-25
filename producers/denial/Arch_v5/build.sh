@@ -213,34 +213,21 @@ checkout() {
     [[ $(git -C "$tree" rev-parse HEAD) == "$revision" ]] ||
         die "cached revision differs: $tree; move it aside before changing upstream version"
 }
-emit_adapter_patch() {
-    # One maintained adapter patch, two Git roots. Keep the selected blocks
-    # byte-for-byte intact so existing applied patches and engine receipts match.
-    python3 - "$SCRIPT_DIR/flutter-adapter.patch" "$1" <<'PY_ADAPTER_PATCH'
-from pathlib import Path
-import re
-import sys
 
-patch = Path(sys.argv[1]).read_bytes()
-target = sys.argv[2]
-if target not in ('denial', 'engine') or not patch.startswith(b'diff --git '):
-    raise SystemExit('invalid adapter patch or target')
-selected = []
-for block in re.split(rb'(?m)(?=^diff --git )', patch):
-    if not block:
-        continue
-    header = block.split(b'\n', 1)[0].split()
-    if len(header) != 4 or not header[2].startswith(b'a/') or not header[3].startswith(b'b/'):
-        raise SystemExit('unsupported adapter patch header')
-    engine = (header[2].startswith(b'a/engine/'), header[3].startswith(b'b/engine/'))
-    if engine[0] != engine[1]:
-        raise SystemExit('adapter patch crosses Denial and Flutter Git roots')
-    if engine[0] == (target == 'engine'):
-        selected.append(block)
-if not selected:
-    raise SystemExit('missing adapter patch section: ' + target)
-sys.stdout.buffer.write(b''.join(selected))
-PY_ADAPTER_PATCH
+# The version is derived from release tags, which a --depth=1 fetch does not
+# carry. Complete the history once per cached checkout; both the tags and the
+# merge base need it. A completed clone satisfies the guard, so the network
+# round trip happens once and not on every build. A pinned base tag needs no
+# history at all. Offline builds keep whatever the cache already holds.
+ensure_version_history() {
+    local tree=$1 url=$2
+    [[ -z ${DENIAL_VERSION_BASE_TAG:-} && $ANLAND_OFFLINE == 0 ]] || return 0
+    [[ $(git -C "$tree" rev-parse --is-shallow-repository) == false ]] &&
+        [[ -n $(git -C "$tree" tag --list 'v*' | head -n 1) ]] && return 0
+    log 'completing the Denial history and release tags for version numbering'
+    git -C "$tree" fetch --quiet --tags --unshallow "$url" 2>/dev/null ||
+        git -C "$tree" fetch --quiet --tags "$url" ||
+        log 'cannot complete the Denial history; the version stays 0.0.0-based'
 }
 resolve_flutter_dependencies() {
     # Read only the selected DEPS expressions; never execute upstream DEPS code.
@@ -298,8 +285,8 @@ prepare_sources() {
     SOURCE="$WORKDIR/src/denial-$DENIAL_REV"
     [[ $ARTIFACTS_DIR != "$SOURCE" && $ARTIFACTS_DIR != "$SOURCE/"* ]] || die 'packages must be outside the source tree'
     checkout "$SOURCE" "$DENIAL_URL" "$DENIAL_REV" "${DENIAL_SOURCE:-$latest_tree}"
-    # Denial's fork has no release tags; its source lock identifies the matching
-    # Flutter SDK branch and revision, independently of the fork's default branch.
+    # Denial's source lock identifies the matching Flutter SDK branch and
+    # revision, independently of the fork's default branch.
     local flutter_lock="$SOURCE/prebuilt/flutter-engine/SOURCE_LOCK.json" flutter_revision
     flutter_revision=$(jq -er '.flutter.revision' "$flutter_lock") || die 'missing Denial Flutter revision'
     FLUTTER_URL=$(jq -er '.flutter.repository' "$flutter_lock") || die 'missing Denial Flutter repository'
@@ -321,32 +308,49 @@ prepare_sources() {
         ENGINE=$(realpath -m -- "$WORKDIR/engine/build/$FLUTTER_REV/out/denial_host_release_arm64_anland_ganesh") ||
             die 'invalid Flutter engine output path'
     fi
-    base_version=$(python3 - "$SOURCE" <<'PY'
-from pathlib import Path
-import sys, tomllib
-root=Path(sys.argv[1])
-for manifest in (root/'Cargo.toml', root/'compositor/Cargo.toml'):
-    if not manifest.is_file():
-        continue
-    data=tomllib.loads(manifest.read_text())
-    version=data.get('package',{}).get('version') or data.get('workspace',{}).get('package',{}).get('version')
-    if isinstance(version,str) and version:
-        print(version)
-        break
-else:
-    raise SystemExit('no Denial Cargo package version found')
-PY
-    ) || die 'cannot identify the current Denial package version'
+    # Denial's compositor/Cargo.toml is pinned at 0.0.0 and upstream never bumps
+    # it, so the release a build extends exists only in its git tags. The tags
+    # live on `main` while the producer tracks `dev`, so `tag --merged HEAD`
+    # alone finds nothing: pick the newest release tag that shares history, then
+    # count from the merge base rather than from the tag commit.
+    ensure_version_history "$SOURCE" "$DENIAL_URL"
+    [[ -z ${DENIAL_VERSION_BASE_TAG:-} ]] || git -C "$SOURCE" rev-parse --verify --quiet \
+        "${DENIAL_VERSION_BASE_TAG}^{commit}" >/dev/null ||
+        die "DENIAL_VERSION_BASE_TAG is not a commit: ${DENIAL_VERSION_BASE_TAG:-<unset>}"
+    local version_tag="${DENIAL_VERSION_BASE_TAG:-}" base_commit revision_count revision
+    if [[ -z $version_tag ]]; then
+        while IFS= read -r candidate; do
+            if git -C "$SOURCE" merge-base "$candidate" HEAD >/dev/null 2>&1; then
+                version_tag=$candidate
+                break
+            fi
+        done < <(git -C "$SOURCE" tag --list 'v*' --sort=-v:refname |
+            grep -Ex 'v[0-9]+\.[0-9]+\.[0-9]+')
+    fi
+    if [[ -n $version_tag ]]; then
+        base_commit=$(git -C "$SOURCE" merge-base "$version_tag" HEAD) ||
+            die "no merge base between $version_tag and HEAD"
+        revision_count=$(git -C "$SOURCE" rev-list --count "$base_commit..HEAD") ||
+            die "cannot count commits since $version_tag"
+        revision=$(git -C "$SOURCE" rev-parse --short=8 HEAD) || die 'cannot identify the Denial revision'
+        base_version="${version_tag#v}.r$revision_count.g$revision"
+        log "version base: $version_tag ($revision_count commits on this branch)"
+    else
+        log 'no release tag shares history with this revision; the version stays 0.0.0-based'
+        base_version='0.0.0'
+    fi
     [[ $base_version =~ ^[A-Za-z0-9][A-Za-z0-9.+_-]*$ ]] || die 'invalid current Denial package version'
-    DENIAL_VERSION="${base_version}-anland5"
+    # Every platform ships the same version string; Anland no longer appends a
+    # packaging suffix, so Arch, Debian, Fedora and Ubuntu stay comparable.
+    DENIAL_VERSION="$base_version"
     export DENIAL_BUILD_VERSION="$DENIAL_VERSION" FLUTTER_GIT_URL="$FLUTTER_URL" FLUTTER_ROOT="$FLUTTER"
     local patch="$WORKDIR/denial.pending.patch" previous="$WORKDIR/denial.applied.patch" file target
-    # Denial adapter first, then backend/performance hooks; Flutter engine hunks
-    # are extracted separately and applied only in the source-selected Flutter checkout.
-    emit_adapter_patch denial > "$patch" || die 'cannot extract Denial adapter patch'
+    # denial.patch carries the whole Denial-side integration; the Flutter engine
+    # hunks live apart so they apply only in the source-selected Flutter checkout.
     [[ -s $SCRIPT_DIR/denial.patch ]] || die 'missing component patch: denial.patch'
-    cat -- "$SCRIPT_DIR/denial.patch" >> "$patch" || die 'cannot read denial.patch'
-    emit_adapter_patch engine > "$ENGINE_PATCH" || die 'cannot extract Flutter engine patch'
+    cat -- "$SCRIPT_DIR/denial.patch" > "$patch" || die 'cannot read denial.patch'
+    [[ -s $SCRIPT_DIR/flutter-engine.patch ]] || die 'missing component patch: flutter-engine.patch'
+    cp -- "$SCRIPT_DIR/flutter-engine.patch" "$ENGINE_PATCH" || die 'cannot read flutter-engine.patch'
     if ! cmp -s "$patch" "$previous"; then
         # Several blocks touch the same file. A dry run cannot see changes from
         # earlier blocks, so validate the complete sequence on a disposable copy.
