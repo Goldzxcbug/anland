@@ -155,6 +155,11 @@ public class MainActivity extends Activity
     // are swallowed instead of being forwarded to the desktop as touch.
     public static final String KEY_DISABLE_MULTI_FINGER_GESTURES =
             "disable_multi_finger_gestures";
+    // Physical touchpad tap filtering. The scroll guard is measured from the
+    // last scrolling event until the next deliberate tap.
+    public static final String KEY_PAD_TAP = "pad_tap";
+    public static final String KEY_PAD_SCROLL_GUARD_MS = "pad_scroll_guard_ms";
+    public static final String KEY_PAD_DEBUG = "pad_debug";
     // Capture an external mouse/touchpad as a relative pointer so it cannot reach
     // the Android screen edges. This is deliberately opt-in: existing installations
     // keep the old absolute-pointer behaviour until the user enables it.
@@ -880,6 +885,12 @@ public class MainActivity extends Activity
     private void applyTouchpadPrefs(SharedPreferences prefs, Touchpad pad) {
         if (pad == null)
             return;
+        // Physical pads retain taps by default. Only a stream committed to
+        // scrolling (or explicitly disabled taps) suppresses synthetic clicks.
+        if (pad != screenTouchpad)
+            pad.setTapFilter(prefs.getBoolean(KEY_PAD_TAP, true),
+                    prefs.getInt(KEY_PAD_SCROLL_GUARD_MS, 0),
+                    prefs.getBoolean(KEY_PAD_DEBUG, false));
         pad.setAccelStrength(Math.max(0.5f,
                 Math.min(10.0f, prefs.getFloat(KEY_MOUSE_ACCEL, 1.0f))));
         pad.setScrollSpeed(prefs.getFloat(KEY_SCROLL_SPEED,

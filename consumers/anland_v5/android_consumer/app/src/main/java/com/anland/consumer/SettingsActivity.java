@@ -91,6 +91,9 @@ public class SettingsActivity extends Activity {
     private static final String KEY_GESTURE_SCALE = "touchpad_gesture_scale";
     private static final String KEY_DISABLE_MULTI_FINGER_GESTURES =
             "disable_multi_finger_gestures";
+    private static final String KEY_PAD_TAP = "pad_tap";
+    private static final String KEY_PAD_SCROLL_GUARD_MS = "pad_scroll_guard_ms";
+    private static final String KEY_PAD_DEBUG = "pad_debug";
 
     // Latency presets: target buffer in ms (0 = auto). The user-visible labels live
     // in the R.array.latency_labels string-array, parallel to this array.
@@ -1194,6 +1197,51 @@ public class SettingsActivity extends Activity {
         touchpadHint.setTextColor(Color.GRAY);
         touchpadHint.setPadding(0, dp(4), 0, dp(12));
         root.addView(touchpadHint);
+
+        Switch tapSwitch = new Switch(this);
+        tapSwitch.setText(R.string.pad_tap);
+        tapSwitch.setTextSize(14);
+        tapSwitch.setPadding(0, dp(8), 0, 0);
+        tapSwitch.setChecked(prefs.getBoolean(KEY_PAD_TAP, true));
+        tapSwitch.setOnCheckedChangeListener((v, checked) ->
+                prefs.edit().putBoolean(KEY_PAD_TAP, checked).apply());
+        root.addView(tapSwitch);
+
+        TextView padHint = new TextView(this);
+        padHint.setText(R.string.pad_tip);
+        padHint.setTextSize(12);
+        padHint.setTextColor(Color.GRAY);
+        padHint.setPadding(0, dp(4), 0, dp(8));
+        root.addView(padHint);
+
+        TextView guardValue = new TextView(this);
+        int guard = Math.max(0, Math.min(1000,
+                prefs.getInt(KEY_PAD_SCROLL_GUARD_MS, 0)));
+        guardValue.setText(getString(R.string.pad_guard, guard));
+        guardValue.setTextSize(14);
+        guardValue.setTextColor(Color.BLUE);
+        root.addView(guardValue);
+        SeekBar guardSeek = new SeekBar(this);
+        guardSeek.setMax(20);
+        guardSeek.setProgress(Math.round(guard / 50f));
+        guardSeek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar bar, int progress, boolean fromUser) {
+                guardValue.setText(getString(R.string.pad_guard, progress * 50));
+                if (fromUser) prefs.edit().putInt(KEY_PAD_SCROLL_GUARD_MS, progress * 50).apply();
+            }
+            @Override public void onStartTrackingTouch(SeekBar bar) { }
+            @Override public void onStopTrackingTouch(SeekBar bar) { }
+        });
+        root.addView(guardSeek);
+
+        Switch padDebug = new Switch(this);
+        padDebug.setText(R.string.pad_debug);
+        padDebug.setTextSize(14);
+        padDebug.setPadding(0, dp(8), 0, 0);
+        padDebug.setChecked(prefs.getBoolean(KEY_PAD_DEBUG, false));
+        padDebug.setOnCheckedChangeListener((v, checked) ->
+                prefs.edit().putBoolean(KEY_PAD_DEBUG, checked).apply());
+        root.addView(padDebug);
 
         // External mouse pointer capture.  This is opt-in because it changes
         // Android's mouse event mode from absolute coordinates to relative motion.
