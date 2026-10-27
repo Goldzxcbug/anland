@@ -328,6 +328,21 @@ public final class Touchpad {
     int clickpadButton(MotionEvent event) {
         if (!clickpadBaselineValid || event.getPointerCount() <= 0)
             return 0x110; // BTN_LEFT
+
+        // A press that arrives after a single contact has already been held
+        // long enough for long-press drag is intentional drag/left-click, not a
+        // right-click. This also covers the case where the first physical press
+        // is what interrupts the hold before the recognizer sees a MOVE.
+        boolean longHeldSingleContact = currentState == STATE_ONE_FINGER
+                && !isMultiFinger && event.getPointerCount() == 1
+                && event.getEventTime() - downTime1 >= TOUCH_LONG_PRESS_TIMEOUT;
+        if (isDraggingActive || longHeldSingleContact) {
+            if (debug)
+                android.util.Log.d("AnlandTouchpad",
+                        "clickpad press during long hold -> BTN_LEFT");
+            return 0x110;
+        }
+
         int limit = Math.min(event.getPointerCount(), 2);
         int slowestIndex = 0;
         float slowestSpeed = Float.MAX_VALUE;
@@ -651,6 +666,29 @@ public final class Touchpad {
                     float rawDy = y - lastY1;
                     float dist = (float) Math.hypot(x - startX1, y - startY1);
 
+                    // Check the hold timeout before the movement slop. A pad may
+                    // not report any MOVE while the finger is stationary, so the
+                    // first event after the 500 ms hold can already be the drag
+                    // movement. Cancelling the candidate first made that first
+                    // movement abort the long press. Once the hold has matured,
+                    // the drag wins over the tap/motion classification.
+                    if (tapToClick && isLongPressPossible && !hasLongPressed
+                            && (event.getEventTime() - downTime1) >= TOUCH_LONG_PRESS_TIMEOUT) {
+                        hasLongPressed = true;
+                        currentState = STATE_DRAGGING;
+                        isDraggingActive = true;
+                        isSingleTapCandidate = false;
+                        isTwoFingerTapCandidate = false;
+                        // No motion is emitted with the press: the cursor belongs to
+                        // the host and is already where the drag should start.
+                        sendButton(0x110, true);
+                        if (debug)
+                            android.util.Log.d("AnlandTouchpad",
+                                    "long-press drag down t=" + event.getEventTime());
+                        resetSmoothing();
+                        break;
+                    }
+
                     if (dist > touchSlop) {
                         isLongPressPossible = false;
                         isSingleTapCandidate = false;
@@ -658,18 +696,6 @@ public final class Touchpad {
                         // scroll or drag whose second finger lifted early cannot
                         // finish as a right-click.
                         isTwoFingerTapCandidate = false;
-                    }
-
-                    if (tapToClick && isLongPressPossible && !hasLongPressed &&
-                            (event.getEventTime() - downTime1) >= TOUCH_LONG_PRESS_TIMEOUT) {
-                        hasLongPressed = true;
-                        currentState = STATE_DRAGGING;
-                        isDraggingActive = true;
-                        // No motion is emitted with the press: the cursor belongs to
-                        // the host and is already where the drag should start.
-                        sendButton(0x110, true);
-                        resetSmoothing();
-                        break;
                     }
 
                     float[] smoothed = applySmoothing(rawDx, rawDy);
