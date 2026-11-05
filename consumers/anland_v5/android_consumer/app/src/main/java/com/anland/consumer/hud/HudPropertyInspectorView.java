@@ -53,6 +53,7 @@ public final class HudPropertyInspectorView extends LinearLayout {
         void onGroupChildDetachRequested(HudButton group, HudButton child);
         void onGroupChildRemoveRequested(HudButton group, HudButton child);
         void onCloseRequested();
+        void onCancelRequested();
     }
 
     private static final int COLOR_BODY_BG = 0xFF484848;
@@ -150,6 +151,8 @@ public final class HudPropertyInspectorView extends LinearLayout {
     // Drag tracking
     private float mDragStartX;
     private float mDragStartY;
+    private int mUserPanelWidth;
+    private int mUserPanelHeight;
 
     public HudPropertyInspectorView(Context context, InspectorCallback callback) {
         super(context);
@@ -174,6 +177,7 @@ public final class HudPropertyInspectorView extends LinearLayout {
         bg.setColor(COLOR_BODY_BG);
         setBackground(bg);
         setElevation(dp(12));
+        setClickable(true);
 
         // Clamping to parent on layout
         addOnLayoutChangeListener((v, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom) -> {
@@ -218,7 +222,7 @@ public final class HudPropertyInspectorView extends LinearLayout {
         mSidebarContainer.setPadding(dp(8), dp(16), dp(8), dp(14));
         mSidebarContainer.setLayoutParams(new LayoutParams(dp(106), LayoutParams.MATCH_PARENT));
 
-        String[] tabs = new String[]{"Transform", "Label", "Event", "Style"};
+        String[] tabs = new String[]{getContext().getString(R.string.hud_editor_transform), getContext().getString(R.string.hud_editor_label), getContext().getString(R.string.hud_editor_event), getContext().getString(R.string.hud_editor_style)};
         mTabButtons = new TextView[tabs.length];
         for (int i = 0; i < tabs.length; i++) {
             final int tabIndex = i;
@@ -261,7 +265,7 @@ public final class HudPropertyInspectorView extends LinearLayout {
         LinearLayout footer = new LinearLayout(getContext());
         footer.setOrientation(HORIZONTAL);
         footer.setGravity(Gravity.CENTER_VERTICAL);
-        footer.setPadding(dp(16), dp(8), dp(16), dp(8));
+        footer.setPadding(dp(8), dp(8), dp(8), dp(8));
         GradientDrawable footerBg = new GradientDrawable();
         float r = dp(22);
         footerBg.setCornerRadii(new float[]{0, 0, 0, 0, r, r, r, r});
@@ -297,12 +301,8 @@ public final class HudPropertyInspectorView extends LinearLayout {
         });
         footer.addView(dotsView, new LayoutParams(dp(28), dp(28)));
 
-        // Middle spacer
-        View footerSpacer = new View(getContext());
-        footer.addView(footerSpacer, new LayoutParams(0, 1, 1f));
-
         // Action Buttons: Preview (Purple, Hold to preview), Delete (Grey), Copy (Grey), Done (Purple)
-        Button btnPreview = createFooterButton("Preview", COLOR_TAB_ACTIVE, Color.WHITE);
+        Button btnPreview = createFooterButton(getContext().getString(R.string.hud_editor_preview), COLOR_TAB_ACTIVE, Color.WHITE);
         btnPreview.setOnTouchListener((v, event) -> {
             switch (event.getAction()) {
                 case MotionEvent.ACTION_DOWN:
@@ -317,7 +317,7 @@ public final class HudPropertyInspectorView extends LinearLayout {
         });
         footer.addView(btnPreview);
 
-        Button btnDelete = createFooterButton("Delete", COLOR_BTN_GREY, Color.WHITE);
+        Button btnDelete = createFooterButton(getContext().getString(R.string.hud_editor_delete), COLOR_BTN_GREY, Color.WHITE);
         btnDelete.setOnClickListener(v -> {
             if (mCallback != null && mActiveButton != null) {
                 mCallback.onDeleteRequested(mActiveButton);
@@ -325,7 +325,7 @@ public final class HudPropertyInspectorView extends LinearLayout {
         });
         footer.addView(btnDelete);
 
-        Button btnCopy = createFooterButton("Copy", COLOR_BTN_GREY, Color.WHITE);
+        Button btnCopy = createFooterButton(getContext().getString(R.string.hud_editor_copy), COLOR_BTN_GREY, Color.WHITE);
         btnCopy.setOnClickListener(v -> {
             if (mCallback != null && mActiveButton != null) {
                 mCallback.onDuplicateRequested(mActiveButton);
@@ -333,13 +333,57 @@ public final class HudPropertyInspectorView extends LinearLayout {
         });
         footer.addView(btnCopy);
 
-        Button btnDone = createFooterButton("Done", COLOR_TAB_ACTIVE, Color.WHITE);
+        Button btnCancel = createFooterButton(getContext().getString(R.string.hud_overlay_cancel), COLOR_BTN_GREY, Color.WHITE);
+        btnCancel.setOnClickListener(v -> {
+            if (mCallback != null) mCallback.onCancelRequested();
+        });
+        footer.addView(btnCancel);
+
+        Button btnDone = createFooterButton(getContext().getString(R.string.hud_editor_done), COLOR_TAB_ACTIVE, Color.WHITE);
         btnDone.setOnClickListener(v -> {
             if (mCallback != null) {
                 mCallback.onCloseRequested();
             }
         });
         footer.addView(btnDone);
+
+        TextView resizeHandle = new TextView(getContext());
+        resizeHandle.setText("◢");
+        resizeHandle.setTextSize(20);
+        resizeHandle.setTextColor(Color.WHITE);
+        resizeHandle.setGravity(Gravity.CENTER);
+        resizeHandle.setContentDescription(getContext().getString(R.string.hud_resize_panel));
+        resizeHandle.setOnTouchListener(new OnTouchListener() {
+            private float startX, startY;
+            private int startWidth, startHeight;
+
+            @Override
+            public boolean onTouch(View v, MotionEvent event) {
+                switch (event.getActionMasked()) {
+                    case MotionEvent.ACTION_DOWN:
+                        startX = event.getRawX();
+                        startY = event.getRawY();
+                        startWidth = getWidth();
+                        startHeight = getHeight();
+                        return true;
+                    case MotionEvent.ACTION_MOVE:
+                        View parent = (View) getParent();
+                        if (parent == null || parent.getWidth() <= 0 || parent.getHeight() <= 0) return true;
+                        mUserPanelWidth = Math.max(Math.min(dp(320), parent.getWidth()),
+                                Math.min(parent.getWidth(), startWidth + Math.round(event.getRawX() - startX)));
+                        mUserPanelHeight = Math.max(Math.min(dp(200), parent.getHeight()),
+                                Math.min(parent.getHeight(), startHeight + Math.round(event.getRawY() - startY)));
+                        adaptSize(parent.getWidth(), parent.getHeight());
+                        return true;
+                    case MotionEvent.ACTION_UP:
+                    case MotionEvent.ACTION_CANCEL:
+                        return true;
+                    default:
+                        return true;
+                }
+            }
+        });
+        footer.addView(resizeHandle, new LayoutParams(dp(28), dp(32)));
 
         addView(footer, new LayoutParams(LayoutParams.MATCH_PARENT, dp(48)));
 
@@ -373,9 +417,11 @@ public final class HudPropertyInspectorView extends LinearLayout {
         b.setTypeface(Typeface.DEFAULT_BOLD);
         b.setTextColor(textColor);
         b.setAllCaps(false);
+        b.setSingleLine(true);
+        b.setAutoSizeTextTypeUniformWithConfiguration(8, 11, 1, android.util.TypedValue.COMPLEX_UNIT_SP);
         b.setMinWidth(0);
         b.setMinHeight(0);
-        b.setPadding(dp(12), dp(6), dp(12), dp(6));
+        b.setPadding(dp(2), dp(6), dp(2), dp(6));
 
         GradientDrawable bg = new GradientDrawable();
         bg.setCornerRadius(dp(14));
@@ -383,8 +429,8 @@ public final class HudPropertyInspectorView extends LinearLayout {
         b.setBackground(bg);
 
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                LayoutParams.WRAP_CONTENT, dp(32));
-        lp.leftMargin = dp(8);
+                0, dp(32), 1f);
+        lp.leftMargin = dp(2);
         b.setLayoutParams(lp);
         return b;
     }
@@ -420,7 +466,7 @@ public final class HudPropertyInspectorView extends LinearLayout {
         // Width Row
         mWidthSeekBar = new SeekBar(getContext());
         mWidthBadge = createBadgeTextView("75px ✎");
-        mWidthRow = createSliderRow("Width", mWidthSeekBar, mWidthBadge, SIZE_MIN_DP, SIZE_MAX_DP, "px", val -> {
+        mWidthRow = createSliderRow(getContext().getString(R.string.hud_editor_width), mWidthSeekBar, mWidthBadge, SIZE_MIN_DP, SIZE_MAX_DP, "px", val -> {
             if (mActiveButton != null) {
                 mActiveButton.widthDp = val;
                 if ((mAspectRatioLocked || HudButton.WIDGET_DPAD.equals(mActiveButton.widgetType)) && mHeightSeekBar != null) {
@@ -435,7 +481,7 @@ public final class HudPropertyInspectorView extends LinearLayout {
         // Height Row
         mHeightSeekBar = new SeekBar(getContext());
         mHeightBadge = createBadgeTextView("75px ✎");
-        mHeightRow = createSliderRow("Height", mHeightSeekBar, mHeightBadge, SIZE_MIN_DP, SIZE_MAX_DP, "px", val -> {
+        mHeightRow = createSliderRow(getContext().getString(R.string.hud_editor_height), mHeightSeekBar, mHeightBadge, SIZE_MIN_DP, SIZE_MAX_DP, "px", val -> {
             if (mActiveButton != null) {
                 mActiveButton.heightDp = val;
                 if ((mAspectRatioLocked || HudButton.WIDGET_DPAD.equals(mActiveButton.widgetType)) && mWidthSeekBar != null) {
@@ -450,7 +496,7 @@ public final class HudPropertyInspectorView extends LinearLayout {
         // Corner Radius Row
         mCornerSeekBar = new SeekBar(getContext());
         mCornerBadge = createBadgeTextView("8dp ✎");
-        mCornerRow = createSliderRow("Corner Radius", mCornerSeekBar, mCornerBadge, 0, 50, "dp", val -> {
+        mCornerRow = createSliderRow(getContext().getString(R.string.hud_editor_corner_radius), mCornerSeekBar, mCornerBadge, 0, 50, "dp", val -> {
             if (mActiveButton != null) {
                 mActiveButton.cornerRadiusDp = val;
                 if (mCallback != null) mCallback.onModelChanged(mActiveButton);
@@ -460,7 +506,7 @@ public final class HudPropertyInspectorView extends LinearLayout {
 
         // Zalith 8 Corner Shapes Matrix
         mShapeTitle = new TextView(getContext());
-        mShapeTitle.setText("Corner Shape (Zalith Presets)");
+        mShapeTitle.setText(getContext().getString(R.string.hud_editor_corner_shape));
         mShapeTitle.setTextColor(Color.WHITE);
         mShapeTitle.setTextSize(12);
         mShapeTitle.setTypeface(Typeface.DEFAULT_BOLD);
@@ -501,8 +547,8 @@ public final class HudPropertyInspectorView extends LinearLayout {
         swBg.setStroke(dp(1), 0x33FFFFFF);
         pillSwitch.setBackground(swBg);
 
-        mLabelPillText = createSegmentedPill("Aa Text", true, () -> setLabelMode(false));
-        mLabelPillIcon = createSegmentedPill("❖ Vector Icon", false, () -> setLabelMode(true));
+        mLabelPillText = createSegmentedPill(getContext().getString(R.string.hud_editor_text_pill), true, () -> setLabelMode(false));
+        mLabelPillIcon = createSegmentedPill(getContext().getString(R.string.hud_editor_icon_pill), false, () -> setLabelMode(true));
         pillSwitch.addView(mLabelPillText, new LinearLayout.LayoutParams(0, dp(30), 1f));
         pillSwitch.addView(mLabelPillIcon, new LinearLayout.LayoutParams(0, dp(30), 1f));
         content.addView(pillSwitch);
@@ -548,21 +594,21 @@ public final class HudPropertyInspectorView extends LinearLayout {
         mTextSectionContainer.addView(mLabelInput);
 
         // Alignment row: Left | Center | Right
-        mTextSectionContainer.addView(createSectionHeader("TEXT ALIGNMENT"));
+        mTextSectionContainer.addView(createSectionHeader(getContext().getString(R.string.hud_editor_text_alignment)));
         LinearLayout alignRow = new LinearLayout(getContext());
         alignRow.setOrientation(HORIZONTAL);
         alignRow.setPadding(0, dp(2), 0, dp(10));
 
-        mBtnAlignLeft = createAlignButton("Left", HudButton.ALIGN_LEFT);
-        mBtnAlignCenter = createAlignButton("Center", HudButton.ALIGN_CENTER);
-        mBtnAlignRight = createAlignButton("Right", HudButton.ALIGN_RIGHT);
+        mBtnAlignLeft = createAlignButton(getContext().getString(R.string.hud_direction_left), HudButton.ALIGN_LEFT);
+        mBtnAlignCenter = createAlignButton(getContext().getString(R.string.hud_editor_center), HudButton.ALIGN_CENTER);
+        mBtnAlignRight = createAlignButton(getContext().getString(R.string.hud_direction_right), HudButton.ALIGN_RIGHT);
         alignRow.addView(mBtnAlignLeft, new LinearLayout.LayoutParams(0, dp(32), 1f));
         alignRow.addView(mBtnAlignCenter, new LinearLayout.LayoutParams(0, dp(32), 1f));
         alignRow.addView(mBtnAlignRight, new LinearLayout.LayoutParams(0, dp(32), 1f));
         mTextSectionContainer.addView(alignRow);
 
         // Text Color Presets
-        mTextSectionContainer.addView(createSectionHeader("TEXT COLOR"));
+        mTextSectionContainer.addView(createSectionHeader(getContext().getString(R.string.hud_editor_text_color)));
         mTextColorRow = createTextColorPresetsRow();
         mTextSectionContainer.addView(mTextColorRow);
 
@@ -572,7 +618,7 @@ public final class HudPropertyInspectorView extends LinearLayout {
         mIconSectionContainer = new LinearLayout(getContext());
         mIconSectionContainer.setOrientation(VERTICAL);
         mIconSectionContainer.setPadding(0, dp(10), 0, 0);
-        mIconSectionContainer.addView(createSectionHeader("SELECT VECTOR ICON"));
+        mIconSectionContainer.addView(createSectionHeader(getContext().getString(R.string.hud_editor_select_icon)));
         buildIconPresetsGrid(mIconSectionContainer);
         content.addView(mIconSectionContainer);
 
@@ -700,12 +746,12 @@ public final class HudPropertyInspectorView extends LinearLayout {
         grid.setAlignmentMode(GridLayout.ALIGN_BOUNDS);
 
         // Add None Option first
-        View noneCard = createIconPresetCard(ctx, HudVectorIcons.ICON_NONE, "None (Text)");
+        View noneCard = createIconPresetCard(ctx, HudVectorIcons.ICON_NONE, getContext().getString(R.string.hud_editor_none_text));
         grid.addView(noneCard);
 
         for (int i = 0; i < HudVectorIcons.ALL_ICONS.length; i++) {
             final String id = HudVectorIcons.ALL_ICONS[i];
-            final String lbl = HudVectorIcons.ICON_LABELS[i];
+            final String lbl = getContext().getString(HudVectorIcons.ICON_LABELS[i]);
             View card = createIconPresetCard(ctx, id, lbl);
             grid.addView(card);
         }
@@ -783,9 +829,9 @@ public final class HudPropertyInspectorView extends LinearLayout {
         content.setPadding(0, 0, dp(14), 0);
 
         // Main Action Row
-        mSectionPrimaryAction = createSectionHeader("PRIMARY ACTION");
+        mSectionPrimaryAction = createSectionHeader(getContext().getString(R.string.hud_editor_primary_action));
         content.addView(mSectionPrimaryAction);
-        mBtnPickMainAction = createBadgeButton("Unassigned");
+        mBtnPickMainAction = createBadgeButton(getContext().getString(R.string.hud_unassigned));
         mBtnPickMainAction.setOnClickListener(v -> {
             if (mCallback != null && mActiveButton != null) {
                 mCallback.onPickActionRequested(mActiveButton, 0);
@@ -828,9 +874,9 @@ public final class HudPropertyInspectorView extends LinearLayout {
         content.addView(mRepeatSwitch);
 
         // Popup Action (Swipe Up)
-        mSectionPopupAction = createSectionHeader("POPUP ACTION (SWIPE UP)");
+        mSectionPopupAction = createSectionHeader(getContext().getString(R.string.hud_editor_popup_action));
         content.addView(mSectionPopupAction);
-        mBtnPickPopupAction = createBadgeButton("None");
+        mBtnPickPopupAction = createBadgeButton(getContext().getString(R.string.hud_none));
         mBtnPickPopupAction.setOnClickListener(v -> {
             if (mCallback != null && mActiveButton != null) {
                 mCallback.onPickActionRequested(mActiveButton, 1);
@@ -839,9 +885,9 @@ public final class HudPropertyInspectorView extends LinearLayout {
         content.addView(mBtnPickPopupAction);
 
         // Long Press Action
-        mSectionLongPressAction = createSectionHeader("LONG PRESS ACTION");
+        mSectionLongPressAction = createSectionHeader(getContext().getString(R.string.hud_long_press_action));
         content.addView(mSectionLongPressAction);
-        mBtnPickLongPressAction = createBadgeButton("None");
+        mBtnPickLongPressAction = createBadgeButton(getContext().getString(R.string.hud_none));
         mBtnPickLongPressAction.setOnClickListener(v -> {
             if (mCallback != null && mActiveButton != null) {
                 mCallback.onPickActionRequested(mActiveButton, 6);
@@ -851,7 +897,7 @@ public final class HudPropertyInspectorView extends LinearLayout {
 
         mLongPressSeekBar = new SeekBar(getContext());
         mLongPressBadge = createBadgeTextView("1000ms");
-        mLongPressDelayRow = createSliderRow("Hold Delay", mLongPressSeekBar, mLongPressBadge,
+        mLongPressDelayRow = createSliderRow(getContext().getString(R.string.hud_long_press_delay), mLongPressSeekBar, mLongPressBadge,
                 HudButton.LONG_PRESS_MIN_MS, HudButton.LONG_PRESS_MAX_MS, "ms", val -> {
             if (mActiveButton != null) {
                 mActiveButton.longPressMs = val;
@@ -863,14 +909,14 @@ public final class HudPropertyInspectorView extends LinearLayout {
         // Super Gesture / D-Pad Directions
         mSuperGestureOptions = new LinearLayout(getContext());
         mSuperGestureOptions.setOrientation(VERTICAL);
-        mSuperGestureOptions.addView(createSectionHeader("DIRECTION ACTIONS"));
-        mBtnPickSwipeLeft = createBadgeButton("Left");
+        mSuperGestureOptions.addView(createSectionHeader(getContext().getString(R.string.hud_editor_direction_actions)));
+        mBtnPickSwipeLeft = createBadgeButton(getContext().getString(R.string.hud_direction_left));
         mBtnPickSwipeLeft.setOnClickListener(v -> pickDirection(2));
-        mBtnPickSwipeRight = createBadgeButton("Right");
+        mBtnPickSwipeRight = createBadgeButton(getContext().getString(R.string.hud_direction_right));
         mBtnPickSwipeRight.setOnClickListener(v -> pickDirection(3));
-        mBtnPickSwipeUp = createBadgeButton("Up");
+        mBtnPickSwipeUp = createBadgeButton(getContext().getString(R.string.hud_direction_up));
         mBtnPickSwipeUp.setOnClickListener(v -> pickDirection(4));
-        mBtnPickSwipeDown = createBadgeButton("Down");
+        mBtnPickSwipeDown = createBadgeButton(getContext().getString(R.string.hud_direction_down));
         mBtnPickSwipeDown.setOnClickListener(v -> pickDirection(5));
         mSuperGestureOptions.addView(mBtnPickSwipeUp);
         mSuperGestureOptions.addView(mBtnPickSwipeDown);
@@ -881,14 +927,14 @@ public final class HudPropertyInspectorView extends LinearLayout {
         // TrackPoint / Touchpad Options
         mTrackPointOptions = new LinearLayout(getContext());
         mTrackPointOptions.setOrientation(VERTICAL);
-        mTrackPointOptions.addView(createSectionHeader("POINTER SETTINGS"));
-        mBtnTrackPointMode = createBadgeButton("Mode: MOUSE");
+        mTrackPointOptions.addView(createSectionHeader(getContext().getString(R.string.hud_editor_pointer_settings)));
+        mBtnTrackPointMode = createBadgeButton(getContext().getString(R.string.hud_editor_mode_format, getContext().getString(R.string.hud_mode_mouse)));
         mBtnTrackPointMode.setOnClickListener(v -> toggleTrackPointMode());
         mTrackPointOptions.addView(mBtnTrackPointMode);
 
         mTrackSensitivitySeekBar = new SeekBar(getContext());
         mTrackSensitivityBadge = createBadgeTextView("1.5x");
-        mTrackPointOptions.addView(createSliderRow("Sensitivity", mTrackSensitivitySeekBar, mTrackSensitivityBadge, 5, 30, "x", val -> {
+        mTrackPointOptions.addView(createSliderRow(getContext().getString(R.string.hud_editor_sensitivity), mTrackSensitivitySeekBar, mTrackSensitivityBadge, 5, 30, "x", val -> {
             if (mActiveButton != null) {
                 mActiveButton.trackpointSensitivity = val / 10f;
                 if (mCallback != null) mCallback.onModelChanged(mActiveButton);
@@ -910,7 +956,7 @@ public final class HudPropertyInspectorView extends LinearLayout {
         if (mActiveButton == null) return;
         boolean mouse = HudButton.MODE_MOUSE.equals(mActiveButton.trackpointMode);
         mActiveButton.trackpointMode = mouse ? HudButton.MODE_SCROLL : HudButton.MODE_MOUSE;
-        mBtnTrackPointMode.setText("Mode: " + mActiveButton.trackpointMode.toUpperCase());
+        mBtnTrackPointMode.setText(getContext().getString(R.string.hud_editor_mode_format, getContext().getString(HudButton.MODE_MOUSE.equals(mActiveButton.trackpointMode) ? R.string.hud_mode_mouse : R.string.hud_mode_scroll)));
         if (mCallback != null) mCallback.onModelChanged(mActiveButton);
     }
 
@@ -927,7 +973,7 @@ public final class HudPropertyInspectorView extends LinearLayout {
         // Opacity Slider (0% to 100%)
         mOpacitySeekBar = new SeekBar(getContext());
         mOpacityBadge = createBadgeTextView("85% ✎");
-        content.addView(createSliderRow("Opacity", mOpacitySeekBar, mOpacityBadge, 0, 100, "%", val -> {
+        content.addView(createSliderRow(getContext().getString(R.string.hud_editor_opacity), mOpacitySeekBar, mOpacityBadge, 0, 100, "%", val -> {
             if (mActiveButton != null) {
                 mActiveButton.opacity = val / 100f;
                 if (mCallback != null) mCallback.onModelChanged(mActiveButton);
@@ -949,14 +995,14 @@ public final class HudPropertyInspectorView extends LinearLayout {
         content.addView(mHapticSwitch);
 
         // Color Theme Presets
-        content.addView(createSectionHeader("BACKGROUND COLOR"));
+        content.addView(createSectionHeader(getContext().getString(R.string.hud_editor_background_color)));
         mColorThemeRow = createColorPresetsRow();
         content.addView(mColorThemeRow);
 
         // Border Width Slider
         mBorderWidthSeekBar = new SeekBar(getContext());
         mBorderWidthBadge = createBadgeTextView("1dp ✎");
-        content.addView(createSliderRow("Border Stroke", mBorderWidthSeekBar, mBorderWidthBadge, 0, 10, "dp", val -> {
+        content.addView(createSliderRow(getContext().getString(R.string.hud_editor_border_stroke), mBorderWidthSeekBar, mBorderWidthBadge, 0, 10, "dp", val -> {
             if (mActiveButton != null) {
                 mActiveButton.borderStrokeWidthDp = val;
                 if (mCallback != null) mCallback.onModelChanged(mActiveButton);
@@ -964,13 +1010,13 @@ public final class HudPropertyInspectorView extends LinearLayout {
         }));
 
         // Border Color Presets
-        content.addView(createSectionHeader("BORDER COLOR"));
+        content.addView(createSectionHeader(getContext().getString(R.string.hud_editor_border_color)));
         content.addView(createBorderColorPresetsRow());
 
         // Widget Style Variant (For D-Pad, Touchpad, Scrollbar)
         mStyleVariantSection = new LinearLayout(getContext());
         mStyleVariantSection.setOrientation(VERTICAL);
-        mStyleVariantSection.addView(createSectionHeader("CONTROL STYLE VARIANT"));
+        mStyleVariantSection.addView(createSectionHeader(getContext().getString(R.string.hud_editor_control_style)));
         mStyleVariantRow = createStyleVariantsRow();
         mStyleVariantSection.addView(mStyleVariantRow);
         content.addView(mStyleVariantSection);
@@ -985,7 +1031,7 @@ public final class HudPropertyInspectorView extends LinearLayout {
         row.setOrientation(HORIZONTAL);
         row.setPadding(0, dp(4), 0, dp(4));
 
-        String[] variants = new String[]{"Minimal Flat", "Classic Bevel", "Glass Outline"};
+        String[] variants = new String[]{getContext().getString(R.string.hud_editor_style_flat), getContext().getString(R.string.hud_editor_style_bevel), getContext().getString(R.string.hud_editor_style_glass)};
         for (int v = 0; v < variants.length; v++) {
             final int varIdx = v;
             Button b = new Button(ctx, null, android.R.attr.buttonBarButtonStyle);
@@ -1172,7 +1218,7 @@ public final class HudPropertyInspectorView extends LinearLayout {
         root.setPadding(dp(16), dp(14), dp(16), dp(16));
 
         TextView title = new TextView(ctx);
-        title.setText("SET " + label.toUpperCase());
+        title.setText(getContext().getString(R.string.hud_editor_set_value, label));
         title.setTextColor(Color.WHITE);
         title.setTextSize(13);
         title.setTypeface(Typeface.DEFAULT_BOLD);
@@ -1198,7 +1244,7 @@ public final class HudPropertyInspectorView extends LinearLayout {
         root.addView(input);
 
         TextView rangeHint = new TextView(ctx);
-        rangeHint.setText("Range: " + min + " - " + max + " " + unit);
+        rangeHint.setText(getContext().getString(R.string.hud_editor_range, min, max, unit));
         rangeHint.setTextColor(0xFF888888);
         rangeHint.setTextSize(10);
         rangeHint.setGravity(Gravity.CENTER);
@@ -1214,14 +1260,14 @@ public final class HudPropertyInspectorView extends LinearLayout {
         }
 
         Button btnCancel = new Button(ctx, null, android.R.attr.buttonBarButtonStyle);
-        btnCancel.setText("CANCEL");
+        btnCancel.setText(R.string.hud_overlay_cancel);
         btnCancel.setTextColor(0xFF888888);
         btnCancel.setTextSize(11);
         btnCancel.setOnClickListener(v -> dialog.dismiss());
         btnRow.addView(btnCancel, new LinearLayout.LayoutParams(0, dp(34), 1f));
 
         Button btnOk = new Button(ctx, null, android.R.attr.buttonBarButtonStyle);
-        btnOk.setText("APPLY");
+        btnOk.setText(R.string.hud_editor_apply);
         btnOk.setTextColor(Color.WHITE);
         btnOk.setTypeface(Typeface.DEFAULT_BOLD);
         btnOk.setTextSize(11);
@@ -1344,8 +1390,10 @@ public final class HudPropertyInspectorView extends LinearLayout {
     public void adaptSize(int parentW, int parentH) {
         if (parentW <= 0 || parentH <= 0) return;
         boolean isLandscape = (parentW > parentH);
-        int targetW = dp(isLandscape ? 480 : Math.min(370, Math.round(parentW / getResources().getDisplayMetrics().density) - 16));
-        int targetH = dp(isLandscape ? 280 : 380);
+        int targetW = mUserPanelWidth > 0 ? mUserPanelWidth : dp(isLandscape ? 480 : 370);
+        int targetH = mUserPanelHeight > 0 ? mUserPanelHeight : dp(isLandscape ? 280 : 380);
+        targetW = Math.max(1, Math.min(parentW, targetW));
+        targetH = Math.max(1, Math.min(parentH, targetH));
         ViewGroup.LayoutParams lp = getLayoutParams();
         if (lp != null && (lp.width != targetW || lp.height != targetH)) {
             lp.width = targetW;
@@ -1365,7 +1413,7 @@ public final class HudPropertyInspectorView extends LinearLayout {
 
         // Adjust Corner Shape Picker columns in portrait
         if (mShapePickerView != null) {
-            mShapePickerView.setColumnCountForOrientation(isLandscape);
+            mShapePickerView.setColumnCountForOrientation(targetW >= dp(440));
         }
     }
 
@@ -1502,11 +1550,11 @@ public final class HudPropertyInspectorView extends LinearLayout {
                     || HudButton.WIDGET_DPAD.equals(b.widgetType);
             mSuperGestureOptions.setVisibility(isSuper ? VISIBLE : GONE);
             if (isSuper) {
-                String prefix = isDpad ? "D-Pad " : "Swipe ";
-                mBtnPickSwipeUp.setText(prefix + "Up: " + formatActionBadge(b.directionalAction(4)));
-                mBtnPickSwipeDown.setText(prefix + "Down: " + formatActionBadge(b.directionalAction(5)));
-                mBtnPickSwipeLeft.setText(prefix + "Left: " + formatActionBadge(b.directionalAction(2)));
-                mBtnPickSwipeRight.setText(prefix + "Right: " + formatActionBadge(b.directionalAction(3)));
+                String prefix = getContext().getString(isDpad ? R.string.hud_editor_widget_dpad : R.string.hud_editor_swipe_prefix);
+                mBtnPickSwipeUp.setText(getContext().getString(R.string.hud_editor_direction_action, prefix, getContext().getString(R.string.hud_direction_up), formatActionBadge(b.directionalAction(4))));
+                mBtnPickSwipeDown.setText(getContext().getString(R.string.hud_editor_direction_action, prefix, getContext().getString(R.string.hud_direction_down), formatActionBadge(b.directionalAction(5))));
+                mBtnPickSwipeLeft.setText(getContext().getString(R.string.hud_editor_direction_action, prefix, getContext().getString(R.string.hud_direction_left), formatActionBadge(b.directionalAction(2))));
+                mBtnPickSwipeRight.setText(getContext().getString(R.string.hud_editor_direction_action, prefix, getContext().getString(R.string.hud_direction_right), formatActionBadge(b.directionalAction(3))));
             }
 
             boolean isPointer = HudButton.WIDGET_TOUCHPAD.equals(b.widgetType);
@@ -1517,13 +1565,13 @@ public final class HudPropertyInspectorView extends LinearLayout {
     }
 
     private String formatActionBadge(HudAction a) {
-        if (a == null) return "None";
+        if (a == null) return getContext().getString(R.string.hud_none);
         switch (a.type) {
             case HudAction.TYPE_KEY:
             case HudAction.TYPE_MODIFIER:
-                return a.code > 0 ? labelForEvdev(getContext(), a.code) : "Unassigned";
+                return a.code > 0 ? labelForEvdev(getContext(), a.code) : getContext().getString(R.string.hud_unassigned);
             case HudAction.TYPE_COMBO:
-                if (a.comboKeys == null || a.comboKeys.isEmpty()) return "Empty Combo";
+                if (a.comboKeys == null || a.comboKeys.isEmpty()) return getContext().getString(R.string.hud_editor_empty_combo);
                 StringBuilder sb = new StringBuilder();
                 for (int i = 0; i < a.comboKeys.size(); i++) {
                     if (i > 0) sb.append(" + ");
@@ -1531,16 +1579,37 @@ public final class HudPropertyInspectorView extends LinearLayout {
                 }
                 return sb.toString();
             case HudAction.TYPE_TEXT:
-                return a.text != null && !a.text.isEmpty() ? a.text : "Text";
+                return a.text != null && !a.text.isEmpty() ? a.text : getContext().getString(R.string.hud_editor_text);
             case HudAction.TYPE_SYSTEM:
-                return "System: " + a.systemCommand;
+                return getContext().getString(R.string.hud_system_action, systemActionLabel(a.systemCommand));
             default:
-                return a.code > 0 ? labelForEvdev(getContext(), a.code) : "Configured";
+                return a.code > 0 ? labelForEvdev(getContext(), a.code) : getContext().getString(R.string.hud_editor_configured);
         }
     }
 
+    private String systemActionLabel(String command) {
+        if (command == null) return getContext().getString(R.string.hud_none);
+        int label;
+        switch (command) {
+            case "toggle_ime": label = R.string.hud_system_soft_keyboard; break;
+            case "toggle_vk": label = R.string.hud_system_virtual_keyboard; break;
+            case "toggle_hud_hidden": label = R.string.hud_system_toggle_hud_hidden; break;
+            case "open_settings": label = R.string.hud_system_settings; break;
+            case "mouse_left": label = R.string.hud_system_mouse_left; break;
+            case "mouse_right": label = R.string.hud_system_mouse_right; break;
+            case "mouse_middle": label = R.string.hud_system_mouse_middle; break;
+            case "mouse_scroll_up": label = R.string.hud_system_scroll_up; break;
+            case "mouse_scroll_down": label = R.string.hud_system_scroll_down; break;
+            case "switch_layout_1": label = R.string.hud_layout_1; break;
+            case "switch_layout_2": label = R.string.hud_layout_2; break;
+            case "switch_layout_3": label = R.string.hud_layout_3; break;
+            default: return command;
+        }
+        return getContext().getString(label);
+    }
+
     public static String labelForEvdev(Context context, int keycode) {
-        if (keycode <= 0) return "None";
+        if (keycode <= 0) return context.getString(R.string.hud_none);
         switch (keycode) {
             case 1: return "ESC";
             case 14: return "BKSP";

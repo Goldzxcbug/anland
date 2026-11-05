@@ -1,6 +1,7 @@
 package com.anland.consumer.hud;
 
 import android.content.Context;
+import com.anland.consumer.R;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
@@ -43,23 +44,23 @@ public final class HudCornerShapePickerView extends LinearLayout {
 
     private static final class ShapeDef {
         final int shape;
-        final String title;
+        final int title;
 
-        ShapeDef(int shape, String title) {
+        ShapeDef(int shape, int title) {
             this.shape = shape;
             this.title = title;
         }
     }
 
     private static final ShapeDef[] SHAPES = new ShapeDef[] {
-            new ShapeDef(HudButton.CORNER_TOP_LEFT, "Top-Left"),
-            new ShapeDef(HudButton.CORNER_TOP_RIGHT, "Top-Right"),
-            new ShapeDef(HudButton.CORNER_BOTTOM_LEFT, "Bottom-Left"),
-            new ShapeDef(HudButton.CORNER_BOTTOM_RIGHT, "Bottom-Right"),
-            new ShapeDef(HudButton.CORNER_LEFT_BOTH, "Left Both"),
-            new ShapeDef(HudButton.CORNER_RIGHT_BOTH, "Right Both"),
-            new ShapeDef(HudButton.CORNER_ALL, "All 4 Corners"),
-            new ShapeDef(HudButton.CORNER_NONE, "None (Sharp)")
+            new ShapeDef(HudButton.CORNER_TOP_LEFT, R.string.hud_editor_shape_top_left),
+            new ShapeDef(HudButton.CORNER_TOP_RIGHT, R.string.hud_editor_shape_top_right),
+            new ShapeDef(HudButton.CORNER_BOTTOM_LEFT, R.string.hud_editor_shape_bottom_left),
+            new ShapeDef(HudButton.CORNER_BOTTOM_RIGHT, R.string.hud_editor_shape_bottom_right),
+            new ShapeDef(HudButton.CORNER_LEFT_BOTH, R.string.hud_editor_shape_left),
+            new ShapeDef(HudButton.CORNER_RIGHT_BOTH, R.string.hud_editor_shape_right),
+            new ShapeDef(HudButton.CORNER_ALL, R.string.hud_editor_shape_all),
+            new ShapeDef(HudButton.CORNER_NONE, R.string.hud_editor_shape_none)
     };
 
     private GridLayout mGrid;
@@ -78,12 +79,12 @@ public final class HudCornerShapePickerView extends LinearLayout {
 
         mGrid = new GridLayout(getContext());
         mGrid.setColumnCount(4);
-        mGrid.setRowCount(2);
+        mGrid.setRowCount(GridLayout.UNDEFINED);
         mGrid.setAlignmentMode(GridLayout.ALIGN_BOUNDS);
 
         for (int i = 0; i < SHAPES.length; i++) {
             ShapeDef def = SHAPES[i];
-            ShapeCardView card = new ShapeCardView(getContext(), def.shape, def.title);
+            ShapeCardView card = new ShapeCardView(getContext(), def.shape, getContext().getString(def.title));
             final int shapeId = def.shape;
             card.setOnClickListener(v -> {
                 setSelectedShape(shapeId);

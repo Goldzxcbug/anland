@@ -183,7 +183,7 @@ public final class ComboBuilderView {
     }
 
     private static String slotLabel(Context context, int slot) {
-        return "Slot " + slot;
+        return context.getString(R.string.hud_combo_slot, slot);
     }
 
     private void commit() {

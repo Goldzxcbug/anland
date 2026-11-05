@@ -1,6 +1,7 @@
 package com.anland.consumer.hud;
 
 import android.graphics.Canvas;
+import com.anland.consumer.R;
 import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.RectF;
@@ -49,10 +50,10 @@ public final class HudVectorIcons {
             ICON_KEYBOARD, ICON_FULLSCREEN, ICON_MENU, ICON_SETTINGS
     };
 
-    public static final String[] ICON_LABELS = new String[]{
-            "Up", "Down", "Left", "Right",
-            "Mouse L", "Mouse R", "Copy", "Paste",
-            "Keyboard", "Fullscreen", "Menu", "Settings"
+    public static final int[] ICON_LABELS = new int[]{
+            R.string.hud_direction_up, R.string.hud_direction_down, R.string.hud_direction_left, R.string.hud_direction_right,
+            R.string.hud_editor_icon_mouse_l, R.string.hud_editor_icon_mouse_r, R.string.hud_editor_copy, R.string.hud_editor_icon_paste,
+            R.string.hud_editor_icon_keyboard, R.string.hud_editor_icon_fullscreen, R.string.hud_editor_icon_menu, R.string.hud_editor_icon_settings
     };
 
     /**

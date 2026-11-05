@@ -116,6 +116,13 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
     private FrameLayout mFloatingContainer;
     private LinearLayout mTopToolbar;
     private HudPropertyInspectorView mInspectorView;
+    private HudButton mInspectorSessionButton;
+    private HudButton mInspectorOriginalButton;
+    private HudLayout mInspectorSessionLayout;
+    private final java.util.List<HudButton> mInspectorDetachedChildren = new java.util.ArrayList<>();
+    private final java.util.List<HudButton> mInspectorMovedButtons = new java.util.ArrayList<>();
+    private final java.util.List<Integer> mInspectorMovedIndices = new java.util.ArrayList<>();
+    private final java.util.Set<String> mInspectorInitialFloatingIds = new java.util.HashSet<>();
 
     /* ---- Layout lifecycle bookkeeping -----------------------------------
      * A rebuild removes and re-adds every widget view. Doing that from inside
@@ -716,6 +723,7 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
             public void onGroupChildDetachRequested(HudButton group, HudButton child) {
                 if (group == null || child == null) return;
                 if (!group.children.remove(child)) return;
+                if (group == mInspectorSessionButton) mInspectorDetachedChildren.add(child);
                 // Drop it back on the canvas just below-right of the group so it
                 // does not end up hidden underneath its former container.
                 child.posXPercent = Math.min(0.95f, group.posXPercent + 0.08f);
@@ -754,6 +762,11 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
             public void onCloseRequested() {
                 selectButton(null, null);
             }
+
+            @Override
+            public void onCancelRequested() {
+                cancelInspectorChanges();
+            }
         });
         mInspectorView.setVisibility(GONE);
         addView(mInspectorView, new LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
@@ -780,11 +793,11 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
                 HudVectorIcons.ICON_ADD, Color.WHITE, true, this::showAddWidgetChooser);
 
         // SNAP Toggle button with corner indicator dot (same background as other buttons)
-        View btnSnap = addTool(bar, "SNAP", HudVectorIcons.ICON_SNAP, Color.WHITE, true, null);
+        View btnSnap = addTool(bar, getContext().getString(R.string.hud_editor_snap), HudVectorIcons.ICON_SNAP, Color.WHITE, true, null);
         btnSnap.setOnClickListener(v -> {
             mSnapEnabled = !mSnapEnabled;
             btnSnap.invalidate();
-            Toast.makeText(getContext(), mSnapEnabled ? "Magnet Snap ON" : "Magnet Snap OFF", Toast.LENGTH_SHORT).show();
+            Toast.makeText(getContext(), mSnapEnabled ? R.string.hud_editor_snap_on : R.string.hud_editor_snap_off, Toast.LENGTH_SHORT).show();
         });
 
         addTool(bar, getContext().getString(R.string.hud_overlay_toolbar_layout),
@@ -842,7 +855,7 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
 
         // Section 1: 3 Layout Buttons (LAYOUT 1 | LAYOUT 2 | LAYOUT 3)
         TextView slotTitle = new TextView(ctx);
-        slotTitle.setText("SELECT LAYOUT");
+        slotTitle.setText(R.string.hud_editor_select_layout);
         slotTitle.setTextColor(0xFFB3B3B3);
         slotTitle.setTextSize(10f);
         slotTitle.setTypeface(Typeface.DEFAULT_BOLD);
@@ -854,7 +867,7 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
         for (int s = 0; s < 3; s++) {
             final int slotIdx = s;
             Button sb = new Button(ctx, null, android.R.attr.buttonBarButtonStyle);
-            sb.setText("LAYOUT " + (s + 1));
+            sb.setText(ctx.getString(R.string.hud_editor_layout_number, s + 1));
             sb.setTextSize(11.5f);
             sb.setTypeface(Typeface.DEFAULT_BOLD);
             sb.setTextColor(Color.WHITE);
@@ -876,7 +889,7 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
 
         // Section 2: Preset Actions (Clean 3-item list without complex copy)
         TextView actionTitle = new TextView(ctx);
-        actionTitle.setText("PRESET ACTIONS");
+        actionTitle.setText(R.string.hud_editor_preset_actions);
         actionTitle.setTextColor(0xFFB3B3B3);
         actionTitle.setTextSize(10f);
         actionTitle.setTypeface(Typeface.DEFAULT_BOLD);
@@ -884,7 +897,7 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
         root.addView(actionTitle);
 
         // Load Productivity Preset
-        Button btnProd = createLayoutActionButton(ctx, "Productivity Layout (Office / Desktop)", 0xFF484848, Color.WHITE, () -> {
+        Button btnProd = createLayoutActionButton(ctx, getContext().getString(R.string.hud_editor_productivity_layout), 0xFF484848, Color.WHITE, () -> {
             dialog.dismiss();
             mHasUnsavedChanges = true;
             HudLayout dst = getActiveLayout();
@@ -900,7 +913,7 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
         root.addView(btnProd, prodLp);
 
         // User Portrait Hotkeys Layout
-        Button btnHotkeys = createLayoutActionButton(ctx, "Portrait Hotkeys Layout (Mobile Vertical)", 0xFF484848, Color.WHITE, () -> {
+        Button btnHotkeys = createLayoutActionButton(ctx, getContext().getString(R.string.hud_editor_portrait_layout), 0xFF484848, Color.WHITE, () -> {
             dialog.dismiss();
             mHasUnsavedChanges = true;
             HudLayout dst = getActiveLayout();
@@ -916,7 +929,7 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
         root.addView(btnHotkeys, hotLp);
 
         // Clear Layout (Destructive Red)
-        Button btnClear = createLayoutActionButton(ctx, "Clear Active Layout (Reset Canvas)", 0xFF484848, 0xFFF38BA8, () -> {
+        Button btnClear = createLayoutActionButton(ctx, getContext().getString(R.string.hud_editor_clear_layout), 0xFF484848, 0xFFF38BA8, () -> {
             dialog.dismiss();
             mHasUnsavedChanges = true;
             HudLayout dst = getActiveLayout();
@@ -969,7 +982,7 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
 
         // Header Title
         TextView title = new TextView(ctx);
-        title.setText("ADD NEW WIDGET");
+        title.setText(R.string.hud_overlay_add_widget_title);
         title.setTextColor(Color.WHITE);
         title.setTextSize(13.5f);
         title.setTypeface(Typeface.DEFAULT_BOLD);
@@ -996,13 +1009,13 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         // 1. KEY BUTTON
-        row1.addView(createWidgetChoiceCard(ctx, "Key Button", "Standard Key", () -> {
+        row1.addView(createWidgetChoiceCard(ctx, getContext().getString(R.string.hud_editor_widget_key), getContext().getString(R.string.hud_editor_widget_standard), () -> {
             dialog.dismiss();
             if (mIsEditMode) addWidgetOfKind(HudButton.WidgetKind.KEY);
         }), new LinearLayout.LayoutParams(0, dp(58), 1f));
 
         // 2. D-PAD
-        View dpadCard = createWidgetChoiceCard(ctx, "D-Pad", "Directional Pad", () -> {
+        View dpadCard = createWidgetChoiceCard(ctx, getContext().getString(R.string.hud_editor_widget_dpad), getContext().getString(R.string.hud_editor_widget_directional), () -> {
             dialog.dismiss();
             if (mIsEditMode) addWidgetOfKind(HudButton.WidgetKind.DPAD);
         });
@@ -1011,7 +1024,7 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
         row1.addView(dpadCard, dpadLp);
 
         // 3. TOUCHPAD
-        View touchpadCard = createWidgetChoiceCard(ctx, "Touchpad", "Mouse Trackpad", () -> {
+        View touchpadCard = createWidgetChoiceCard(ctx, getContext().getString(R.string.hud_editor_widget_touchpad), getContext().getString(R.string.hud_editor_widget_mouse_trackpad), () -> {
             dialog.dismiss();
             if (mIsEditMode) addWidgetOfKind(HudButton.WidgetKind.TOUCHPAD);
         });
@@ -1020,13 +1033,13 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
         row1.addView(touchpadCard, tpLp);
 
         // 4. SCROLLBAR / SLIDER
-        row2.addView(createWidgetChoiceCard(ctx, "Slider", "Scroll Bar", () -> {
+        row2.addView(createWidgetChoiceCard(ctx, getContext().getString(R.string.hud_editor_widget_slider), getContext().getString(R.string.hud_editor_widget_scrollbar), () -> {
             dialog.dismiss();
             if (mIsEditMode) addWidgetOfKind(HudButton.WidgetKind.SCROLLBAR);
         }), new LinearLayout.LayoutParams(0, dp(58), 1f));
 
         // 5. SUPER GESTURE
-        View gestureCard = createWidgetChoiceCard(ctx, "Gesture", "4-Way Swipe", () -> {
+        View gestureCard = createWidgetChoiceCard(ctx, getContext().getString(R.string.hud_editor_widget_gesture), getContext().getString(R.string.hud_editor_widget_swipe), () -> {
             dialog.dismiss();
             if (mIsEditMode) addWidgetOfKind(HudButton.WidgetKind.SUPER_GESTURE);
         });
@@ -1035,7 +1048,7 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
         row2.addView(gestureCard, gestLp);
 
         // 6. GROUP CONTAINER
-        View groupCard = createWidgetChoiceCard(ctx, "Group", "Key Container", () -> {
+        View groupCard = createWidgetChoiceCard(ctx, getContext().getString(R.string.hud_editor_widget_group), getContext().getString(R.string.hud_editor_widget_container), () -> {
             dialog.dismiss();
             if (mIsEditMode) addWidgetOfKind(HudButton.WidgetKind.GROUP);
         });
@@ -1312,7 +1325,7 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
                 HudVectorIcons.drawIcon(canvas, activeIcon, getWidth() * 0.5f, getHeight() * 0.5f, iconSize, mPaint);
 
                 // Corner indicator dot for SNAP button
-                if ("SNAP".equals(label)) {
+                if (HudVectorIcons.ICON_SNAP.equals(iconId)) {
                     mPaint.setStyle(Paint.Style.FILL);
                     mPaint.setColor(mSnapEnabled ? 0xFFA39CB8 : 0x44FFFFFF);
                     canvas.drawCircle(getWidth() - 6f * density, 6f * density, 2.5f * density, mPaint);
@@ -1529,14 +1542,13 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
                         return true;
                     }
 
-                    // Tap in empty canvas space (not intercepted by any widget):
-                    // Deselect the active button and close the custom inspector!
+                    // Empty canvas taps deselect only when the inspector is closed.
                     float upDx = event.getRawX() - mTouchDownRawX;
                     float upDy = event.getRawY() - mTouchDownRawY;
                     int touchSlop = ViewConfiguration.get(getContext()).getScaledTouchSlop();
-                    if (upDx * upDx + upDy * upDy <= touchSlop * touchSlop) {
+                    if (upDx * upDx + upDy * upDy <= touchSlop * touchSlop
+                            && (mInspectorView == null || mInspectorView.getVisibility() != VISIBLE)) {
                         selectButton(null, null);
-                        if (mInspectorView != null) mInspectorView.setVisibility(GONE);
                         return true;
                     }
                     break;
@@ -1953,6 +1965,17 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
         if (!HudButton.WIDGET_GROUP.equals(group.widgetType)) return;
         if (!HudButton.WIDGET_STANDARD.equals(widget.widgetType)) return;
         HudLayout layout = getActiveLayout();
+        if (group == mInspectorSessionButton && layout == mInspectorSessionLayout
+                && mInspectorInitialFloatingIds.remove(widget.id)) {
+            int index = layout.floatingButtons.indexOf(widget);
+            if (index >= 0) {
+                HudButton original = copyForInspector(widget);
+                if (original != null) {
+                    mInspectorMovedButtons.add(original);
+                    mInspectorMovedIndices.add(index);
+                }
+            }
+        }
         if (!layout.floatingButtons.remove(widget)) return;
         group.children.add(widget);
         ensureGroupFits(group);
@@ -2009,6 +2032,10 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
     }
 
     private void selectButton(HudButton b, View v) {
+        if (mInspectorView != null && mInspectorView.getVisibility() == VISIBLE
+                && b != mInspectorSessionButton) {
+            beginInspectorSession(b);
+        }
         this.mSelectedButton = b;
         this.mSelectedView = v;
         // Do not auto popup inspector on select to avoid obscuring controls!
@@ -2020,6 +2047,62 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
             }
         }
         invalidate();
+    }
+
+    private static HudButton copyForInspector(HudButton button) {
+        if (button == null) return null;
+        try {
+            return HudButton.fromJSON(button.toJSON());
+        } catch (org.json.JSONException e) {
+            return null;
+        }
+    }
+
+    private void beginInspectorSession(HudButton button) {
+        mInspectorSessionButton = button;
+        mInspectorOriginalButton = copyForInspector(button);
+        mInspectorSessionLayout = button != null ? getActiveLayout() : null;
+        mInspectorDetachedChildren.clear();
+        mInspectorMovedButtons.clear();
+        mInspectorMovedIndices.clear();
+        mInspectorInitialFloatingIds.clear();
+        if (mInspectorSessionLayout != null) {
+            for (HudButton floating : mInspectorSessionLayout.floatingButtons) {
+                mInspectorInitialFloatingIds.add(floating.id);
+            }
+        }
+    }
+
+    private void cancelInspectorChanges() {
+        HudLayout layout = mInspectorSessionLayout;
+        if (layout != null && mInspectorOriginalButton != null) {
+            int index = layout.floatingButtons.indexOf(mInspectorSessionButton);
+            if (index >= 0) {
+                boolean changed = !mInspectorDetachedChildren.isEmpty() || !mInspectorMovedButtons.isEmpty();
+                try {
+                    changed |= !mInspectorSessionButton.toJSON().toString()
+                            .equals(mInspectorOriginalButton.toJSON().toString());
+                } catch (org.json.JSONException e) {
+                    changed = true;
+                }
+                layout.floatingButtons.set(index, mInspectorOriginalButton);
+                layout.floatingButtons.removeAll(mInspectorDetachedChildren);
+                for (int i = mInspectorMovedButtons.size() - 1; i >= 0; i--) {
+                    HudButton original = mInspectorMovedButtons.get(i);
+                    for (int j = layout.floatingButtons.size() - 1; j >= 0; j--) {
+                        if (original.id.equals(layout.floatingButtons.get(j).id)) {
+                            layout.floatingButtons.remove(j);
+                        }
+                    }
+                    int originalIndex = Math.min(mInspectorMovedIndices.get(i), layout.floatingButtons.size());
+                    layout.floatingButtons.add(originalIndex, original);
+                }
+                if (changed) mHasUnsavedChanges = true;
+            }
+        }
+        selectButton(null, null);
+        beginInspectorSession(null);
+        rebuildActiveLayout();
     }
 
     /**
@@ -2072,6 +2155,7 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
                 // Click "Custom"
                 performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY);
                 if (mInspectorView != null) {
+                    if (mInspectorSessionButton != mSelectedButton) beginInspectorSession(mSelectedButton);
                     mInspectorView.bindButton(mSelectedButton);
                     mInspectorView.setVisibility(VISIBLE);
                     placeInspector(mSelectedButton);
@@ -2087,7 +2171,7 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
                 mHasUnsavedChanges = true;
                 rebuildActiveLayout();
                 selectButton(duplicate, null);
-                Toast.makeText(getContext(), "Duplicated button", Toast.LENGTH_SHORT).show();
+                Toast.makeText(getContext(), R.string.hud_editor_duplicated, Toast.LENGTH_SHORT).show();
                 return true;
             } else if (x >= p3 && x <= p3 + pillW) {
                 // Click "Delete"
@@ -2096,7 +2180,7 @@ public final class HudOverlayView extends FrameLayout implements IModifierProvid
                 mHasUnsavedChanges = true;
                 selectButton(null, null);
                 rebuildActiveLayout();
-                Toast.makeText(getContext(), "Deleted button", Toast.LENGTH_SHORT).show();
+                Toast.makeText(getContext(), R.string.hud_editor_deleted, Toast.LENGTH_SHORT).show();
                 return true;
             }
         }
